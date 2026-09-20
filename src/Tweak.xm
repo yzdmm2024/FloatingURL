@@ -36,7 +36,6 @@ static NSString * const kFUEntryChar   = @"char";
 static NSString * const kFUEntryLetter = @"letter";
 static NSString * const kFUEntryIcon   = @"icon";
 static NSString * const kFUSync        = @"sync";
-static NSString * const kFULimitApps   = @"limitApps";
 static NSString * const kFUEnabledApps = @"enabledApps";
 
 static const NSInteger kFUMaxEntries = 6;
@@ -168,7 +167,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 @interface FUEntryEditorViewController : UIViewController <UITextFieldDelegate>
 @property (nonatomic, assign) NSInteger index;        // -1 = 新增
 @property (nonatomic, copy)   void (^onSaved)(void);
-@property (nonatomic, strong) UITextField *urlField, *charField, *letterField;
+@property (nonatomic, strong) UITextField *urlField, *labelField;
 @property (nonatomic, strong) UIButton    *iconButton;
 @property (nonatomic, strong) NSData      *iconData;
 @property (nonatomic, copy)   void (^onDismiss)(void);   // 关闭后把 key 还给 App
@@ -203,20 +202,41 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
         y += h + 12; [scroll addSubview:tf]; return tf;
     };
     _urlField    = (UITextField *)mkField(@"网址 / scheme（如 https://a.com 或 weixin://）", nil, UIKeyboardTypeURL);
-    _charField   = (UITextField *)mkField(@"汉字（1个，如 微）", nil, UIKeyboardTypeDefault);
-    _letterField = (UITextField *)mkField(@"字母（1个，如 W）", nil, UIKeyboardTypeDefault);
 
+    // 文字（汉字或字母，1 个字符）—— 合并为单框
+    _labelField = [[UITextField alloc] initWithFrame:CGRectMake(pad, y, w, 40)];
+    _labelField.placeholder = @"汉字或字母（1 个字符，如 微 / W）";
+    _labelField.borderStyle = UITextBorderStyleRoundedRect;
+    _labelField.font = [UIFont systemFontOfSize:14];
+    _labelField.textAlignment = NSTextAlignmentCenter;
+    _labelField.autocorrectionType = UITextAutocorrectionTypeNo;
+    _labelField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    _labelField.delegate = self;
+    y += 40 + 16; [scroll addSubview:_labelField];
+
+    // 图标：大正方形预览
+    CGFloat sq = 160;
     _iconButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    _iconButton.frame = CGRectMake(pad, y, w, 56);
-    _iconButton.layer.cornerRadius = 10; _iconButton.layer.borderWidth = 1;
+    _iconButton.frame = CGRectMake((w - sq)/2.0 + pad, y, sq, sq);
+    _iconButton.layer.cornerRadius = 14; _iconButton.layer.borderWidth = 1.5;
     _iconButton.layer.borderColor = [UIColor separatorColor].CGColor;
-    [_iconButton setTitle:@"选择图标（从相册，方形裁剪）" forState:UIControlStateNormal];
+    _iconButton.clipsToBounds = YES;
+    _iconButton.titleLabel.textAlignment = NSTextAlignmentCenter;
+    _iconButton.titleLabel.numberOfLines = 0; _iconButton.titleLabel.font = [UIFont systemFontOfSize:13];
+    [_iconButton setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal];
+    [_iconButton setTitle:@"选择图标\n（从相册，方形裁剪）" forState:UIControlStateNormal];
     [_iconButton addTarget:self action:@selector(pickIcon) forControlEvents:UIControlEventTouchUpInside];
-    [scroll addSubview:_iconButton]; y += 56 + 12;
+    [scroll addSubview:_iconButton]; y += sq + 8;
+
+    // 提示
+    UILabel *tip = [[UILabel alloc] initWithFrame:CGRectMake(pad, y, w, 44)];
+    tip.numberOfLines = 0; tip.font = [UIFont systemFontOfSize:12]; tip.textColor = [UIColor tertiaryLabelColor];
+    tip.text = @"提示：图标会自动压缩成 120×120 正方形；图标与文字二选一，不填图标则显示上方文字。";
+    [scroll addSubview:tip]; y += 44 + 12;
 
     UIButton *clear = [UIButton buttonWithType:UIButtonTypeSystem];
     clear.frame = CGRectMake(pad, y, w, 40);
-    [clear setTitle:@"清除图标（用汉字/字母显示）" forState:UIControlStateNormal];
+    [clear setTitle:@"清除图标（用文字显示）" forState:UIControlStateNormal];
     [clear addTarget:self action:@selector(clearIcon) forControlEvents:UIControlEventTouchUpInside];
     [scroll addSubview:clear]; y += 40 + 24;
     scroll.contentSize = CGSizeMake(self.view.bounds.size.width, y);
@@ -231,15 +251,15 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     if ([arr isKindOfClass:[NSArray class]] && _index < (NSInteger)arr.count) {
         NSDictionary *e = arr[_index];
         _urlField.text    = e[kFUEntryURL] ?: @"";
-        _charField.text   = e[kFUEntryChar] ?: @"";
-        _letterField.text = e[kFUEntryLetter] ?: @"";
+        NSString *ch = e[kFUEntryChar] ?: @""; NSString *lt = e[kFUEntryLetter] ?: @"";
+        _labelField.text  = ch.length ? ch : lt;
         _iconData        = e[kFUEntryIcon];
         [self refreshIcon:_iconData];
     }
 }
 - (BOOL)textField:(UITextField *)tf shouldChangeCharactersInRange:(NSRange)r
                                               replacementString:(NSString *)s {
-    if (tf == _charField || tf == _letterField) {
+    if (tf == _labelField) {
         NSString *next = [tf.text stringByReplacingCharactersInRange:r withString:s];
         return next.length <= 1;
     }
@@ -254,7 +274,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
         [_iconButton setTitle:nil forState:UIControlStateNormal];
     } else {
         [_iconButton setImage:nil forState:UIControlStateNormal];
-        [_iconButton setTitle:@"选择图标（从相册，方形裁剪）" forState:UIControlStateNormal];
+        [_iconButton setTitle:@"选择图标\n（从相册，方形裁剪）" forState:UIControlStateNormal];
     }
 }
 - (void)pickIcon {
@@ -293,8 +313,8 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 - (void)save {
     NSMutableDictionary *e = [NSMutableDictionary dictionary];
     e[kFUEntryURL] = (_urlField.text.length ? _urlField.text : @"");
-    if (_charField.text.length)   e[kFUEntryChar]   = _charField.text;
-    if (_letterField.text.length) e[kFUEntryLetter] = _letterField.text;
+    NSString *lab = _labelField.text ?: @"";
+    if (lab.length) e[kFUEntryChar] = [lab substringToIndex:1];
     if (_iconData) e[kFUEntryIcon] = _iconData;
 
     CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUURLs,
@@ -323,6 +343,9 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 - (void)setupWhenHostReady;
 - (void)applyVisibility;
 - (void)setInteractive:(BOOL)on;   // 面板/扇形/编辑器打开时临时当 key
+@property (nonatomic, strong) UIView      *schemeBox;     // 非网页入口的简单输入框容器
+@property (nonatomic, strong) UITextField *schemeField;
+@property (nonatomic, strong) UIButton    *schemeOpenBtn;
 @end
 
 @implementation FUFloatingManager {
@@ -406,6 +429,9 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)reloadPrefs {
+    // 关键：读之前强制把本进程对偏好域的缓存与磁盘同步，否则读到的仍是进程启动时的旧缓存值，
+    // 导致「关开关没用 / 设了条目扇形不弹 / 作用 App 限制不生效」等一堆症状。
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
     Boolean valid;
     BOOL en = CFPreferencesGetAppBooleanValue(CFSTR("enabled"), (__bridge CFStringRef)kFUSuite, &valid);
     _enabled = valid ? en : YES;
@@ -608,6 +634,24 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
                                 UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
     [_webView addSubview:_spinner];
 
+    // 非网页入口（scheme 类）的简单输入框：仅此模式显示，不显示网页工具条/网页视图。
+    _schemeBox = [[UIView alloc] initWithFrame:CGRectZero];
+    _schemeBox.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    _schemeBox.layer.cornerRadius = 12; _schemeBox.hidden = YES;
+    [_panel addSubview:_schemeBox];
+    _schemeField = [[UITextField alloc] initWithFrame:CGRectZero];
+    _schemeField.borderStyle = UITextBorderStyleRoundedRect; _schemeField.font = [UIFont systemFontOfSize:13];
+    _schemeField.textAlignment = NSTextAlignmentCenter; _schemeField.keyboardType = UIKeyboardTypeURL;
+    _schemeField.autocorrectionType = UITextAutocorrectionTypeNo; _schemeField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    _schemeField.clearButtonMode = UITextFieldViewModeWhileEditing; _schemeField.returnKeyType = UIReturnKeyGo;
+    [_schemeBox addSubview:_schemeField];
+    _schemeOpenBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    _schemeOpenBtn.layer.cornerRadius = 10; _schemeOpenBtn.backgroundColor = [UIColor systemBlueColor];
+    [_schemeOpenBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [_schemeOpenBtn setTitle:@"打开" forState:UIControlStateNormal];
+    [_schemeOpenBtn addTarget:self action:@selector(openScheme) forControlEvents:UIControlEventTouchUpInside];
+    [_schemeBox addSubview:_schemeOpenBtn];
+
     [_panel addGestureRecognizer:[[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(pinchPanel:)]];
     [_overlay addSubview:_panel];
     [self layoutPanel];
@@ -626,6 +670,12 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     _urlField.frame = CGRectMake(52, 6, b.size.width - 104, 28);
     _reloadBtn.frame = CGRectMake(b.size.width - 48, 0, 44, 40);
     _spinner.center = CGPointMake(webF.size.width/2.0, webF.size.height/2.0);
+    if (_schemeBox) {
+        _schemeBox.frame = CGRectMake(12, 12, b.size.width - 24, b.size.height - 24);
+        CGFloat pad = 16; CGRect ib = _schemeBox.bounds;
+        _schemeField.frame = CGRectMake(pad, 24, ib.size.width - pad*2, 36);
+        _schemeOpenBtn.frame = CGRectMake(pad, 76, ib.size.width - pad*2, 44);
+    }
     [_historyTable setNeedsLayout]; [self applyWebZoom];
 }
 - (void)applyWebZoom {
@@ -643,7 +693,8 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 - (void)ballTapped {
     if (_expanded) { [self collapse]; return; }
     if (_fanOpen)  { [self closeFan]; return; }
-    if (_entries.count <= 1) { [self expand]; return; }
+    // 没有配置任何入口 → 直接展开默认网页；有入口 → 弹出扇形（几个入口排几个）。
+    if (_entries.count == 0) { [self expand]; return; }
     [self openFan];
 }
 - (void)panBall:(UIPanGestureRecognizer *)g {
@@ -756,8 +807,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     NSString *u = entry[kFUEntryURL]; if (!u.length) return;
     NSString *norm = [self normalizeURL:u];
     if ([self isWebScheme:norm]) { _url = norm; [self expand]; }
-    else { UIApplication *app = UIApplication.sharedApplication; NSURL *nu = [NSURL URLWithString:norm];
-        if (app && nu) [app openURL:nu options:@{} completionHandler:nil]; }
+    else { [self showSchemeBox:norm]; }   // 非网页：只弹输入框 + 打开按钮，不加载网页
 }
 - (void)fanItemLongPressed:(UILongPressGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan) return;
@@ -800,11 +850,37 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     else _panel.frame = CGRectMake((s.size.width-ww)/2.0, (s.size.height-hh)/2.0, ww, hh);
     _urlField.text = _url; [self layoutPanel]; [self loadURL];
     [_overlay bringSubviewToFront:_panel]; _panel.hidden = NO; _historyTable.hidden = YES;
+    _schemeBox.hidden = YES; _bar.hidden = NO; _webView.hidden = NO;   // 网页模式：显示工具条与网页
     _ball.hidden = YES; _expanded = YES; [self setInteractive:YES];
     [self writeSync];
 }
+- (void)showSchemeBox:(NSString *)u {
+    if (!_didSetup) { dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3*NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ [self showSchemeBox:u]; }); return; }
+    CGRect s = _overlay.bounds;
+    CGFloat ww = MIN(_winW, s.size.width-16), hh = MIN(_winH, s.size.height-24);
+    if (_hasLastFrame) { CGRect f = _lastPanelFrame; f.size.width = ww; f.size.height = hh;
+        f.origin.x = MAX(0, MIN(s.size.width - f.size.width, f.origin.x));
+        f.origin.y = MAX(0, MIN(s.size.height - f.size.height, f.origin.y)); _panel.frame = f; }
+    else _panel.frame = CGRectMake((s.size.width-ww)/2.0, (s.size.height-hh)/2.0, ww, hh);
+    _schemeField.text = u; _url = u;
+    [_overlay bringSubviewToFront:_panel]; _panel.hidden = NO;
+    // 非网页模式：只显示输入框 + 打开按钮，隐藏网页工具条/网页视图/历史。
+    _bar.hidden = YES; _webView.hidden = YES; _historyTable.hidden = YES; _schemeBox.hidden = NO;
+    [self layoutPanel];
+    _ball.hidden = YES; _expanded = YES; [self setInteractive:YES]; [self writeSync];
+}
+- (void)openScheme {
+    NSString *u = _schemeField.text; if (!u.length) return;
+    NSString *norm = [self normalizeURL:u];
+    if ([self isWebScheme:norm]) { _url = norm; [self expand]; return; }
+    UIApplication *app = UIApplication.sharedApplication; NSURL *nu = [NSURL URLWithString:norm];
+    if (app && nu) [app openURL:nu options:@{} completionHandler:nil];
+    [self collapse];
+}
 - (void)collapse {
-    [_urlField resignFirstResponder]; _historyTable.hidden = YES; _panel.hidden = YES;
+    [_urlField resignFirstResponder]; [_schemeField resignFirstResponder];
+    _historyTable.hidden = YES; _panel.hidden = YES;
     _ball.hidden = !_enabled; _expanded = NO; [self setInteractive:NO]; [self writeSync];
 }
 - (void)reload { [self loadURL]; }
@@ -826,18 +902,17 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 }
 - (void)applyVisibility {
     if (!_didSetup) return;
-    // 「作用 App」网关：桌面(SpringBoard)始终显示；普通 App 受 limitApps/enabledApps 限制。
-    BOOL allowed = YES;
-    if (_hostBid && ![_hostBid isEqualToString:@"com.apple.springboard"]) {
-        Boolean valid;
-        BOOL limit = CFPreferencesGetAppBooleanValue(CFSTR("limitApps"), (__bridge CFStringRef)kFUSuite, &valid);
-        if (valid && limit) {
-            CFPropertyListRef arr = CFPreferencesCopyAppValue(CFSTR("enabledApps"), (__bridge CFStringRef)kFUSuite);
-            NSArray *list = nil; if (arr) list = (__bridge_transfer NSArray *)arr;
-            allowed = ([list isKindOfClass:[NSArray class]] && [list containsObject:_hostBid]);
-        }
+    // 防御：直接读之前也刷新一次进程内偏好缓存，确保拿到设置里最新改的值。
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
+    // 黑名单语义：enabledApps 里列出的 App 在「该 App 内」隐藏悬浮窗；列表为空 = 全部显示。
+    // 桌面(SpringBoard) 同样遵循黑名单（用户不勾它就不会隐藏）。全局 enabled 关闭则全部隐藏。
+    BOOL hidden = NO;
+    if (_hostBid.length) {
+        CFPropertyListRef arr = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUEnabledApps, (__bridge CFStringRef)kFUSuite);
+        NSArray *list = nil; if (arr) list = (__bridge_transfer NSArray *)arr;
+        if ([list isKindOfClass:[NSArray class]] && [list containsObject:_hostBid]) hidden = YES;
     }
-    if (!_enabled || !allowed) { _ball.hidden = YES; _panel.hidden = YES; if (_fanOpen) [self closeFan]; return; }
+    if (!_enabled || hidden) { _ball.hidden = YES; _panel.hidden = YES; if (_fanOpen) [self closeFan]; return; }
     if (!_expanded && !_fanOpen) { _ball.hidden = NO; [_overlay bringSubviewToFront:_ball]; [self setInteractive:NO]; }
 }
 

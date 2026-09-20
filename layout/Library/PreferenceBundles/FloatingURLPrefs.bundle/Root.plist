@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>title</key>
-	<string>悬浮URL 1.2.6</string>
+	<string>悬浮URL 1.2.7</string>
 	<key>items</key>
 	<array>
 		<dict>
@@ -23,6 +23,8 @@
 			<string>enabled</string>
 			<key>label</key>
 			<string>启用悬浮窗</string>
+			<key>PostNotification</key>
+			<string>com.yzdmm.floatingurl/settingsChanged</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -50,7 +52,7 @@
 			<key>label</key>
 			<string>快捷URI（扇形菜单）</string>
 			<key>footerText</key>
-			<string>点开悬浮球展开扇形菜单，最多 6 个入口。每个入口可自定义图标（从相册选，自动压缩）、1 个汉字、1 个字母，以及网址/scheme。</string>
+			<string>点开悬浮球会按扇形排列展示这些入口（几个入口排几个，最多 6 个）。网页类入口（http/https）点开是浏览器面板；非网页类（如 weixin://、tel:）点开只弹一个输入框+打开按钮。每个入口可自定义图标（从相册选，自动压缩）、1 个字符（汉字或字母），以及网址/scheme。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -66,7 +68,7 @@
 			<key>label</key>
 			<string>更多</string>
 			<key>footerText</key>
-			<string>说明书/玩法：各种 URL 与 scheme 示例，长按即可复制。作用 App：可限制仅在某些 App 显示悬浮窗（桌面始终显示）。</string>
+			<string>说明书/玩法：各种 URL 与 scheme 示例，长按即可复制。隐藏悬浮窗的 App（黑名单）：默认所有 App 都显示悬浮窗，勾选某个 App = 在该 App 内隐藏球（桌面同样遵循，不勾就不隐藏）。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -80,21 +82,9 @@
 			<key>cell</key>
 			<string>PSButtonCell</string>
 			<key>label</key>
-			<string>作用 App 列表</string>
+			<string>隐藏悬浮窗的 App（黑名单）</string>
 			<key>action</key>
 			<string>showAppList</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>default</key>
-			<false/>
-			<key>defaults</key>
-			<string>com.yzdmm.floatingurl</string>
-			<key>key</key>
-			<string>limitApps</string>
-			<key>label</key>
-			<string>仅限指定 App 显示</string>
 		</dict>
 		<dict>
 			<key>cell</key>

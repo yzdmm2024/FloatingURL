@@ -73,7 +73,7 @@ static const NSInteger kFUMaxEntries   = 6;
 @interface FUUrlEditController : UIViewController <PHPickerViewControllerDelegate, UITextFieldDelegate>
 @property (nonatomic, strong) NSMutableArray *entries;
 @property (nonatomic, assign) NSInteger index;
-@property (nonatomic, strong) UITextField *urlField, *charField, *letterField;
+@property (nonatomic, strong) UITextField *urlField, *labelField;
 @property (nonatomic, strong) UIButton    *iconButton;
 @property (nonatomic, strong) NSData      *iconData;
 @end
@@ -97,15 +97,38 @@ static const NSInteger kFUMaxEntries   = 6;
         tf.delegate = self; y += h + 12; [scroll addSubview:tf]; return tf;
     };
     _urlField    = (UITextField *)mkField(@"网址 / scheme（如 https://a.com 或 weixin://）", nil, UIKeyboardTypeURL);
-    _charField   = (UITextField *)mkField(@"汉字（1个，如 微）", nil, UIKeyboardTypeDefault);
-    _letterField = (UITextField *)mkField(@"字母（1个，如 W）", nil, UIKeyboardTypeDefault);
-    _iconButton = [UIButton buttonWithType:UIButtonTypeSystem]; _iconButton.frame = CGRectMake(pad, y, w, 56);
-    _iconButton.layer.cornerRadius = 10; _iconButton.layer.borderWidth = 1; _iconButton.layer.borderColor = [UIColor separatorColor].CGColor;
-    [_iconButton setTitle:@"选择图标（从相册，方形裁剪）" forState:UIControlStateNormal];
+
+    // 文字（汉字或字母，1 个字符）—— 合并为单框
+    _labelField = [[UITextField alloc] initWithFrame:CGRectMake(pad, y, w, 40)];
+    _labelField.placeholder = @"汉字或字母（1 个字符，如 微 / W）";
+    _labelField.borderStyle = UITextBorderStyleRoundedRect;
+    _labelField.font = [UIFont systemFontOfSize:14];
+    _labelField.textAlignment = NSTextAlignmentCenter;
+    _labelField.autocorrectionType = UITextAutocorrectionTypeNo;
+    _labelField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    _labelField.delegate = self;
+    y += 40 + 16; [scroll addSubview:_labelField];
+
+    // 图标：大正方形预览
+    CGFloat sq = 160;
+    _iconButton = [UIButton buttonWithType:UIButtonTypeSystem]; _iconButton.frame = CGRectMake((w - sq)/2.0 + pad, y, sq, sq);
+    _iconButton.layer.cornerRadius = 14; _iconButton.layer.borderWidth = 1.5; _iconButton.layer.borderColor = [UIColor separatorColor].CGColor;
+    _iconButton.clipsToBounds = YES;
+    _iconButton.titleLabel.textAlignment = NSTextAlignmentCenter;
+    _iconButton.titleLabel.numberOfLines = 0; _iconButton.titleLabel.font = [UIFont systemFontOfSize:13];
+    [_iconButton setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal];
+    [_iconButton setTitle:@"选择图标\n（从相册，方形裁剪）" forState:UIControlStateNormal];
     [_iconButton addTarget:self action:@selector(pickIcon) forControlEvents:UIControlEventTouchUpInside];
-    [scroll addSubview:_iconButton]; y += 56 + 12;
+    [scroll addSubview:_iconButton]; y += sq + 8;
+
+    // 提示
+    UILabel *tip = [[UILabel alloc] initWithFrame:CGRectMake(pad, y, w, 44)];
+    tip.numberOfLines = 0; tip.font = [UIFont systemFontOfSize:12]; tip.textColor = [UIColor tertiaryLabelColor];
+    tip.text = @"提示：图标会自动压缩成 120×120 正方形；图标与文字二选一，不填图标则显示上方文字。";
+    [scroll addSubview:tip]; y += 44 + 12;
+
     UIButton *clear = [UIButton buttonWithType:UIButtonTypeSystem]; clear.frame = CGRectMake(pad, y, w, 40);
-    [clear setTitle:@"清除图标（用汉字/字母显示）" forState:UIControlStateNormal];
+    [clear setTitle:@"清除图标（用文字显示）" forState:UIControlStateNormal];
     [clear addTarget:self action:@selector(clearIcon) forControlEvents:UIControlEventTouchUpInside];
     [scroll addSubview:clear]; y += 40 + 24; scroll.contentSize = CGSizeMake(self.view.bounds.size.width, y);
     if (_index >= 0) [self prefill];
@@ -115,12 +138,13 @@ static const NSInteger kFUMaxEntries   = 6;
     if (!r) return; NSArray *arr = (__bridge_transfer NSArray *)r;
     if ([arr isKindOfClass:[NSArray class]] && _index < (NSInteger)arr.count) {
         NSDictionary *e = arr[_index];
-        _urlField.text = e[kFUEntryURL] ?: @""; _charField.text = e[kFUEntryChar] ?: @"";
-        _letterField.text = e[kFUEntryLetter] ?: @""; _iconData = e[kFUEntryIcon]; [self refreshIcon:_iconData];
+        _urlField.text = e[kFUEntryURL] ?: @""; NSString *ch = e[kFUEntryChar] ?: @""; NSString *lt = e[kFUEntryLetter] ?: @"";
+        _labelField.text = ch.length ? ch : lt;
+        _iconData = e[kFUEntryIcon]; [self refreshIcon:_iconData];
     }
 }
 - (BOOL)textField:(UITextField *)tf shouldChangeCharactersInRange:(NSRange)r replacementString:(NSString *)s {
-    if (tf == _charField || tf == _letterField) {
+    if (tf == _labelField) {
         NSString *next = [tf.text stringByReplacingCharactersInRange:r withString:s]; return next.length <= 1;
     } return YES;
 }
@@ -129,7 +153,7 @@ static const NSInteger kFUMaxEntries   = 6;
     if (img) { [_iconButton setImage:[img imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal] forState:UIControlStateNormal];
         _iconButton.imageView.contentMode = UIViewContentModeScaleAspectFill; [_iconButton setTitle:nil forState:UIControlStateNormal]; }
     else { [_iconButton setImage:nil forState:UIControlStateNormal];
-        [_iconButton setTitle:@"选择图标（从相册，方形裁剪）" forState:UIControlStateNormal]; }
+        [_iconButton setTitle:@"选择图标\n（从相册，方形裁剪）" forState:UIControlStateNormal]; }
 }
 - (void)pickIcon {
     PHPickerConfiguration *cfg = [[PHPickerConfiguration alloc] init];
@@ -153,8 +177,8 @@ static const NSInteger kFUMaxEntries   = 6;
 - (void)save {
     NSMutableDictionary *e = [NSMutableDictionary dictionary];
     e[kFUEntryURL] = (_urlField.text.length ? _urlField.text : @"");
-    if (_charField.text.length)   e[kFUEntryChar]   = _charField.text;
-    if (_letterField.text.length) e[kFUEntryLetter] = _letterField.text;
+    NSString *lab = _labelField.text ?: @"";
+    if (lab.length) e[kFUEntryChar] = [lab substringToIndex:1];
     if (_iconData) e[kFUEntryIcon] = _iconData;
     CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUURLs, (__bridge CFStringRef)kFUSuite);
     NSMutableArray *arr = nil; if (r) { NSArray *a = (__bridge_transfer NSArray *)r; arr = [a mutableCopy]; }
@@ -280,14 +304,15 @@ static const NSInteger kFUMaxEntries   = 6;
 }
 @end
 
-#pragma mark - 作用 App 列表（搜索 + 全选一行；图标 + 名字）
+#pragma mark - 隐藏悬浮窗的 App（黑名单：勾选 = 在该 App 内隐藏球）
 @interface FUAppListController : UIViewController <UITableViewDelegate, UITableViewDataSource,
                                                     UISearchBarDelegate>
 @property (nonatomic, strong) UITableView *tv;
+@property (nonatomic, strong) UISearchBar *search;
+@property (nonatomic, strong) UILabel     *countLabel;
 @property (nonatomic, strong) NSMutableArray *allApps;     // {bid, name, icon}
 @property (nonatomic, strong) NSMutableArray *filtered;
-@property (nonatomic, strong) NSMutableArray *selected;    // bundle ids
-@property (nonatomic, strong) UISearchBar *search;
+@property (nonatomic, strong) NSMutableArray *selected;    // bundle ids（黑名单：这些 App 内隐藏球）
 @end
 @implementation FUAppListController
 - (void)loadApps {
@@ -322,31 +347,39 @@ static const NSInteger kFUMaxEntries   = 6;
         for (NSDictionary *d in _allApps) if ([[d[@"name"] lowercaseString] containsString:l] ||
                                              [[d[@"bid"] lowercaseString] containsString:l]) [_filtered addObject:d];
     } else _filtered = [_allApps mutableCopy];
-    [_tv reloadData];
+    [self updateCount]; [_tv reloadData];
+}
+- (void)updateCount {
+    if (_countLabel) _countLabel.text = [NSString stringWithFormat:@"已勾选 %lu 个（这些 App 内不显示球）", (unsigned long)_selected.count];
 }
 - (void)viewDidLoad {
-    [super viewDidLoad]; self.title = @"作用 App";
-    // 顶部：搜索 + 全选 一行（用 Auto Layout + 安全区，避免 viewDidLoad 时 bounds 未就绪导致溢出屏幕）。
+    [super viewDidLoad]; self.title = @"隐藏悬浮窗的 App";
+    // 顶部说明条
+    _countLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _countLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _countLabel.font = [UIFont systemFontOfSize:12]; _countLabel.textColor = [UIColor secondaryLabelColor];
+    _countLabel.textAlignment = NSTextAlignmentCenter;
+    [self.view addSubview:_countLabel];
+    // 搜索 + 全选 一行（Auto Layout + 安全区，避免 viewDidLoad 时 bounds 未就绪导致溢出屏幕）
     UIView *bar = [[UIView alloc] initWithFrame:CGRectZero];
-    bar.translatesAutoresizingMaskIntoConstraints = NO;
-    bar.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    bar.translatesAutoresizingMaskIntoConstraints = NO; bar.backgroundColor = [UIColor secondarySystemBackgroundColor];
     [self.view addSubview:bar];
-
     _search = [[UISearchBar alloc] initWithFrame:CGRectZero];
-    _search.translatesAutoresizingMaskIntoConstraints = NO;
-    _search.placeholder = @"搜索 App"; _search.delegate = self;
+    _search.translatesAutoresizingMaskIntoConstraints = NO; _search.placeholder = @"搜索 App"; _search.delegate = self;
     [bar addSubview:_search];
-
     UIButton *all = [UIButton buttonWithType:UIButtonTypeSystem];
     all.translatesAutoresizingMaskIntoConstraints = NO;
     [all setTitle:@"全选" forState:UIControlStateNormal]; all.titleLabel.font = [UIFont boldSystemFontOfSize:15];
     [all addTarget:self action:@selector(toggleAll) forControlEvents:UIControlEventTouchUpInside];
     [bar addSubview:all];
-
     [NSLayoutConstraint activateConstraints:@[
+        [_countLabel.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [_countLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [_countLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [_countLabel.heightAnchor constraintEqualToConstant:28],
+        [bar.topAnchor constraintEqualToAnchor:_countLabel.bottomAnchor],
         [bar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [bar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [bar.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
         [bar.heightAnchor constraintEqualToConstant:56],
         [_search.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor constant:8],
         [_search.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
@@ -355,10 +388,8 @@ static const NSInteger kFUMaxEntries   = 6;
         [all.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
         [all.widthAnchor constraintEqualToConstant:72],
     ]];
-
     _tv = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
-    _tv.translatesAutoresizingMaskIntoConstraints = NO;
-    _tv.delegate = self; _tv.dataSource = self;
+    _tv.translatesAutoresizingMaskIntoConstraints = NO; _tv.delegate = self; _tv.dataSource = self;
     [self.view addSubview:_tv];
     [NSLayoutConstraint activateConstraints:@[
         [_tv.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
@@ -369,28 +400,35 @@ static const NSInteger kFUMaxEntries   = 6;
     [self loadApps];
 }
 - (void)toggleAll {
-    BOOL allSel = YES;
-    for (NSDictionary *d in _filtered) if (![_selected containsObject:d[@"bid"]]) { allSel = NO; break; }
+    // 若当前可见项已全部在黑名单 → 取消全部（显示）；否则把可见项全部加入黑名单（隐藏）。
+    BOOL allIn = YES;
+    for (NSDictionary *d in _filtered) if (![_selected containsObject:d[@"bid"]]) { allIn = NO; break; }
     for (NSDictionary *d in _filtered) {
-        if (allSel) [_selected removeObject:d[@"bid"]]; else if (![_selected containsObject:d[@"bid"]]) [_selected addObject:d[@"bid"]];
+        if (allIn) [_selected removeObject:d[@"bid"]];
+        else if (![_selected containsObject:d[@"bid"]]) [_selected addObject:d[@"bid"]];
     }
-    [self save]; [_tv reloadData];
+    [self save]; [self updateCount]; [_tv reloadData];
 }
 - (void)save {
     CFPreferencesSetAppValue((__bridge CFStringRef)kFUEnabledApps, (__bridge CFPropertyListRef)[_selected copy],
         (__bridge CFStringRef)kFUSuite);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
-    // 作用 App 列表改动在对应 App 重启后生效（tweak 在进程启动时读取）
 }
 - (void)searchBar:(UISearchBar *)sb textDidChange:(NSString *)t { [self applyFilter:t]; }
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return _filtered.count; }
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
     static NSString *cellId = @"FUAppCell"; UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:cellId];
-    if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:cellId];
+    if (!c) { c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:cellId];
+        c.selectionStyle = UITableViewCellSelectionStyleNone; }
     NSDictionary *d = _filtered[ip.row];
-    c.textLabel.text = d[@"name"]; c.detailTextLabel.text = d[@"bid"]; c.detailTextLabel.font = [UIFont systemFontOfSize:10];
+    BOOL sel = [_selected containsObject:d[@"bid"]];
+    c.textLabel.text = d[@"name"]; c.textLabel.textColor = sel ? [UIColor systemRedColor] : [UIColor labelColor];
+    c.detailTextLabel.text = sel ? [NSString stringWithFormat:@"%@  · 已隐藏", d[@"bid"]] : d[@"bid"];
+    c.detailTextLabel.font = [UIFont systemFontOfSize:10];
     id ic = d[@"icon"]; c.imageView.image = (ic && ic != [NSNull null]) ? ic : nil;
-    c.accessoryType = [_selected containsObject:d[@"bid"]] ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+    // 双重标记：勾选 + 浅红底，确保「选择」一眼可见
+    c.accessoryType = sel ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+    c.backgroundColor = sel ? [UIColor colorWithRed:1.0 green:0.94 blue:0.90 alpha:1.0] : [UIColor clearColor];
     return c;
 }
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
@@ -398,7 +436,7 @@ static const NSInteger kFUMaxEntries   = 6;
     NSDictionary *d = _filtered[ip.row];
     if ([_selected containsObject:d[@"bid"]]) [_selected removeObject:d[@"bid"]];
     else [_selected addObject:d[@"bid"]];
-    [self save]; [tv reloadRowsAtIndexPaths:@[ip] withRowAnimation:UITableViewRowAnimationNone];
+    [self save]; [self updateCount]; [tv reloadRowsAtIndexPaths:@[ip] withRowAnimation:UITableViewRowAnimationNone];
 }
 @end
 
