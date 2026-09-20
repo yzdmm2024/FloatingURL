@@ -18,7 +18,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = FloatingURL
 FloatingURL_FILES = src/Tweak.xm
 FloatingURL_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -w
-FloatingURL_FRAMEWORKS = UIKit Foundation CoreGraphics WebKit
+FloatingURL_FRAMEWORKS = UIKit Foundation CoreGraphics WebKit PhotosUI
 
 # ===== 设置面板 PreferenceBundle =====
 # Info.plist / Root.plist 手放 layout/Library/PreferenceBundles/FloatingURLPrefs.bundle/（坑D）

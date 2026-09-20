@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>title</key>
-	<string>悬浮URL 1.2.4</string>
+	<string>悬浮URL 1.2.5</string>
 	<key>items</key>
 	<array>
 		<dict>
@@ -59,6 +59,42 @@
 			<string>管理快捷URI</string>
 			<key>action</key>
 			<string>manageUrls</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>更多</string>
+			<key>footerText</key>
+			<string>说明书/玩法：各种 URL 与 scheme 示例，长按即可复制。作用 App：可限制仅在某些 App 显示悬浮窗（桌面始终显示）。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSButtonCell</string>
+			<key>label</key>
+			<string>说明书 / 玩法</string>
+			<key>action</key>
+			<string>showGuide</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSButtonCell</string>
+			<key>label</key>
+			<string>作用 App 列表</string>
+			<key>action</key>
+			<string>showAppList</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.yzdmm.floatingurl</string>
+			<key>key</key>
+			<string>limitApps</string>
+			<key>label</key>
+			<string>仅限指定 App 显示</string>
 		</dict>
 		<dict>
 			<key>cell</key>
