@@ -80,7 +80,6 @@ static UIWindow *fuAnyWindow() {
     CGSize                  _pinchBaseSize;
     CGPoint                 _pinchBaseCenter;
     NSMutableArray          *_history;
-    UIWindow                *_ownWindow;     // SpringBoard 兜底自建窗
     CGRect                  _lastPanelFrame;
     BOOL                    _hasLastFrame;
 }
@@ -223,23 +222,17 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
     static BOOL done = NO;
     if (done) return;
 
-    // 普通 App：挂到宿主 key window
+    // 所有进程（含 SpringBoard，它本身就是 UIApplication）统一挂到宿主 key window 子视图。
+    // 绝不自建 UIWindow —— 自建高 level window 会变成 key window 抢走全部触摸，
+    // 且空 window 在某些进程里渲染成全屏遮罩，导致「白屏点不了」。这是 1.2.0 的坑，已移除。
     UIWindow *w = fuAnyWindow();
-    // SpringBoard（无 UIApplication）：自建高层级 UIWindow 兜底
     if (!w) {
-        if ([UIApplication sharedApplication]) {          // App 但窗口未就绪 → 继续等
+        static int tries = 0;
+        if (tries++ < 12) {   // 启动早期窗口未就绪，最多重试 ~5s
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{ [self setupWhenHostReady]; });
-            return;
         }
-        if (!_ownWindow) {
-            _ownWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-            _ownWindow.windowLevel = 1000000;
-            _ownWindow.rootViewController = [UIViewController new];
-            _ownWindow.backgroundColor = [UIColor clearColor];
-            _ownWindow.hidden = NO;
-        }
-        w = _ownWindow;
+        return;
     }
     done = YES;
     [self buildUI:w];
@@ -558,7 +551,7 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
 - (void)applyVisibility {
     if (!_didSetup) return;
     UIWindow *w = _ball.superview ?: fuAnyWindow();
-    if (!w && _ownWindow) w = _ownWindow;
+    if (!w) return;            // 窗口未就绪时先不动，等 setup 重试
     [self attachToWindow:w];
     if (!_enabled) {
         _ball.hidden  = YES;
