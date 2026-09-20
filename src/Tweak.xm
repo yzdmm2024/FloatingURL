@@ -824,9 +824,9 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 #pragma mark - 历史 UITableView
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section { return _history.count; }
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
-    static NSString *id = @"FUHistCell";
-    UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:id];
-    if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:id];
+    static NSString *cellId = @"FUHistCell";
+    UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:cellId];
+    if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:cellId];
     c.textLabel.text = _history[ip.row]; c.textLabel.font = [UIFont systemFontOfSize:12];
     c.textLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
     c.detailTextLabel.text = @"长按地址栏可切换工具条位置"; c.detailTextLabel.font = [UIFont systemFontOfSize:9];

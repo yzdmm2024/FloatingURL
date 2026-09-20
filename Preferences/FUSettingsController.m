@@ -210,8 +210,8 @@ static const NSInteger kFUMaxEntries   = 6;
 }
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return _entries.count; }
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
-    static NSString *id = @"FUUrlCell"; UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:id];
-    if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:id];
+    static NSString *cellId = @"FUUrlCell"; UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:cellId];
+    if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:cellId];
     NSDictionary *e = _entries[ip.row];
     c.textLabel.text = [NSString stringWithFormat:@"%@ %@  %@", e[kFUEntryChar] ?: @"", e[kFUEntryLetter] ?: @"", e[kFUEntryURL] ?: @""];
     c.textLabel.font = [UIFont systemFontOfSize:13]; c.textLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
@@ -265,8 +265,8 @@ static const NSInteger kFUMaxEntries   = 6;
 }
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return _items.count; }
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
-    static NSString *id = @"FUGuideCell"; UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:id];
-    if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:id];
+    static NSString *cellId = @"FUGuideCell"; UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:cellId];
+    if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:cellId];
     NSDictionary *d = _items[ip.row];
     c.textLabel.text = d[@"t"]; c.textLabel.font = [UIFont boldSystemFontOfSize:14];
     c.detailTextLabel.text = [NSString stringWithFormat:@"%@\n%@", d[@"c"], d[@"d"]];
@@ -369,8 +369,8 @@ static const NSInteger kFUMaxEntries   = 6;
 - (void)searchBar:(UISearchBar *)sb textDidChange:(NSString *)t { [self applyFilter:t]; }
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return _filtered.count; }
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
-    static NSString *id = @"FUAppCell"; UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:id];
-    if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:id];
+    static NSString *cellId = @"FUAppCell"; UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:cellId];
+    if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:cellId];
     NSDictionary *d = _filtered[ip.row];
     c.textLabel.text = d[@"name"]; c.detailTextLabel.text = d[@"bid"]; c.detailTextLabel.font = [UIFont systemFontOfSize:10];
     id ic = d[@"icon"]; c.imageView.image = (ic && ic != [NSNull null]) ? ic : nil;
