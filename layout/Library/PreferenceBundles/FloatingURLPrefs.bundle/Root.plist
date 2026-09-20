@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>title</key>
-	<string>悬浮URL 1.2.1</string>
+	<string>悬浮URL 1.2.2</string>
 	<key>items</key>
 	<array>
 		<dict>
@@ -30,7 +30,7 @@
 			<key>label</key>
 			<string>网页</string>
 			<key>footerText</key>
-			<string>悬浮窗打开后加载的网址，需含 http:// 或 https:// 。</string>
+			<string>悬浮窗打开后加载的网址。可填 http(s) 网页，也可填 app/插件 scheme（如 weixin://、tel:10086、cydia://package/com.xxx、sileo://package/com.xxx），打开即拉起对应 app。</string>
 		</dict>
 		<dict>
 			<key>cell</key>

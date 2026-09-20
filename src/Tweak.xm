@@ -6,13 +6,11 @@
 // 悬浮URL —— 系统级悬浮窗 tweak（rootless / iOS16 / A14 arm64e）
 // 包名：com.yzdmm.floatingurl
 //
-// v1.2.0 变更：
-//  - 面板尺寸一律钳制到屏幕内（修复超屏设置导致"只看见一角"）
-//  - 面板支持捏合自由缩放 + 工具条拖动，位置记忆
-//  - 地址栏可编辑输入，支持历史记录（去重、可滑动删除）
-//  - 地址栏长按可切换 顶部/底部 位置（记忆）
-//  - 悬浮球缩小(56→40) + 玻璃液态质感（系统材质模糊 + 高光描边）
-//  - 主屏幕（SpringBoard）兜底：无 UIApplication 时自建 UIWindow
+// v1.2.1 修复：移除自建 UIWindow 兜底（1.2.0 的白屏/抢触摸根因），统一挂宿主 key window 子视图。
+// v1.2.2 变更：支持 URL 跳 app / 插件 ——
+//            地址栏与网页内自定义 scheme（weixin://、tel:、mailto:、cydia://、sileo:// ...）
+//            直接交给系统拉起对应 app；url 输入不再强制补 https（仅裸域名补）。
+// v1.2.0 遗留特性：尺寸钳制、捏合缩放、历史记录、地址栏长按切顶/底、玻璃液态小球。
 // ============================================================
 
 #define INCLUDE_SPRINGBOARD 1
@@ -195,11 +193,13 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
     NSString *s = [raw stringByTrimmingCharactersInSet:
                    [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (!s.length) return nil;
-    if (![s.lowercaseString hasPrefix:@"http://"] &&
-        ![s.lowercaseString hasPrefix:@"https://"]) {
-        s = [@"https://" stringByAppendingString:s];
+    // 已带合法 scheme（http/https 或自定义 scheme：weixin://、tel:、cydia://、sileo:// ...）
+    // 原样放行；只有裸域名（无 scheme）才补 https://，避免把 app/插件 scheme 改坏。
+    NSURLComponents *c = [NSURLComponents componentsWithString:s];
+    if (c && c.scheme.length && [c.scheme rangeOfString:@"."].location == NSNotFound) {
+        return s;
     }
-    return s;
+    return [@"https://" stringByAppendingString:s];
 }
 
 #pragma mark - 窗口挂载
@@ -545,6 +545,16 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
 - (void)loadURL {
     NSURL *u = [NSURL URLWithString:_url];
     if (!u || u.scheme == nil) u = [NSURL URLWithString:@"https://www.apple.com"];
+    NSString *scheme = u.scheme.lowercaseString;
+    // 网页内可正常加载的 scheme
+    NSSet *webSchemes = [NSSet setWithObjects:@"http", @"https", @"about", @"data",
+                                                  @"blob", @"file", @"javascript", nil];
+    if (scheme.length && ![webSchemes containsObject:scheme]) {
+        // 自定义 scheme（app / 插件 / tel / mailto ...）直接交给系统拉起对应 app，不进 webview
+        UIApplication *app = UIApplication.sharedApplication;
+        if (app) [app openURL:u options:@{} completionHandler:nil];
+        return;
+    }
     [_webView loadRequest:[NSURLRequest requestWithURL:u]];
 }
 
@@ -630,6 +640,24 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
 }
 - (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)nav withError:(NSError *)error {
     [_spinner stopAnimating];
+}
+
+// 拦截网页内点击的自定义 scheme 链接（app / 插件 / tel / mailto ...），
+// 交给系统拉起对应 app；web 内部 scheme（http/https/data/blob...）照常加载。
+- (void)webView:(WKWebView *)webView
+    decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction
+                    decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
+    NSURL *u = navigationAction.request.URL;
+    NSString *scheme = u.scheme.lowercaseString;
+    NSSet *webSchemes = [NSSet setWithObjects:@"http", @"https", @"about", @"data",
+                                                  @"blob", @"file", @"javascript", nil];
+    if (u && scheme.length && ![webSchemes containsObject:scheme]) {
+        UIApplication *app = UIApplication.sharedApplication;
+        if (app) [app openURL:u options:@{} completionHandler:nil];
+        decisionHandler(WKNavigationActionPolicyCancel);
+        return;
+    }
+    decisionHandler(WKNavigationActionPolicyAllow);
 }
 
 @end
