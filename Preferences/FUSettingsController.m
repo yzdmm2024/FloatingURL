@@ -2,18 +2,8 @@
 #import <notify.h>
 #import <PhotosUI/PhotosUI.h>
 
-// LSApplicationWorkspace / LSApplicationProxy 为私有 API，运行时可用（设置进程允许）
-@interface LSApplicationWorkspace : NSObject
-+ (id)defaultWorkspace;
-- (NSArray *)allApplications;
-@end
-@interface LSApplicationProxy : NSObject
-@property (nonatomic, copy) NSString *bundleIdentifier;
-@property (nonatomic, copy) NSString *localizedName;
-- (UIImage *)icon;
-- (NSData *)iconDataForVariant:(int)v;
-@end
-
+// LSApplicationWorkspace / LSApplicationProxy 为私有 API，不能直接引用类（会生成链接符号导致链接失败）。
+// 改用 NSClassFromString + performSelector 在运行时取，避免链接私有框架。
 static NSString * const kFUSuite        = @"com.yzdmm.floatingurl";
 static NSString * const kFUEntryURL    = @"url";
 static NSString * const kFUEntryChar   = @"char";
@@ -304,18 +294,20 @@ static const NSInteger kFUMaxEntries   = 6;
     _allApps = [NSMutableArray array]; _selected = [NSMutableArray array];
     CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUEnabledApps, (__bridge CFStringRef)kFUSuite);
     if (r) { NSArray *a = (__bridge_transfer NSArray *)r; if ([a isKindOfClass:[NSArray class]]) [_selected addObjectsFromArray:a]; }
-    LSApplicationWorkspace *ws = [LSApplicationWorkspace defaultWorkspace];
+    Class wsCls = NSClassFromString(@"LSApplicationWorkspace");
+    id ws = wsCls ? [wsCls performSelector:@selector(defaultWorkspace)] : nil;
     if (ws) {
-        NSArray *apps = [ws allApplications];
-        for (LSApplicationProxy *p in apps) {
-            NSString *bid = p.bundleIdentifier; if (!bid.length) continue;
+        NSArray *apps = [ws performSelector:@selector(allApplications)];
+        for (id p in apps) {
+            NSString *bid = [p performSelector:@selector(bundleIdentifier)]; if (!bid.length) continue;
             if ([bid isEqualToString:@"com.apple.Preferences"]) continue;
             UIImage *icon = nil;
-            if ([p respondsToSelector:@selector(icon)]) icon = [p icon];
-            if (!icon && [p respondsToSelector:@selector(iconDataForVariant:)]) {
-                NSData *d = [p iconDataForVariant:2]; if (d) icon = [UIImage imageWithData:d];
+            if ([p respondsToSelector:@selector(icon)]) {
+                id ic = [p performSelector:@selector(icon)];
+                if ([ic isKindOfClass:[UIImage class]]) icon = ic;
             }
-            [_allApps addObject:@{@"bid":bid, @"name":(p.localizedName ?: bid), @"icon":(icon ?: [NSNull null])}];
+            NSString *name = [p performSelector:@selector(localizedName)];
+            [_allApps addObject:@{@"bid":bid, @"name":(name.length ? name : bid), @"icon":(icon ?: [NSNull null])}];
         }
     }
     [_allApps sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b){
