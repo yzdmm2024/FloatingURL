@@ -572,8 +572,17 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     _ballLabel.textAlignment = NSTextAlignmentCenter; _ballLabel.textColor = [UIColor labelColor];
     [_ballBlur.contentView addSubview:_ballLabel];
 
-    [_ball addTarget:self action:@selector(ballTapped) forControlEvents:UIControlEventTouchUpInside];
-    [_ball addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(panBall:)]];
+    // 区分「点击」与「拖动」：用 UITapGestureRecognizer 触发 ballTapped，并要求它等
+    // UIPanGestureRecognizer「失败」后才生效——这样纯粹点击（几乎无位移）才会弹扇形，
+    // 而拖动（超过位移阈值）只移动小球、不弹扇形，且不会误触发 ballTapped。
+    // 关键：绝对不能再给按钮加 UIControlEventTouchUpInside 的 addTarget——否则拖动结束也会触发一次点击，
+    // 而且真实点击往往带几像素位移，会先让 pan 开始并吞掉按钮触摸，导致 TouchUpInside 永不触发（点了没反应）。
+    UIPanGestureRecognizer *ballPan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(panBall:)];
+    ballPan.cancelsTouchesInView = NO;   // 不吞掉按钮自身触摸，保证上面的 tap 仍能被识别
+    [_ball addGestureRecognizer:ballPan];
+    UITapGestureRecognizer *ballTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(ballTapped)];
+    [ballTap requireGestureRecognizerToFail:ballPan];
+    [_ball addGestureRecognizer:ballTap];
     [_overlay addSubview:_ball];
     [self placeBallInWindow:_overlay];
 
@@ -745,17 +754,19 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 
 #pragma mark - 扇形菜单（图标尺寸 = 球尺寸；长按可编辑）
 - (void)openFan {
-    if (_fanOpen || _entries.count <= 1) return;
+    if (_fanOpen || _entries.count < 1) return;   // 0 个入口不弹（loadEntries 至少兜底 1 个）
     _fanOpen = YES; [self closeFanItemsAnimated:NO];
     // 扇形无需键盘，保持非 key（不抢 App 触摸）；触摸经 hitTest 正常命中扇形按钮。
     CGPoint c = CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame));
     BOOL left = (c.x > _overlay.bounds.size.width / 2.0);
     NSInteger n = _entries.count;
-    CGFloat base = left ? 180.0f : 0.0f;
-    CGFloat span = MIN(140.0f, 40.0f + 30.0f * (n - 1));
+    CGFloat base = left ? 180.0f : 0.0f;          // 球在右侧就向左展开，反之向右
+    // n==1 时 span=0，直接放在 base 方向（避免除以 (n-1)=0 得到 NaN）；n>1 才真正扇形展开。
+    CGFloat span = (n <= 1) ? 0.0f : MIN(140.0f, 40.0f + 30.0f * (n - 1));
     CGFloat R = 96.0f;
     for (NSInteger i = 0; i < n; i++) {
-        CGFloat a = (base - span/2.0f + span * ((CGFloat)i / (CGFloat)(n - 1)));
+        // n==1 时直接放在 base 方向（避免除以 (n-1)=0 得到 NaN）。
+        CGFloat a = (n <= 1) ? base : (base - span/2.0f + span * ((CGFloat)i / (CGFloat)(n - 1)));
         CGFloat rad = a * M_PI / 180.0f;
         CGFloat x = c.x + R * cos(rad), y = c.y + R * sin(rad);
         UIButton *it = [self buildFanItem:_entries[i] index:i];
