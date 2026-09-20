@@ -722,8 +722,10 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
         if (_fanOpen && _fanItems.count == _fanOffsets.count) {
             CGPoint newC = CGPointMake(CGRectGetMidX(f), CGRectGetMidY(f));
             CGPoint d = CGPointMake(newC.x - oldC.x, newC.y - oldC.y);
-            for (NSUInteger k = 0; k < _fanItems.count; k++)
-                _fanItems[k].center = CGPointMake(_fanItems[k].center.x + d.x, _fanItems[k].center.y + d.y);
+            for (NSUInteger k = 0; k < _fanItems.count; k++) {
+                UIButton *it = _fanItems[k];
+                it.center = CGPointMake(it.center.x + d.x, it.center.y + d.y);
+            }
         }
     }
 }
