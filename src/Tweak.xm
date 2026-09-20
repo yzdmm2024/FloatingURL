@@ -242,7 +242,11 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     id filter = [NSClassFromString(@"PHPickerFilter") valueForKey:@"imagesFilter"];
     if (filter) [cfg setValue:filter forKey:@"filter"];
     Class pvcCls = NSClassFromString(@"PHPickerViewController"); if (!pvcCls) return;
-    id p = [[pvcCls alloc] performSelector:@selector(initWithConfiguration:) withObject:cfg];
+    // 用 objc_msgSend 直接调 initWithConfiguration:，避开 performSelector 的 ARC 选择器归属告警（-Werror）。
+    // 标注 ns_returns_retained 让 ARC 正确平衡 init 返回的 +1。
+    typedef id (*FUPickerInit)(id, SEL, id) __attribute__((ns_returns_retained));
+    SEL initSel = NSSelectorFromString(@"initWithConfiguration:");
+    id p = ((FUPickerInit)objc_msgSend)([pvcCls alloc], initSel, cfg);
     [p setValue:self forKey:@"delegate"];
     [self presentViewController:p animated:YES completion:nil];
 }
