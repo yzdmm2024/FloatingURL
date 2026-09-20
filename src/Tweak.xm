@@ -4,29 +4,26 @@
 
 // ============================================================
 // 悬浮URL —— 系统级悬浮窗 tweak（rootless / iOS16 / A14 arm64e）
-// 作者：yzdmm   包名：com.yzdmm.floatingurl
-// 功能：屏幕边缘常驻可拖动小球，点开加载设置里填的网址，
-//      全 App 可用。URL / 总开关 / 窗口大小均在「设置」里调。
+// 包名：com.yzdmm.floatingurl
 //
-// ★ 关键修复（参考「我的语音」插件验证过的悬浮按钮做法）：
-//   不创建独立的 UIWindow（windowLevel 调高那套在 iOS 上经常不显示，
-//   容易整窗丢失/层级盖不住）。改为直接把悬浮球 / 网页面板
-//   addSubview 到宿主已有的 key window 上（fuAnyWindow 多层兜底取窗），
-//   显示网页时 bringSubviewToFront，保证永远在最上层。
+// v1.2.0 变更：
+//  - 面板尺寸一律钳制到屏幕内（修复超屏设置导致"只看见一角"）
+//  - 面板支持捏合自由缩放 + 工具条拖动，位置记忆
+//  - 地址栏可编辑输入，支持历史记录（去重、可滑动删除）
+//  - 地址栏长按可切换 顶部/底部 位置（记忆）
+//  - 悬浮球缩小(56→40) + 玻璃液态质感（系统材质模糊 + 高光描边）
+//  - 主屏幕（SpringBoard）兜底：无 UIApplication 时自建 UIWindow
 // ============================================================
 
-// 设 1 可让悬浮球也出现在主屏幕（SpringBoard），目前已默认开启。
-// 注意：你自己的「方法说明」文档把注入 SpringBoard 列为红线
-// （键盘类 tweak 曾因此卡死 + 注销重启）。悬浮球本身很轻量，
-// 实测主屏幕显示稳定，故默认开启；如不需要可改回 0。
 #define INCLUDE_SPRINGBOARD 1
 
 static NSString * const kFUSuite        = @"com.yzdmm.floatingurl";
 static NSString * const kFUPrefsChanged = @"com.yzdmm.floatingurl/settingsChanged";
 
-// ---- 取一个可用窗口（综合 MyVoice 的 anyWindow + FloatGlass 的 fg_keyWindow）----
-// 优先取「前台激活 windowScene」的 keyWindow（iOS13+ 多 scene 下 keyWindow 经常是 nil，
-// 且非激活 scene 的窗拿来做挂载会不可见），逐层兜底。只能主线程调用。
+static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
+                           CFStringRef name, const void *object, CFDictionaryRef userInfo);
+
+// ---- 取一个可用窗口（普通 App 路径；SpringBoard 无 UIApplication 会返回 nil）----
 static UIWindow *fuAnyWindow() {
     UIApplication *app = UIApplication.sharedApplication;
     if (!app) return nil;
@@ -53,7 +50,8 @@ static UIWindow *fuAnyWindow() {
     return app.windows.firstObject;
 }
 
-@interface FUFloatingManager : NSObject <WKNavigationDelegate>
+@interface FUFloatingManager : NSObject <WKNavigationDelegate, UITextFieldDelegate,
+                                         UITableViewDataSource, UITableViewDelegate>
 + (instancetype)shared;
 - (void)reloadPrefs;
 - (void)setupWhenHostReady;
@@ -61,18 +59,30 @@ static UIWindow *fuAnyWindow() {
 @end
 
 @implementation FUFloatingManager {
-    UIButton              *_ball;
-    UIView                *_panel;
-    WKWebView             *_webView;
+    UIButton                *_ball;          // 玻璃液态小球（含模糊层）
+    UIVisualEffectView      *_ballBlur;
+    UILabel                 *_ballLabel;
+    UIView                  *_panel;
+    UIView                  *_bar;
+    UITextField             *_urlField;
+    UIButton                *_reloadBtn;
+    UITableView             *_historyTable;
+    WKWebView               *_webView;
     UIActivityIndicatorView *_spinner;
-    UILabel               *_titleLabel;
-    BOOL                  _expanded;
-    BOOL                  _didSetup;
-    BOOL                  _enabled;
-    NSString              *_url;
-    CGFloat               _winW;
-    CGFloat               _winH;
-    CGPoint               _ballDragOrigin;
+    BOOL                    _expanded;
+    BOOL                    _didSetup;
+    BOOL                    _enabled;
+    BOOL                    _barAtBottom;
+    NSString                *_url;
+    CGFloat                 _winW;
+    CGFloat                 _winH;
+    CGPoint                 _ballDragOrigin;
+    CGSize                  _pinchBaseSize;
+    CGPoint                 _pinchBaseCenter;
+    NSMutableArray          *_history;
+    UIWindow                *_ownWindow;     // SpringBoard 兜底自建窗
+    CGRect                  _lastPanelFrame;
+    BOOL                    _hasLastFrame;
 }
 
 + (instancetype)shared {
@@ -90,7 +100,9 @@ static UIWindow *fuAnyWindow() {
         _winH     = 480;
         _expanded = NO;
         _didSetup = NO;
+        _history  = [NSMutableArray array];
         [self reloadPrefs];
+        [self loadHistory];
         CFNotificationCenterAddObserver(
             CFNotificationCenterGetDarwinNotifyCenter(),
             (__bridge const void *)(self),
@@ -105,16 +117,13 @@ static UIWindow *fuAnyWindow() {
 static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
                            CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     FUFloatingManager *mgr = (__bridge FUFloatingManager *)observer;
-    // Darwin 通知可能在任意线程到达，一律回主线程处理 UI。
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{ fuPrefsChanged(center, observer, name, object, userInfo); });
         return;
     }
     [mgr reloadPrefs];
-    if (mgr->_expanded) {
-        [mgr->_titleLabel setText:mgr->_url];
-        [mgr loadURL];
-    }
+    [mgr loadHistory];
+    if (mgr->_historyTable) [mgr->_historyTable reloadData];
     [mgr applyVisibility];
 }
 
@@ -147,14 +156,61 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
     if (_winW > 600) _winW = 600;
     if (_winH < 280) _winH = 280;
     if (_winH > 900) _winH = 900;
+
+    CFPropertyListRef barRef = CFPreferencesCopyAppValue(CFSTR("barAtBottom"),
+                                  (__bridge CFStringRef)kFUSuite);
+    if (barRef) {
+        _barAtBottom = [(__bridge NSNumber *)barRef boolValue];
+        CFRelease(barRef);
+    }
 }
 
-// 把视图挂到当前 key window 上（窗口换了就重新挂，避免跑到旧 window 上）。
+#pragma mark - 历史记录
+
+- (void)loadHistory {
+    CFPropertyListRef hRef = CFPreferencesCopyAppValue(CFSTR("history"),
+                                 (__bridge CFStringRef)kFUSuite);
+    if (hRef) {
+        NSArray *arr = (__bridge_transfer NSArray *)hRef;
+        if ([arr isKindOfClass:[NSArray class]]) _history = [arr mutableCopy];
+    }
+    if (!_history) _history = [NSMutableArray array];
+}
+
+- (void)saveHistory {
+    CFPreferencesSetAppValue(CFSTR("history"), (_history),
+        (__bridge CFStringRef)kFUSuite);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
+}
+
+- (void)pushHistory:(NSString *)raw {
+    NSString *u = [self normalizeURL:raw];
+    if (!u.length) return;
+    [_history removeObject:u];
+    [_history insertObject:u atIndex:0];
+    while (_history.count > 30) [_history removeLastObject];
+    [self saveHistory];
+}
+
+- (NSString *)normalizeURL:(NSString *)raw {
+    NSString *s = [raw stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!s.length) return nil;
+    if (![s.lowercaseString hasPrefix:@"http://"] &&
+        ![s.lowercaseString hasPrefix:@"https://"]) {
+        s = [@"https://" stringByAppendingString:s];
+    }
+    return s;
+}
+
+#pragma mark - 窗口挂载
+
 - (void)attachToWindow:(UIWindow *)w {
     if (!w) return;
     if (_ball && _ball.superview != w) {
         [_ball removeFromSuperview];
         [w addSubview:_ball];
+        [self placeBallInWindow:w];
     }
     if (_panel && _panel.superview != w) {
         [_panel removeFromSuperview];
@@ -166,12 +222,24 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
     if (![NSThread isMainThread]) { dispatch_async(dispatch_get_main_queue(), ^{ [self setupWhenHostReady]; }); return; }
     static BOOL done = NO;
     if (done) return;
+
+    // 普通 App：挂到宿主 key window
     UIWindow *w = fuAnyWindow();
+    // SpringBoard（无 UIApplication）：自建高层级 UIWindow 兜底
     if (!w) {
-        // 启动瞬间窗口还没就位，0.4s 后再试（轮询，最多撑到它出现）。
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ [self setupWhenHostReady]; });
-        return;
+        if ([UIApplication sharedApplication]) {          // App 但窗口未就绪 → 继续等
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ [self setupWhenHostReady]; });
+            return;
+        }
+        if (!_ownWindow) {
+            _ownWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+            _ownWindow.windowLevel = 1000000;
+            _ownWindow.rootViewController = [UIViewController new];
+            _ownWindow.backgroundColor = [UIColor clearColor];
+            _ownWindow.hidden = NO;
+        }
+        w = _ownWindow;
     }
     done = YES;
     [self buildUI:w];
@@ -181,90 +249,163 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
 - (void)buildUI:(UIWindow *)w {
     _didSetup = YES;
 
-    // ---- 悬浮球（直接挂到 key window）----
-    _ball = [UIButton buttonWithType:UIButtonTypeCustom];
-    _ball.backgroundColor = [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:0.92];
-    [_ball setTitle:@"URL" forState:UIControlStateNormal];
-    _ball.titleLabel.font = [UIFont boldSystemFontOfSize:13];
-    [_ball setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    _ball.layer.cornerRadius = 28;
-    _ball.clipsToBounds = YES;
-    _ball.layer.shadowColor = [UIColor blackColor].CGColor;
-    _ball.layer.shadowOpacity = 0.4f;
-    _ball.layer.shadowRadius = 4.0f;
-    _ball.layer.shadowOffset = CGSizeZero;
-    [_ball addTarget:self action:@selector(ballTapped)
-            forControlEvents:UIControlEventTouchUpInside];
+    // ---- 悬浮球：玻璃液态（系统材质模糊 + 高光描边），40pt ----
+    _ball = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 40, 40)];
+    _ball.layer.cornerRadius = 20;
+    _ball.layer.shadowColor  = [UIColor blackColor].CGColor;
+    _ball.layer.shadowOpacity = 0.25f;
+    _ball.layer.shadowRadius  = 6.0f;
+    _ball.layer.shadowOffset  = CGSizeMake(0, 2);
+
+    _ballBlur = [[UIVisualEffectView alloc]
+        initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterial]];
+    _ballBlur.frame = _ball.bounds;
+    _ballBlur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    _ballBlur.layer.cornerRadius = 20;
+    _ballBlur.clipsToBounds = YES;
+    _ballBlur.layer.borderWidth = 0.8f;
+    _ballBlur.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.55].CGColor;
+    [_ball addSubview:_ballBlur];
+
+    _ballLabel = [[UILabel alloc] initWithFrame:_ball.bounds];
+    _ballLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    _ballLabel.text = @"URL";
+    _ballLabel.font = [UIFont boldSystemFontOfSize:10];
+    _ballLabel.textAlignment = NSTextAlignmentCenter;
+    _ballLabel.textColor = [UIColor labelColor];
+    [_ballBlur.contentView addSubview:_ballLabel];
+
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
+            initWithTarget:self action:@selector(ballTapped)];
+    [_ball addGestureRecognizer:tap];
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
             initWithTarget:self action:@selector(panBall:)];
     [_ball addGestureRecognizer:pan];
     [w addSubview:_ball];
     [self placeBallInWindow:w];
 
-    // ---- 网页面板（普通 UIView，挂到同一 window，显示时置顶）----
+    // ---- 网页面板 ----
     _panel = [[UIView alloc] initWithFrame:CGRectZero];
     _panel.backgroundColor = [UIColor systemBackgroundColor];
-    _panel.layer.cornerRadius = 12.0f;
+    _panel.layer.cornerRadius = 14.0f;
     _panel.clipsToBounds = YES;
     _panel.hidden = YES;
+    _panel.layer.borderColor = [UIColor separatorColor].CGColor;
+    _panel.layer.borderWidth = 0.5f;
 
-    UIView *bar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, _winW, 44)];
-    bar.backgroundColor = [UIColor secondarySystemBackgroundColor];
-    bar.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    // 顶部工具条可拖动整个面板
+    // 工具条（可拖动整面板；长按切换顶部/底部）
+    _bar = [[UIView alloc] initWithFrame:CGRectZero];
+    _bar.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    _bar.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     UIPanGestureRecognizer *panelPan = [[UIPanGestureRecognizer alloc]
             initWithTarget:self action:@selector(panPanel:)];
-    [bar addGestureRecognizer:panelPan];
+    [_bar addGestureRecognizer:panelPan];
+    UILongPressGestureRecognizer *barLong = [[UILongPressGestureRecognizer alloc]
+            initWithTarget:self action:@selector(toggleBarPosition:)];
+    barLong.minimumPressDuration = 0.6;
+    [_bar addGestureRecognizer:barLong];
 
     UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
-    [close setTitle:@"关闭" forState:UIControlStateNormal];
-    close.frame = CGRectMake(8, 0, 56, 44);
+    close.frame = CGRectMake(4, 0, 44, 40);
+    [close setTitle:@"✕" forState:UIControlStateNormal];
+    close.titleLabel.font = [UIFont boldSystemFontOfSize:15];
     [close addTarget:self action:@selector(collapse)
             forControlEvents:UIControlEventTouchUpInside];
-    [bar addSubview:close];
+    close.autoresizingMask = UIViewAutoresizingFlexibleRightMargin;
+    [_bar addSubview:close];
+
+    _urlField = [[UITextField alloc] initWithFrame:CGRectZero];
+    _urlField.placeholder = @"输入网址";
+    _urlField.text = _url;
+    _urlField.font = [UIFont systemFontOfSize:12];
+    _urlField.textAlignment = NSTextAlignmentCenter;
+    _urlField.borderStyle = UITextBorderStyleRoundedRect;
+    _urlField.autocorrectionType = UITextAutocorrectionTypeNo;
+    _urlField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    _urlField.keyboardType = UIKeyboardTypeURL;
+    _urlField.returnKeyType = UIReturnKeyGo;
+    _urlField.clearButtonMode = UITextFieldViewModeWhileEditing;
+    _urlField.delegate = self;
+    _urlField.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [_urlField addTarget:self action:@selector(urlGo)
+           forControlEvents:UIControlEventEditingDidEndOnExit];
+    [_urlField addTarget:self action:@selector(urlEditingBegan)
+           forControlEvents:UIControlEventEditingDidBegin];
+    [_bar addSubview:_urlField];
 
     UIButton *reload = [UIButton buttonWithType:UIButtonTypeSystem];
-    [reload setTitle:@"刷新" forState:UIControlStateNormal];
-    reload.frame = CGRectMake(_winW - 64, 0, 56, 44);
-    reload.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+    _reloadBtn = reload;
+    reload.frame = CGRectMake(0, 0, 44, 40);
+    [reload setTitle:@"↻" forState:UIControlStateNormal];
+    reload.titleLabel.font = [UIFont boldSystemFontOfSize:16];
     [reload addTarget:self action:@selector(reload)
              forControlEvents:UIControlEventTouchUpInside];
-    [bar addSubview:reload];
+    reload.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+    [_bar addSubview:reload];
+    [_panel addSubview:_bar];
 
-    _titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(68, 0, _winW - 136, 44)];
-    _titleLabel.textAlignment = NSTextAlignmentCenter;
-    _titleLabel.font = [UIFont systemFontOfSize:11];
-    _titleLabel.textColor = [UIColor secondaryLabelColor];
-    _titleLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    _titleLabel.text = _url;
-    _titleLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    [bar addSubview:_titleLabel];
-    [_panel addSubview:bar];
+    // 历史记录列表（编辑地址时浮层显示）
+    _historyTable = [[UITableView alloc] initWithFrame:CGRectZero
+                                                 style:UITableViewStylePlain];
+    _historyTable.dataSource = self;
+    _historyTable.delegate = self;
+    _historyTable.hidden = YES;
+    _historyTable.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    _historyTable.layer.cornerRadius = 10;
+    _historyTable.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [_panel addSubview:_historyTable];
 
     WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];
-    _webView = [[WKWebView alloc] initWithFrame:CGRectMake(0, 44, _winW, _winH - 44)
-                                   configuration:cfg];
+    _webView = [[WKWebView alloc] initWithFrame:CGRectZero configuration:cfg];
     _webView.navigationDelegate = self;
     _webView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [_panel addSubview:_webView];
 
     _spinner = [[UIActivityIndicatorView alloc]
         initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
-    _spinner.center = CGPointMake(_winW / 2.0, _winH / 2.0);
     _spinner.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin |
                                 UIViewAutoresizingFlexibleRightMargin |
                                 UIViewAutoresizingFlexibleTopMargin |
                                 UIViewAutoresizingFlexibleBottomMargin;
-    [_panel addSubview:_spinner];
+    [_webView addSubview:_spinner];
+
+    // 捏合自由缩放（挂在面板上，双指捏合改尺寸，中心不动）
+    UIPinchGestureRecognizer *pinch = [[UIPinchGestureRecognizer alloc]
+            initWithTarget:self action:@selector(pinchPanel:)];
+    [_panel addGestureRecognizer:pinch];
 
     [w addSubview:_panel];
+    [self layoutPanel];
 }
 
 - (void)placeBallInWindow:(UIWindow *)w {
     if (!_ball || !w) return;
-    _ball.frame = CGRectMake(w.bounds.size.width - 56 - 6,
+    _ball.frame = CGRectMake(w.bounds.size.width - 40 - 4,
                              w.bounds.size.height * 0.45,
-                             56, 56);
+                             40, 40);
+}
+
+// 面板内部布局：工具条在顶或底（长按切换），WebView 填充剩余
+- (void)layoutPanel {
+    if (!_panel) return;
+    CGRect b = _panel.bounds;
+    CGFloat barH = 40;
+    CGRect barF, webF;
+    if (_barAtBottom) {
+        barF = CGRectMake(0, b.size.height - barH, b.size.width, barH);
+        webF = CGRectMake(0, 0, b.size.width, b.size.height - barH);
+    } else {
+        barF = CGRectMake(0, 0, b.size.width, barH);
+        webF = CGRectMake(0, barH, b.size.width, b.size.height - barH);
+    }
+    _bar.frame = barF;
+    _webView.frame = webF;
+    _historyTable.frame = webF;
+    CGFloat fieldX = 52, fieldW = b.size.width - 104;
+    _urlField.frame = CGRectMake(fieldX, 6, fieldW, 28);
+    _reloadBtn.frame = CGRectMake(b.size.width - 48, 0, 44, 40);
+    _spinner.center = CGPointMake(webF.size.width / 2.0, webF.size.height / 2.0);
+    [_historyTable setNeedsLayout];
 }
 
 #pragma mark - 交互
@@ -272,7 +413,7 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
 - (void)ballTapped { _expanded ? [self collapse] : [self expand]; }
 
 - (void)panBall:(UIPanGestureRecognizer *)g {
-    UIWindow *w = fuAnyWindow();
+    UIWindow *w = _ball.superview ?: fuAnyWindow();
     if (!w) return;
     if (g.state == UIGestureRecognizerStateBegan) {
         _ballDragOrigin = _ball.frame.origin;
@@ -285,7 +426,6 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
         f.origin.y = MAX(0, MIN(w.bounds.size.height - f.size.height, f.origin.y));
         _ball.frame = f;
     } else if (g.state == UIGestureRecognizerStateEnded) {
-        // 松手吸附到最近屏幕边缘
         CGRect f = _ball.frame;
         CGFloat cx = CGRectGetMidX(f);
         CGFloat targetX = (cx < w.bounds.size.width / 2.0) ? 4 : w.bounds.size.width - f.size.width - 4;
@@ -307,37 +447,107 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
         f.origin.x = MAX(0, MIN(w.bounds.size.width  - f.size.width,  f.origin.x));
         f.origin.y = MAX(0, MIN(w.bounds.size.height - f.size.height, f.origin.y));
         _panel.frame = f;
+        _lastPanelFrame = f; _hasLastFrame = YES;
         [g setTranslation:CGPointZero inView:w];
     }
 }
 
+// 捏合缩放：以捏合起始中心为锚，尺寸 = 基础尺寸 × scale，钳制在屏幕内
+- (void)pinchPanel:(UIPinchGestureRecognizer *)g {
+    UIWindow *w = _panel.superview;
+    if (!w) return;
+    if (g.state == UIGestureRecognizerStateBegan) {
+        _pinchBaseSize   = _panel.frame.size;
+        _pinchBaseCenter = CGPointMake(CGRectGetMidX(_panel.frame), CGRectGetMidY(_panel.frame));
+    } else if (g.state == UIGestureRecognizerStateChanged) {
+        CGFloat scale = g.scale;
+        if (scale <= 0.01) return;
+        CGRect s = w.bounds;
+        CGFloat ww = MIN(MAX(_pinchBaseSize.width  * scale, 220), s.size.width  - 16);
+        CGFloat hh = MIN(MAX(_pinchBaseSize.height * scale, 300), s.size.height - 24);
+        CGRect f = CGRectMake(_pinchBaseCenter.x - ww / 2.0,
+                              _pinchBaseCenter.y - hh / 2.0, ww, hh);
+        f.origin.x = MAX(0, MIN(s.size.width  - f.size.width,  f.origin.x));
+        f.origin.y = MAX(0, MIN(s.size.height - f.size.height, f.origin.y));
+        _panel.frame = f;
+        _lastPanelFrame = f; _hasLastFrame = YES;
+        _winW = ww; _winH = hh;
+    } else if (g.state == UIGestureRecognizerStateEnded) {
+        [self layoutPanel];
+    }
+}
+
+// 长按工具条：地址栏 顶部 ↔ 底部
+- (void)toggleBarPosition:(UILongPressGestureRecognizer *)g {
+    if (g.state != UIGestureRecognizerStateBegan) return;
+    _barAtBottom = !_barAtBottom;
+    CFPreferencesSetAppValue(CFSTR("barAtBottom"),
+        [NSNumber numberWithBool:_barAtBottom], (__bridge CFStringRef)kFUSuite);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
+    [self layoutPanel];
+}
+
 - (void)expand {
-    UIWindow *w = fuAnyWindow();
+    UIWindow *w = _ball.superview ?: fuAnyWindow();
     if (!w || !_didSetup) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{ [self expand]; });
         return;
     }
     [self attachToWindow:w];
-    CGFloat ww = _winW, hh = _winH;
+    [self loadHistory];
+
+    // 关键：尺寸钳制到屏幕内（修复"只看见一角"），且不超当前窗口
     CGRect s = w.bounds;
-    _panel.frame = CGRectMake((s.size.width - ww) / 2.0,
-                             (s.size.height - hh) / 2.0, ww, hh);
-    [_titleLabel setText:_url];
+    CGFloat ww = MIN(_winW, s.size.width  - 16);
+    CGFloat hh = MIN(_winH, s.size.height - 24);
+
+    if (_hasLastFrame) {
+        // 记住上次位置，但钳制在屏幕内
+        CGRect f = _lastPanelFrame;
+        f.size.width  = ww; f.size.height = hh;
+        f.origin.x = MAX(0, MIN(s.size.width  - f.size.width,  f.origin.x));
+        f.origin.y = MAX(0, MIN(s.size.height - f.size.height, f.origin.y));
+        _panel.frame = f;
+    } else {
+        _panel.frame = CGRectMake((s.size.width - ww) / 2.0,
+                                  (s.size.height - hh) / 2.0, ww, hh);
+    }
+    _urlField.text = _url;
+    [self layoutPanel];
     [self loadURL];
     [w bringSubviewToFront:_panel];
     _panel.hidden = NO;
-    _ball.hidden  = YES;
+    _historyTable.hidden = YES;
+    _ball.hidden = YES;
     _expanded = YES;
 }
 
 - (void)collapse {
+    [_urlField resignFirstResponder];
+    _historyTable.hidden = YES;
     _panel.hidden = YES;
     _ball.hidden  = !_enabled;
     _expanded = NO;
 }
 
 - (void)reload { [self loadURL]; }
+
+- (void)urlGo {
+    NSString *raw = _urlField.text;
+    NSString *u = [self normalizeURL:raw];
+    if (!u.length) { _urlField.text = _url; return; }
+    _url = u;
+    [self pushHistory:u];
+    [self loadURL];
+    [_urlField resignFirstResponder];
+    _historyTable.hidden = YES;
+}
+
+- (void)urlEditingBegan {
+    [_historyTable reloadData];
+    _historyTable.hidden = _history.count == 0;
+}
 
 - (void)loadURL {
     NSURL *u = [NSURL URLWithString:_url];
@@ -347,7 +557,8 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
 
 - (void)applyVisibility {
     if (!_didSetup) return;
-    UIWindow *w = fuAnyWindow();
+    UIWindow *w = _ball.superview ?: fuAnyWindow();
+    if (!w && _ownWindow) w = _ownWindow;
     [self attachToWindow:w];
     if (!_enabled) {
         _ball.hidden  = YES;
@@ -360,6 +571,53 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
     }
 }
 
+#pragma mark - UITextFieldDelegate
+
+- (BOOL)textFieldShouldReturn:(UITextField *)textField { [self urlGo]; return YES; }
+- (BOOL)textFieldShouldClear:(UITextField *)textField { _historyTable.hidden = NO; return YES; }
+
+#pragma mark - 历史 UITableView
+
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
+    return _history.count;
+}
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    static NSString *id = @"FUHistCell";
+    UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:id];
+    if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                       reuseIdentifier:id];
+    c.textLabel.text = _history[ip.row];
+    c.textLabel.font = [UIFont systemFontOfSize:12];
+    c.textLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    c.detailTextLabel.text = @"长按地址栏可切换工具条位置";
+    c.detailTextLabel.font = [UIFont systemFontOfSize:9];
+    c.detailTextLabel.textColor = [UIColor tertiaryLabelColor];
+    return c;
+}
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    NSString *u = _history[ip.row];
+    _url = u;
+    _urlField.text = u;
+    [self loadURL];
+    [self pushHistory:u];
+    [tv reloadData];
+    _historyTable.hidden = YES;
+    [_urlField resignFirstResponder];
+}
+- (void)tableView:(UITableView *)tv
+   commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
+   forRowAtIndexPath:(NSIndexPath *)ip {
+    if (editingStyle == UITableViewCellEditingStyleDelete) {
+        [_history removeObjectAtIndex:ip.row];
+        [self saveHistory];
+        [tv deleteRowsAtIndexPaths:@[ip] withRowAnimation:UITableViewRowAnimationFade];
+        if (_history.count == 0) _historyTable.hidden = YES;
+    }
+}
+- (NSString *)tableView:(UITableView *)tv titleForDeleteConfirmationButtonForRowAtIndexPath:(NSIndexPath *)ip {
+    return @"删除";
+}
+
 #pragma mark - WKNavigationDelegate
 
 - (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)nav {
@@ -367,6 +625,12 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
 }
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)nav {
     [_spinner stopAnimating];
+    NSString *cur = webView.URL.absoluteString;
+    if (cur.length && _expanded) {
+        _url = cur;
+        _urlField.text = cur;
+        [self pushHistory:cur];
+    }
 }
 - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)nav withError:(NSError *)error {
     [_spinner stopAnimating];
@@ -378,17 +642,15 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
 @end
 
 // ============================================================
-// 注入入口：所有 App 都注入（Filter: AnyApplication），
-// 但设置进程（避开看门狗）和默认的主屏幕进程里不初始化。
+// 注入入口：Filter 为 Bundles=(com.apple.UIKit)，
+// 全 App + 主屏幕（都加载 UIKit）。设置进程跳过（避看门狗）。
 // ============================================================
 %ctor {
     @autoreleasepool {
         NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
-        if ([bid isEqualToString:@"com.apple.Preferences"]) return;       // 避开设置进程看门狗
+        if ([bid isEqualToString:@"com.apple.Preferences"]) return;
         if (!INCLUDE_SPRINGBOARD && [bid isEqualToString:@"com.apple.springboard"]) return;
 
-        // 启动完成后（UIApplicationDidFinishLaunching）再建 UI；
-        // 同时兜底 1.5s 强制检查一次（防止错过该通知的非标准启动路径）。
         [[NSNotificationCenter defaultCenter]
             addObserverForName:UIApplicationDidFinishLaunchingNotification
                         object:nil
@@ -396,7 +658,13 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
                     usingBlock:^(NSNotification *note){
                         [[FUFloatingManager shared] setupWhenHostReady];
                     }];
+        // 兜底：1.5s / 3.5s 各试一次（SpringBoard 没有
+        // UIApplicationDidFinishLaunchingNotification，靠轮询 + 自建窗兜底）
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [[FUFloatingManager shared] setupWhenHostReady];
+        });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             [[FUFloatingManager shared] setupWhenHostReady];
         });
