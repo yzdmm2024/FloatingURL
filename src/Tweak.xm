@@ -85,7 +85,7 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
                  (__bridge CFStringRef)kFUSuite, &valid);
     _enabled = valid ? en : YES;
 
-    CFStringRef urlRef = CFPreferencesCopyAppValue(CFSTR("url"),
+    CFPropertyListRef urlRef = CFPreferencesCopyAppValue(CFSTR("url"),
                        (__bridge CFStringRef)kFUSuite);
     if (urlRef) {
         NSString *u = (__bridge_transfer NSString *)urlRef;
