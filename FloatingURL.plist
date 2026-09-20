@@ -4,12 +4,15 @@
 <dict>
 	<key>Filter</key>
 	<dict>
-		<!-- 全 App 注入，实现「所有界面可用」。
-		     代码层已在 %ctor 里跳过 com.apple.Preferences（避开设置进程看门狗）；
-		     默认也跳过 com.apple.springboard（你文档里的红线），改 Tweak.xm 的
-		     INCLUDE_SPRINGBOARD 为 1 才会在主屏幕也显示小球。 -->
-		<key>Mode</key>
-		<string>AnyApplication</string>
+		<!-- roothide/ellekit 不支持 Mode=AnyApplication（实测完全不注入，导致悬浮按钮从不出）。
+		     改用 Bundles=com.apple.UIKit：所有 App 都加载 UIKit，等价于全局注入，
+		     这是 MyGestures 等已在你设备上验证生效的全局注入写法。
+		     com.apple.Preferences 在代码层 %ctor 里跳过（避开看门狗）；
+		     com.apple.springboard 由 Tweak.xm 的 INCLUDE_SPRINGBOARD 控制（当前=1，主屏幕也显示）。 -->
+		<key>Bundles</key>
+		<array>
+			<string>com.apple.UIKit</string>
+		</array>
 	</dict>
 </dict>
 </plist>
