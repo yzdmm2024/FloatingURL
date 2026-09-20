@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>title</key>
-	<string>悬浮URL 1.0.0</string>
+	<string>悬浮URL 1.1.0</string>
 	<key>items</key>
 	<array>
 		<dict>
@@ -88,7 +88,7 @@
 			<key>label</key>
 			<string>关于</string>
 			<key>footerText</key>
-			<string>系统级悬浮窗：屏幕边缘常驻可拖动小球，点开加载上方网址，全 App 可用。默认不含主屏幕；如需主屏幕也显示，将 Tweak.xm 顶部的 INCLUDE_SPRINGBOARD 改为 1 后重新编译。</string>
+			<string>系统级悬浮窗：屏幕边缘常驻可拖动小球，点开加载上方网址，全 App 及主屏幕均可用。</string>
 		</dict>
 	</array>
 </dict>

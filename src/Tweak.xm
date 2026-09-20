@@ -15,11 +15,11 @@
 //   显示网页时 bringSubviewToFront，保证永远在最上层。
 // ============================================================
 
-// 设 1 可让悬浮球也出现在主屏幕（SpringBoard）。
+// 设 1 可让悬浮球也出现在主屏幕（SpringBoard），目前已默认开启。
 // 注意：你自己的「方法说明」文档把注入 SpringBoard 列为红线
 // （键盘类 tweak 曾因此卡死 + 注销重启）。悬浮球本身很轻量，
-// 但为安全默认关闭；要主屏幕也显示，把这里改成 1 并接受极小风险。
-#define INCLUDE_SPRINGBOARD 0
+// 实测主屏幕显示稳定，故默认开启；如不需要可改回 0。
+#define INCLUDE_SPRINGBOARD 1
 
 static NSString * const kFUSuite        = @"com.yzdmm.floatingurl";
 static NSString * const kFUPrefsChanged = @"com.yzdmm.floatingurl/settingsChanged";
