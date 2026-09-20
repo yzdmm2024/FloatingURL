@@ -93,6 +93,25 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     [_scroll addSubview:_imgView];
 
     CGFloat side = MIN(self.view.bounds.size.width, self.view.bounds.size.height) - 40;
+    // 居中正方形裁剪框：暗化外部、框内清晰，白色框线明显，让用户看清要裁的正方形。
+    UIView *dim = [[UIView alloc] initWithFrame:self.view.bounds];
+    dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    dim.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
+    dim.userInteractionEnabled = NO;
+    CGRect vb = self.view.bounds;
+    CAShapeLayer *mask = [CAShapeLayer layer];
+    UIBezierPath *outer = [UIBezierPath bezierPathWithRect:vb];
+    CGRect sq = CGRectMake((vb.size.width - side)/2.0, (vb.size.height - side)/2.0, side, side);
+    [outer appendPath:[[UIBezierPath bezierPathWithRect:sq] bezierPathByReversingPath]];
+    mask.path = outer.CGPath; mask.fillRule = kCAFillRuleEvenOdd;
+    dim.layer.mask = mask;
+    [self.view addSubview:dim];
+    UIView *frame = [[UIView alloc] initWithFrame:sq];
+    frame.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin |
+                            UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
+    frame.layer.borderColor = [UIColor whiteColor].CGColor; frame.layer.borderWidth = 2.0;
+    frame.userInteractionEnabled = NO;
+    [self.view addSubview:frame];
     // 初始缩放：让图片至少覆盖裁剪框
     CGFloat z = side / MIN(_image.size.width, _image.size.height);
     _scroll.minimumZoomScale = z * 0.5;
@@ -119,7 +138,10 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 - (void)done {
     CGFloat side = MIN(self.view.bounds.size.width, self.view.bounds.size.height) - 40;
     CGFloat z = _scroll.zoomScale;
-    CGRect visible = CGRectMake(_scroll.contentOffset.x, _scroll.contentOffset.y, side, side);
+    // 取可视区域正中央的 side×side 正方形（与界面上的正方形框线对齐）。
+    CGRect visible = CGRectMake(_scroll.contentOffset.x + (_scroll.bounds.size.width  - side)/2.0,
+                                _scroll.contentOffset.y + (_scroll.bounds.size.height - side)/2.0,
+                                side, side);
     CGRect imgRect = CGRectMake(visible.origin.x / z, visible.origin.y / z,
                                 visible.size.width / z, visible.size.height / z);
     CGImageRef cg = CGImageCreateWithImageInRect(_image.CGImage, imgRect);
@@ -336,6 +358,8 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 
     NSArray               *_entries;
     NSMutableArray        *_fanItems;
+    NSString              *_hostBid;     // 当前宿主 App 的 bundle id（用于「作用 App」网关）
+    BOOL                  _interactive;  // 是否已临时当 key（避免重复 rekey）
 }
 
 + (instancetype)shared {
@@ -438,6 +462,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 - (void)setupWhenHostReady {
     if (![NSThread isMainThread]) { dispatch_async(dispatch_get_main_queue(), ^{ [self setupWhenHostReady]; }); return; }
     static BOOL done = NO; if (done) return;
+    _hostBid = [[NSBundle mainBundle] bundleIdentifier];
 
     UIApplication *app = UIApplication.sharedApplication;
     if (!app) {
@@ -446,13 +471,22 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
                                dispatch_get_main_queue(), ^{ [self setupWhenHostReady]; });
         return;
     }
-    // 不绑 windowScene：iOS13+ 绑 scene 的悬浮窗会被系统提升为 key → 吞掉 App 空白触摸 → 卡死。
-    // 用「非 key + hitTest 穿透」方案，显示与事件都正常。
+    // iOS13+ 必须绑定 windowScene，否则 UIWindow 不渲染（球/扇形/编辑器全都不显示）。
+    // 平时非 key + hitTest 空白穿透（不吞 App 触摸，巨魔 app 不卡死）；
+    // 仅网页面板/编辑器需键盘时临时 makeKeyWindow，关闭立即还给 App。
     if (!_overlay) {
-        _overlay = [[FUOverlayWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        __block UIWindowScene *scene = nil;
+        if (@available(iOS 13.0, *)) {
+            for (UIScene *s in app.connectedScenes) {
+                if (s.activationState == UISceneActivationStateForegroundActive &&
+                    [s isKindOfClass:[UIWindowScene class]]) { scene = (UIWindowScene *)s; break; }
+            }
+        }
+        if (scene) _overlay = [[FUOverlayWindow alloc] initWithWindowScene:scene];
+        else       _overlay = [[FUOverlayWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
         _overlay.windowLevel = 1000;
         _overlay.backgroundColor = [UIColor clearColor];
-        _overlay.hidden = NO;            // 仅可见，绝不 makeKey
+        _overlay.hidden = NO;            // 仅可见，绝不 makeKeyAndVisible
         _overlay.userInteractionEnabled = YES;
         // disabled 透明 rootVC：用于承载编辑器 VC，且其 view 不参与 hitTest（安全穿透）
         _overlayRoot = [UIViewController new];
@@ -463,6 +497,14 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     }
     done = YES;
     [self buildUI];
+    // 进入前台时实时重判「作用 App」网关，免去重启 App 才生效。
+    [[NSNotificationCenter defaultCenter] addObserver:self
+        selector:@selector(onBecomeActive) name:UIApplicationDidBecomeActiveNotification object:nil];
+    [self onBecomeActive];
+}
+- (void)onBecomeActive {
+    if (!_didSetup) return;
+    [self reloadPrefs];
     [self applyVisibility];
 }
 // 把 key 还给 App 的主窗口（level Normal）
@@ -472,8 +514,10 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
         if (w != _overlay && w.windowLevel == UIWindowLevelNormal) { [w makeKeyWindow]; break; }
     }
 }
-// 交互态（面板/扇形/编辑器）临时当 key；关闭时还给 App
+// 交互态（面板/编辑器需键盘）临时当 key；关闭时还给 App。扇形无需键盘，保持非 key。
 - (void)setInteractive:(BOOL)on {
+    if (on == _interactive) return;
+    _interactive = on;
     if (on) [_overlay makeKeyWindow];
     else [self rekeyApp];
 }
@@ -652,7 +696,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 - (void)openFan {
     if (_fanOpen || _entries.count <= 1) return;
     _fanOpen = YES; [self closeFanItemsAnimated:NO];
-    [self setInteractive:YES];   // 扇形打开 → 临时当 key，保证可点
+    // 扇形无需键盘，保持非 key（不抢 App 触摸）；触摸经 hitTest 正常命中扇形按钮。
     CGPoint c = CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame));
     BOOL left = (c.x > _overlay.bounds.size.width / 2.0);
     NSInteger n = _entries.count;
@@ -782,7 +826,18 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 }
 - (void)applyVisibility {
     if (!_didSetup) return;
-    if (!_enabled) { _ball.hidden = YES; _panel.hidden = YES; if (_fanOpen) [self closeFan]; return; }
+    // 「作用 App」网关：桌面(SpringBoard)始终显示；普通 App 受 limitApps/enabledApps 限制。
+    BOOL allowed = YES;
+    if (_hostBid && ![_hostBid isEqualToString:@"com.apple.springboard"]) {
+        Boolean valid;
+        BOOL limit = CFPreferencesGetAppBooleanValue(CFSTR("limitApps"), (__bridge CFStringRef)kFUSuite, &valid);
+        if (valid && limit) {
+            CFPropertyListRef arr = CFPreferencesCopyAppValue(CFSTR("enabledApps"), (__bridge CFStringRef)kFUSuite);
+            NSArray *list = nil; if (arr) list = (__bridge_transfer NSArray *)arr;
+            allowed = ([list isKindOfClass:[NSArray class]] && [list containsObject:_hostBid]);
+        }
+    }
+    if (!_enabled || !allowed) { _ball.hidden = YES; _panel.hidden = YES; if (_fanOpen) [self closeFan]; return; }
     if (!_expanded && !_fanOpen) { _ball.hidden = NO; [_overlay bringSubviewToFront:_ball]; [self setInteractive:NO]; }
 }
 
@@ -875,18 +930,10 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 %ctor {
     @autoreleasepool {
         NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
-        if ([bid isEqualToString:@"com.apple.Preferences"]) return;
+        if ([bid isEqualToString:@"com.apple.Preferences"]) return;   // 设置里不挂球
         if (!INCLUDE_SPRINGBOARD && [bid isEqualToString:@"com.apple.springboard"]) return;
-        // 桌面始终显示；普通 App 受 limitApps / enabledApps 限制
-        if (![bid isEqualToString:@"com.apple.springboard"]) {
-            Boolean valid;
-            BOOL limit = CFPreferencesGetAppBooleanValue(CFSTR("limitApps"), (__bridge CFStringRef)kFUSuite, &valid);
-            if (valid && limit) {
-                CFPropertyListRef arr = CFPreferencesCopyAppValue(CFSTR("enabledApps"), (__bridge CFStringRef)kFUSuite);
-                NSArray *list = nil; if (arr) list = (__bridge_transfer NSArray *)arr;
-                if (![list isKindOfClass:[NSArray class]] || ![list containsObject:bid]) return;
-            }
-        }
+        // 不再这里 early-return：「作用 App」网关改为运行时（applyVisibility + 进入前台）实时判断，
+        // 球始终创建，被限制的 App 由 applyVisibility 隐藏，无需重启 App 才生效。
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
             object:nil queue:[NSOperationQueue mainQueue]
             usingBlock:^(NSNotification *note){ [[FUFloatingManager shared] setupWhenHostReady]; }];

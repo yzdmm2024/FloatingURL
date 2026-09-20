@@ -326,22 +326,46 @@ static const NSInteger kFUMaxEntries   = 6;
 }
 - (void)viewDidLoad {
     [super viewDidLoad]; self.title = @"作用 App";
-    // 顶部：搜索 + 全选 一行
-    UIView *bar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 56)];
-    bar.autoresizingMask = UIViewAutoresizingFlexibleWidth; bar.backgroundColor = [UIColor secondarySystemBackgroundColor];
-    _search = [[UISearchBar alloc] initWithFrame:CGRectMake(8, 8, self.view.bounds.size.width - 8 - 88, 40)];
-    _search.placeholder = @"搜索 App"; _search.delegate = self; [bar addSubview:_search];
+    // 顶部：搜索 + 全选 一行（用 Auto Layout + 安全区，避免 viewDidLoad 时 bounds 未就绪导致溢出屏幕）。
+    UIView *bar = [[UIView alloc] initWithFrame:CGRectZero];
+    bar.translatesAutoresizingMaskIntoConstraints = NO;
+    bar.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    [self.view addSubview:bar];
+
+    _search = [[UISearchBar alloc] initWithFrame:CGRectZero];
+    _search.translatesAutoresizingMaskIntoConstraints = NO;
+    _search.placeholder = @"搜索 App"; _search.delegate = self;
+    [bar addSubview:_search];
+
     UIButton *all = [UIButton buttonWithType:UIButtonTypeSystem];
-    all.frame = CGRectMake(self.view.bounds.size.width - 80, 8, 72, 40);
-    all.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+    all.translatesAutoresizingMaskIntoConstraints = NO;
     [all setTitle:@"全选" forState:UIControlStateNormal]; all.titleLabel.font = [UIFont boldSystemFontOfSize:15];
     [all addTarget:self action:@selector(toggleAll) forControlEvents:UIControlEventTouchUpInside];
     [bar addSubview:all];
-    _tv = [[UITableView alloc] initWithFrame:CGRectMake(0, 56, self.view.bounds.size.width, self.view.bounds.size.height - 56)
-                                       style:UITableViewStylePlain];
-    _tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [bar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [bar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [bar.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [bar.heightAnchor constraintEqualToConstant:56],
+        [_search.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor constant:8],
+        [_search.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
+        [_search.trailingAnchor constraintEqualToAnchor:all.leadingAnchor constant:-8],
+        [all.trailingAnchor constraintEqualToAnchor:bar.trailingAnchor constant:-8],
+        [all.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
+        [all.widthAnchor constraintEqualToConstant:72],
+    ]];
+
+    _tv = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    _tv.translatesAutoresizingMaskIntoConstraints = NO;
     _tv.delegate = self; _tv.dataSource = self;
-    [self.view addSubview:bar]; [self.view addSubview:_tv];
+    [self.view addSubview:_tv];
+    [NSLayoutConstraint activateConstraints:@[
+        [_tv.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [_tv.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [_tv.topAnchor constraintEqualToAnchor:bar.bottomAnchor],
+        [_tv.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+    ]];
     [self loadApps];
 }
 - (void)toggleAll {
