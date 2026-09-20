@@ -321,15 +321,27 @@ static const NSInteger kFUMaxEntries   = 6;
     if (r) { NSArray *a = (__bridge_transfer NSArray *)r; if ([a isKindOfClass:[NSArray class]]) [_selected addObjectsFromArray:a]; }
     Class wsCls = NSClassFromString(@"LSApplicationWorkspace");
     id ws = wsCls ? [wsCls performSelector:@selector(defaultWorkspace)] : nil;
+    // 取 app 图标的稳健方式：iOS16 上 LSApplicationProxy.icon 返回的是 LSApplicationIcon（不是 UIImage），
+    // 旧写法 isKindOfClass:[UIImage] 永远失败 → 列表只剩名字没图标。改用 UIImage 私有方法直接拿 UIImage。
+    Class uiImg = NSClassFromString(@"UIImage");
+    SEL iconSel = NSSelectorFromString(@"_applicationIconImageForBundleIdentifier:format:scale:");
     if (ws) {
         NSArray *apps = [ws performSelector:@selector(allApplications)];
         for (id p in apps) {
             NSString *bid = [p performSelector:@selector(bundleIdentifier)]; if (!bid.length) continue;
             if ([bid isEqualToString:@"com.apple.Preferences"]) continue;
             UIImage *icon = nil;
-            if ([p respondsToSelector:@selector(icon)]) {
-                id ic = [p performSelector:@selector(icon)];
-                if ([ic isKindOfClass:[UIImage class]]) icon = ic;
+            if (uiImg && [uiImg respondsToSelector:iconSel]) {
+                NSInteger fmt = 2; CGFloat scale = (UIScreen.mainScreen ? UIScreen.mainScreen.scale : 2.0f);
+                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:
+                    [uiImg methodSignatureForSelector:iconSel]];
+                [inv setTarget:uiImg]; [inv setSelector:iconSel];
+                [inv setArgument:&bid atIndex:2]; [inv setArgument:&fmt atIndex:3]; [inv setArgument:&scale atIndex:4];
+                [inv invoke]; [inv getReturnValue:&icon];
+            }
+            if (!icon && [p respondsToSelector:@selector(iconDataForVariant:)]) {
+                id d = [p performSelector:@selector(iconDataForVariant:) withObject:@(2)];
+                if ([d isKindOfClass:[NSData class]]) icon = [UIImage imageWithData:d];
             }
             NSString *name = [p performSelector:@selector(localizedName)];
             [_allApps addObject:@{@"bid":bid, @"name":(name.length ? name : bid), @"icon":(icon ?: [NSNull null])}];

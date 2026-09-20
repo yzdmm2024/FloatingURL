@@ -774,12 +774,15 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
         CGRect target = CGRectMake(x - kFUButtonSize/2.0, y - kFUButtonSize/2.0, kFUButtonSize, kFUButtonSize);
         target.origin.x = MAX(2, MIN(_overlay.bounds.size.width  - kFUButtonSize - 2, target.origin.x));
         target.origin.y = MAX(2, MIN(_overlay.bounds.size.height - kFUButtonSize - 2, target.origin.y));
-        it.frame = CGRectMake(c.x - kFUButtonSize/2.0, c.y - kFUButtonSize/2.0, kFUButtonSize, kFUButtonSize);
+        // 先把最终 frame 定死（target = 40pt 小圆），再只动画 transform(缩放) + alpha。
+        // 严禁在「同一动画块」里既设 frame 又设 transform：transform 非恒等时设 frame 是 UIKit
+        // 未定义行为，会把 bounds 反解放大 1/0.1=10 倍（40→400pt 全屏巨块）。
+        it.frame = target;
         it.alpha = 0.0f; it.transform = CGAffineTransformMakeScale(0.1f, 0.1f);
         [_overlay addSubview:it]; [_fanItems addObject:it];
         [UIView animateWithDuration:0.22 delay:0.02*i usingSpringWithDamping:0.7 initialSpringVelocity:0.6
                             options:UIViewAnimationOptionCurveEaseOut
-                         animations:^{ it.frame = target; it.alpha = 1.0f; it.transform = CGAffineTransformIdentity; }
+                         animations:^{ it.alpha = 1.0f; it.transform = CGAffineTransformIdentity; }
                          completion:nil];
     }
 }
@@ -796,12 +799,19 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
         it.contentHorizontalAlignment = UIControlContentHorizontalAlignmentFill;
         it.contentVerticalAlignment   = UIControlContentVerticalAlignmentFill;
     } else {
-        it.backgroundColor = [UIColor colorWithHue:((CGFloat)idx / (CGFloat)kFUMaxEntries)
-                                         saturation:0.6 brightness:0.95 alpha:1.0];
+        // 无自定义图标：默认外观与悬浮球一致——毛玻璃 + 白色描边，避免以前那种"彩虹纯色块"。
+        it.backgroundColor = [UIColor clearColor];
+        UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:
+            [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterial]];
+        blur.frame = it.bounds;
+        blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        blur.layer.cornerRadius = kFUButtonSize/2.0; blur.clipsToBounds = YES;
+        blur.layer.borderWidth = 0.8f; blur.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.55].CGColor;
+        [it addSubview:blur];
     }
     UILabel *lab = [[UILabel alloc] initWithFrame:it.bounds];
     lab.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    lab.textAlignment = NSTextAlignmentCenter; lab.textColor = [UIColor whiteColor];
+    lab.textAlignment = NSTextAlignmentCenter; lab.textColor = img ? [UIColor whiteColor] : [UIColor labelColor];
     NSString *ch = entry[kFUEntryChar] ?: @""; NSString *lt = entry[kFUEntryLetter] ?: @"";
     lab.numberOfLines = 0; lab.font = [UIFont boldSystemFontOfSize:img ? 11 : 17];
     lab.text = img ? [NSString stringWithFormat:@"%@\n%@", ch, lt] : ch;
