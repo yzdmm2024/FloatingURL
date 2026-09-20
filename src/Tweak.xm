@@ -178,7 +178,7 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)saveHistory {
-    CFPreferencesSetAppValue(CFSTR("history"), (_history),
+    CFPreferencesSetAppValue(CFSTR("history"), (__bridge CFPropertyListRef)(_history),
         (__bridge CFStringRef)kFUSuite);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
 }
