@@ -1,1 +1,9 @@
-UGFja2FnZTogY29tLnl6ZG1tLmZsb2F0aW5ndXJsCk5hbWU6IOaCrOa1rlVSTApWZXJzaW9uOiAxLjIuOQpBcmNoaXRlY3R1cmU6IGlwaG9uZW9zLWFybTY0CkRlcGVuZHM6IGZpcm13YXJlICg+PSAxNi4wKSwgbW9iaWxlc3Vic3RyYXRlLCBwcmVmZXJlbmNlbG9hZGVyCk1haW50YWluZXI6IHl6ZG1tCkF1dGhvcjogeXpkbW0KU2VjdGlvbjogVHdlYWtzCkRlc2NyaXB0aW9uOiDns7vnu5/nuqfmgqzmta7nqpfvvJrlsY/luZXovrnnvJjluLjpqbvlj6/mi5bliqjlsI/nkIPvvIzngrnlvIDliqDovb3ku7vmhI/nvZHlnYDvvIzlhaggQXBwIOWPiuS4u+Wxj+W5leWPr+eUqOOAgnJvb3RsZXNzIOmAgumFje+8jFVSTC/mgLvlvIDlhbMv56qX5Y+j5aSn5bCP5Z2H5Y+v6LCD44CCCg==
+Package: com.yzdmm.floatingurl
+Name: 悬浮URL
+Version: 1.2.9
+Architecture: iphoneos-arm64
+Depends: firmware (>= 16.0), mobilesubstrate, preferenceloader
+Maintainer: yzdmm
+Author: yzdmm
+Section: Tweaks
+Description: 系统级悬浮窗：屏幕边缘常驻可拖动小球，点开加载任意网址，全 App 及主屏幕可用。rootless 适配，URL/总开关/窗口大小均可调。
