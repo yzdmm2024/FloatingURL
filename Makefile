@@ -25,7 +25,7 @@ FloatingURL_FRAMEWORKS = UIKit Foundation CoreGraphics WebKit
 BUNDLE_NAME = FloatingURLPrefs
 FloatingURLPrefs_FILES = Preferences/FUSettingsController.m
 FloatingURLPrefs_INSTALL_PATH = /Library/PreferenceBundles
-FloatingURLPrefs_FRAMEWORKS = UIKit Foundation
+FloatingURLPrefs_FRAMEWORKS = UIKit Foundation PhotosUI
 # 坑E：必须显式链接 Preferences（chained fixups 下 dynamic_lookup 会被 dyld 拒载）
 FloatingURLPrefs_PRIVATE_FRAMEWORKS = Preferences
 # 坑E：theos 只发 -framework 不发搜索路径，必须手动补 -F

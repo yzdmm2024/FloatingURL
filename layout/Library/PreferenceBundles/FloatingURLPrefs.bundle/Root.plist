@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>title</key>
-	<string>悬浮URL 1.2.2</string>
+	<string>悬浮URL 1.2.3</string>
 	<key>items</key>
 	<array>
 		<dict>
@@ -48,7 +48,23 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
-			<string>窗口大小</string>
+			<string>快捷URI（扇形菜单）</string>
+			<key>footerText</key>
+			<string>点开悬浮球展开扇形菜单，最多 6 个入口。每个入口可自定义图标（从相册选，自动压缩）、1 个汉字、1 个字母，以及网址/scheme。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSButtonCell</string>
+			<key>label</key>
+			<string>管理快捷URI</string>
+			<key>action</key>
+			<string>manageUrls</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>窗口大小（默认主页）</string>
 		</dict>
 		<dict>
 			<key>cell</key>
