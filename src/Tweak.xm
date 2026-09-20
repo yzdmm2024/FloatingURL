@@ -482,7 +482,7 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
     if (g.state != UIGestureRecognizerStateBegan) return;
     _barAtBottom = !_barAtBottom;
     CFPreferencesSetAppValue(CFSTR("barAtBottom"),
-        [NSNumber numberWithBool:_barAtBottom], (__bridge CFStringRef)kFUSuite);
+        (__bridge CFPropertyListRef)[NSNumber numberWithBool:_barAtBottom], (__bridge CFStringRef)kFUSuite);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
     [self layoutPanel];
 }
