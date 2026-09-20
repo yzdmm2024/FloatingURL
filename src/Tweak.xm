@@ -143,8 +143,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 @end
 
 #pragma mark - 条目编辑器（设置/长按扇形共用：URL+汉字+字母+图标）
-@interface FUEntryEditorViewController : UIViewController <PHPickerViewControllerDelegate,
-                                                            UITextFieldDelegate>
+@interface FUEntryEditorViewController : UIViewController <UITextFieldDelegate>
 @property (nonatomic, assign) NSInteger index;        // -1 = 新增
 @property (nonatomic, copy)   void (^onSaved)(void);
 @property (nonatomic, strong) UITextField *urlField, *charField, *letterField;
