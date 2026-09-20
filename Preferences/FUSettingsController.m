@@ -332,7 +332,7 @@ static const NSInteger kFUMaxEntries   = 6;
             if ([bid isEqualToString:@"com.apple.Preferences"]) continue;
             UIImage *icon = nil;
             if (uiImg && [uiImg respondsToSelector:iconSel]) {
-                NSInteger fmt = 2; CGFloat scale = (UIScreen.mainScreen ? UIScreen.mainScreen.scale : 2.0f);
+                int fmt = 2; CGFloat scale = (UIScreen.mainScreen ? UIScreen.mainScreen.scale : 2.0f);
                 NSInvocation *inv = [NSInvocation invocationWithMethodSignature:
                     [uiImg methodSignatureForSelector:iconSel]];
                 [inv setTarget:uiImg]; [inv setSelector:iconSel];
