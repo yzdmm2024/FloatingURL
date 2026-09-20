@@ -382,6 +382,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 
     NSArray               *_entries;
     NSMutableArray        *_fanItems;
+    NSMutableArray        *_fanOffsets;  // 每个扇形相对球的中心偏移(CGPoint)，拖动球时跟随用
     NSString              *_hostBid;     // 当前宿主 App 的 bundle id（用于「作用 App」网关）
     BOOL                  _interactive;  // 是否已临时当 key（避免重复 rekey）
 }
@@ -396,7 +397,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     if (self = [super init]) {
         _enabled  = YES; _url = @"https://www.apple.com";
         _winW = 340; _winH = 480; _expanded = NO; _didSetup = NO; _fanOpen = NO;
-        _history = [NSMutableArray array]; _fanItems = [NSMutableArray array];
+        _history = [NSMutableArray array]; _fanItems = [NSMutableArray array]; _fanOffsets = [NSMutableArray array];
         [self reloadPrefs]; [self loadHistory];
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
             (__bridge const void *)(self), &fuPrefsChanged,
@@ -715,7 +716,15 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
         CGRect f = _ball.frame;
         f.origin.x = MAX(0, MIN(_overlay.bounds.size.width  - f.size.width,  _ballDragOrigin.x + t.x));
         f.origin.y = MAX(0, MIN(_overlay.bounds.size.height - f.size.height, _ballDragOrigin.y + t.y));
+        CGPoint oldC = CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame));
         _ball.frame = f;
+        // 扇形展开时拖动球 → 扇形整体跟随球移动（按相对偏移平移）。
+        if (_fanOpen && _fanItems.count == _fanOffsets.count) {
+            CGPoint newC = CGPointMake(CGRectGetMidX(f), CGRectGetMidY(f));
+            CGPoint d = CGPointMake(newC.x - oldC.x, newC.y - oldC.y);
+            for (NSUInteger k = 0; k < _fanItems.count; k++)
+                _fanItems[k].center = CGPointMake(_fanItems[k].center.x + d.x, _fanItems[k].center.y + d.y);
+        }
     }
 }
 - (void)panPanel:(UIPanGestureRecognizer *)g {
@@ -764,7 +773,10 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     CGFloat base = left ? 180.0f : 0.0f;          // 球在右侧就向左展开，反之向右
     // n==1 时 span=0，直接放在 base 方向（避免除以 (n-1)=0 得到 NaN）；n>1 才真正扇形展开。
     CGFloat span = (n <= 1) ? 0.0f : MIN(140.0f, 40.0f + 30.0f * (n - 1));
-    CGFloat R = 96.0f;
+    // 半径随条目数增大，避免 6 个扇形挤在一起；最大不超过屏宽的 1/3。
+    CGFloat R = 96.0f + 8.0f * (n - 1);
+    R = MIN(R, _overlay.bounds.size.width / 3.0f);
+    [_fanOffsets removeAllObjects];
     for (NSInteger i = 0; i < n; i++) {
         // n==1 时直接放在 base 方向（避免除以 (n-1)=0 得到 NaN）。
         CGFloat a = (n <= 1) ? base : (base - span/2.0f + span * ((CGFloat)i / (CGFloat)(n - 1)));
@@ -778,6 +790,9 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
         // 严禁在「同一动画块」里既设 frame 又设 transform：transform 非恒等时设 frame 是 UIKit
         // 未定义行为，会把 bounds 反解放大 1/0.1=10 倍（40→400pt 全屏巨块）。
         it.frame = target;
+        // 记录本扇形相对「球心」的偏移，拖动球时按偏移整体平移，扇形跟着球走。
+        [_fanOffsets addObject:[NSValue valueWithCGPoint:
+            CGPointMake(CGRectGetMidX(target) - c.x, CGRectGetMidY(target) - c.y)]];
         it.alpha = 0.0f; it.transform = CGAffineTransformMakeScale(0.1f, 0.1f);
         [_overlay addSubview:it]; [_fanItems addObject:it];
         [UIView animateWithDuration:0.22 delay:0.02*i usingSpringWithDamping:0.7 initialSpringVelocity:0.6
@@ -807,6 +822,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
         blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         blur.layer.cornerRadius = kFUButtonSize/2.0; blur.clipsToBounds = YES;
         blur.layer.borderWidth = 0.8f; blur.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.55].CGColor;
+        blur.userInteractionEnabled = NO;   // 关键：否则毛玻璃会拦截触摸，导致「无图标时扇形点不动」
         [it addSubview:blur];
     }
     UILabel *lab = [[UILabel alloc] initWithFrame:it.bounds];
@@ -854,7 +870,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     [self setInteractive:NO];   // 关闭扇形 → 还给 App
 }
 - (void)closeFanItemsAnimated:(BOOL)animated {
-    NSArray *items = [_fanItems copy]; [_fanItems removeAllObjects];
+    NSArray *items = [_fanItems copy]; [_fanItems removeAllObjects]; [_fanOffsets removeAllObjects];
     CGPoint c = _ball ? CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame))
                       : CGPointMake(_overlay.bounds.size.width - 20, _overlay.bounds.size.height/2.0);
     for (UIButton *it in items) {

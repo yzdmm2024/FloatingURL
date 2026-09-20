@@ -315,6 +315,13 @@ static const NSInteger kFUMaxEntries   = 6;
 @property (nonatomic, strong) NSMutableArray *selected;    // bundle ids（黑名单：这些 App 内隐藏球）
 @end
 @implementation FUAppListController
+- (UIImage *)scaledIcon:(UIImage *)src toSize:(CGFloat)s {
+    if (!src) return nil;
+    CGRect r = CGRectMake(0, 0, s, s);
+    UIGraphicsImageRenderer *rr = [[UIGraphicsImageRenderer alloc] initWithSize:r.size];
+    return [rr imageWithActions:^(UIGraphicsImageRendererContext *ctx){
+        [src drawInRect:r]; }];
+}
 - (void)loadApps {
     _allApps = [NSMutableArray array]; _selected = [NSMutableArray array];
     CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUEnabledApps, (__bridge CFStringRef)kFUSuite);
@@ -330,7 +337,9 @@ static const NSInteger kFUMaxEntries   = 6;
         for (id p in apps) {
             NSString *bid = [p performSelector:@selector(bundleIdentifier)]; if (!bid.length) continue;
             if ([bid isEqualToString:@"com.apple.Preferences"]) continue;
-            UIImage *icon = nil;
+            // ★ ARC 坑：getReturnValue: 直接把返回的对象指针拷进变量，ARC 不会为其插入 retain，
+            //   而该对象通常已在 autorelease 池里——必须用 __autoreleasing，否则作用域结束 ARC 多 release 一次 → 崩溃（闪退）。
+            UIImage *__autoreleasing icon = nil;
             if (uiImg && [uiImg respondsToSelector:iconSel]) {
                 int fmt = 2; CGFloat scale = (UIScreen.mainScreen ? UIScreen.mainScreen.scale : 2.0f);
                 NSInvocation *inv = [NSInvocation invocationWithMethodSignature:
@@ -343,6 +352,7 @@ static const NSInteger kFUMaxEntries   = 6;
                 id d = [p performSelector:@selector(iconDataForVariant:) withObject:@(2)];
                 if ([d isKindOfClass:[NSData class]]) icon = [UIImage imageWithData:d];
             }
+            if (icon) icon = [self scaledIcon:icon toSize:40];   // 统一缩到 40×40，避免大图标在列表里显得过大
             NSString *name = [p performSelector:@selector(localizedName)];
             [_allApps addObject:@{@"bid":bid, @"name":(name.length ? name : bid), @"icon":(icon ?: [NSNull null])}];
         }
