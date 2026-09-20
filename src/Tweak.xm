@@ -3,7 +3,11 @@
 #import <objc/runtime.h>
 #import <math.h>
 #import <notify.h>
-#import <PhotosUI/PhotosUI.h>
+
+// PhotosUI 在 SDK14.5 下无法以模块方式编译（simd/cmath 缺失），tweak 里不 import 头文件，
+// 改用运行时 NSClassFromString 调用 PHPicker，避免模块构建失败。
+@class PHPickerConfiguration, PHPickerViewController, PHPickerResult, PHPickerFilter;
+@protocol PHPickerViewControllerDelegate;
 
 // ============================================================
 // 悬浮URL —— 系统级悬浮窗 tweak（rootless / iOS16 / A14 arm64e）
@@ -232,18 +236,22 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     }
 }
 - (void)pickIcon {
-    PHPickerConfiguration *cfg = [[PHPickerConfiguration alloc] init];
-    cfg.selectionLimit = 1; cfg.filter = [PHPickerFilter imagesFilter];
-    PHPickerViewController *p = [[PHPickerViewController alloc] initWithConfiguration:cfg];
-    p.delegate = self;
+    Class cfgCls = NSClassFromString(@"PHPickerConfiguration"); if (!cfgCls) return;
+    id cfg = [[cfgCls alloc] init];
+    [cfg setValue:@1 forKey:@"selectionLimit"];
+    id filter = [NSClassFromString(@"PHPickerFilter") valueForKey:@"imagesFilter"];
+    if (filter) [cfg setValue:filter forKey:@"filter"];
+    Class pvcCls = NSClassFromString(@"PHPickerViewController"); if (!pvcCls) return;
+    id p = [[pvcCls alloc] performSelector:@selector(initWithConfiguration:) withObject:cfg];
+    [p setValue:self forKey:@"delegate"];
     [self presentViewController:p animated:YES completion:nil];
 }
-- (void)picker:(PHPickerViewController *)picker
-        didFinishPicking:(NSArray<PHPickerResult *> *)results {
+- (void)picker:(id)picker didFinishPicking:(NSArray *)results {
     [picker dismissViewControllerAnimated:YES completion:nil];
     if (!results.count) return;
-    [results.firstObject.itemProvider loadObjectOfClass:[UIImage class]
-                                 completionHandler:^(__kindof id obj, NSError *err){
+    id provider = [results.firstObject valueForKey:@"itemProvider"]; if (!provider) return;
+    [provider loadObjectOfClass:[UIImage class]
+                 completionHandler:^(__kindof id obj, NSError *err){
         if ([obj isKindOfClass:[UIImage class]]) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 FUCropViewController *crop = [[FUCropViewController alloc] init];
