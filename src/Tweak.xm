@@ -735,12 +735,12 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     CFPreferencesSetAppValue((__bridge CFStringRef)kFUSync,
         (__bridge CFPropertyListRef)d, (__bridge CFStringRef)kFUSuite);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
-    notify_post(kFUSyncChanged);
+    notify_post("com.yzdmm.floatingurl/syncChanged");
 }
 
 - (void)applySync {
     if (_applyingRemote) return;
-    CFDictionaryRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUSync,
+    CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUSync,
                                   (__bridge CFStringRef)kFUSuite);
     if (!r) return;
     NSDictionary *d = (__bridge_transfer NSDictionary *)r;
