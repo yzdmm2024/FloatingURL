@@ -33,8 +33,16 @@ static const NSInteger kFUMaxEntries   = 6;
         [[UIBarButtonItem alloc] initWithTitle:@"取消" style:UIBarButtonItemStylePlain
                                         target:self action:@selector(cancel)];
 
+    // 内容包进 ScrollView：自动按安全区避让导航栏/状态栏，修复字段顶到导航栏、跑出屏幕
+    UIScrollView *scroll = [[UIScrollView alloc] initWithFrame:self.view.bounds];
+    scroll.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    scroll.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+    scroll.alwaysBounceVertical = YES;
+    [self.view addSubview:scroll];
+
     __block CGFloat y = 20;
     CGFloat pad = 16, w = self.view.bounds.size.width - pad*2, h = 40;
+    __block UIScrollView *scrollRef = scroll;
     UIView * (^mkField)(NSString *, NSString *, UIKeyboardType) = ^UIView *(NSString *ph, NSString *val, UIKeyboardType kt){
         UITextField *tf = [[UITextField alloc] initWithFrame:CGRectMake(pad, y, w, h)];
         tf.placeholder = ph; tf.text = val; tf.borderStyle = UITextBorderStyleRoundedRect;
@@ -43,7 +51,7 @@ static const NSInteger kFUMaxEntries   = 6;
         tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
         tf.delegate = self;
         y += h + 12;
-        [self.view addSubview:tf];
+        [scrollRef addSubview:tf];
         return tf;
     };
     _urlField    = (UITextField *)mkField(@"网址 / scheme（如 https://a.com 或 weixin://）", nil, UIKeyboardTypeURL);
@@ -58,7 +66,7 @@ static const NSInteger kFUMaxEntries   = 6;
     _iconButton.layer.borderColor = [UIColor separatorColor].CGColor;
     [_iconButton setTitle:@"选择图标（从相册）" forState:UIControlStateNormal];
     [_iconButton addTarget:self action:@selector(pickIcon) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:_iconButton];
+    [scroll addSubview:_iconButton];
     y += 56 + 12;
 
     // 清除图标
@@ -66,7 +74,9 @@ static const NSInteger kFUMaxEntries   = 6;
     clear.frame = CGRectMake(pad, y, w, 40);
     [clear setTitle:@"清除图标（用汉字/字母显示）" forState:UIControlStateNormal];
     [clear addTarget:self action:@selector(clearIcon) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:clear];
+    [scroll addSubview:clear];
+    y += 40 + 24;
+    scroll.contentSize = CGSizeMake(self.view.bounds.size.width, y);
 
     // 预填当前条目
     if (_index >= 0 && _index < (NSInteger)_entries.count) {

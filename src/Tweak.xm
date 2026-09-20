@@ -8,6 +8,11 @@
 // 悬浮URL —— 系统级悬浮窗 tweak（rootless / iOS16 / A14 arm64e）
 // 包名：com.yzdmm.floatingurl
 //
+// v1.2.4 变更：
+//  - 【致命修复】FUOverlayWindow 绑定 foreground-active 的 UIWindowScene：iOS13+ scene-based
+//    App 里未绑 scene 的 window 不参与渲染/事件分发（球不出现 / 看得见点不动）。
+//  - 去掉 overlay 的 rootViewController：空白区域 hitTest 命中 window 本身 → 返回 nil 真穿透。
+//  - 设置「新增/编辑URI」页内容包进 ScrollView，自动按安全区避让导航栏（修复跑出屏幕）。
 // v1.2.3 变更：
 //  - 穿透 window：悬浮 UI 统一挂到自建的 FUOverlayWindow（高 level、clear、绝不设为 key、
 //    hitTest 空白区域返回 nil 穿透），根治「主屏图标被悬浮层吞触摸」。
@@ -49,7 +54,8 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 @implementation FUOverlayWindow
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
-    // 命中自己（空白区域）就返回 nil → 触摸穿透到下层窗口（主屏图标/App 照常可点）
+    // 命中 window 自身（空白区域，未设 rootViewController 时即此情形）→ 返回 nil，
+    // 触摸穿透到下层窗口（主屏图标 / App 内容照常可点）；命中球/面板/扇形则正常返回。
     return (hit == self) ? nil : hit;
 }
 @end
