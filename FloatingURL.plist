@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Filter</key>
+	<dict>
+		<!-- 全 App 注入，实现「所有界面可用」。
+		     代码层已在 %ctor 里跳过 com.apple.Preferences（避开设置进程看门狗）；
+		     默认也跳过 com.apple.springboard（你文档里的红线），改 Tweak.xm 的
+		     INCLUDE_SPRINGBOARD 为 1 才会在主屏幕也显示小球。 -->
+		<key>Mode</key>
+		<string>AnyApplication</string>
+	</dict>
+</dict>
+</plist>

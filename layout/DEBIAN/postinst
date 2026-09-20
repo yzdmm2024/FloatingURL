@@ -1,0 +1,4 @@
+#!/bin/bash
+# 安装后注销主界面让设置入口与 tweak 重新加载（rootless 下 kill SpringBoard 即 respring）
+killall -9 SpringBoard 2>/dev/null || true
+exit 0

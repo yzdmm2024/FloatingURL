@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>title</key>
+	<string>悬浮URL 1.0.0</string>
+	<key>items</key>
+	<array>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>总开关</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.yzdmm.floatingurl</string>
+			<key>key</key>
+			<string>enabled</string>
+			<key>label</key>
+			<string>启用悬浮窗</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>网页</string>
+			<key>footerText</key>
+			<string>悬浮窗打开后加载的网址，需含 http:// 或 https:// 。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSEditTextCell</string>
+			<key>defaults</key>
+			<string>com.yzdmm.floatingurl</string>
+			<key>key</key>
+			<string>url</string>
+			<key>label</key>
+			<string>网址 URL</string>
+			<key>default</key>
+			<string>https://www.apple.com</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>窗口大小</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>default</key>
+			<real>340</real>
+			<key>min</key>
+			<real>240</real>
+			<key>max</key>
+			<real>600</real>
+			<key>defaults</key>
+			<string>com.yzdmm.floatingurl</string>
+			<key>key</key>
+			<string>winWidth</string>
+			<key>label</key>
+			<string>宽度</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>default</key>
+			<real>480</real>
+			<key>min</key>
+			<real>320</real>
+			<key>max</key>
+			<real>900</real>
+			<key>defaults</key>
+			<string>com.yzdmm.floatingurl</string>
+			<key>key</key>
+			<string>winHeight</string>
+			<key>label</key>
+			<string>高度</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>关于</string>
+			<key>footerText</key>
+			<string>系统级悬浮窗：屏幕边缘常驻可拖动小球，点开加载上方网址，全 App 可用。默认不含主屏幕；如需主屏幕也显示，将 Tweak.xm 顶部的 INCLUDE_SPRINGBOARD 改为 1 后重新编译。</string>
+		</dict>
+	</array>
+</dict>
+</plist>
