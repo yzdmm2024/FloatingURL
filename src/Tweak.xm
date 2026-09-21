@@ -5,8 +5,6 @@
 #import <stdlib.h>
 #import <notify.h>
 #import <dlfcn.h>
-#include <unistd.h>            // v1.3.27：usleep（截图前让渲染服务把球拿掉）
-#import <QuartzCore/QuartzCore.h>  // v1.3.27：CATransaction flush
 
 // PhotosUI 在 SDK14.5 下无法以模块方式编译（simd/cmath 缺失），tweak 里不 import 头文件，
 // 改用运行时 NSClassFromString 调用 PHPicker，避免模块构建失败。
@@ -66,9 +64,6 @@ static NSString * const kFUIconSize    = @"iconSize";   // 快捷图标尺寸 pt
 static NSString * const kFUIconGap     = @"iconGap";    // 图标/圈层间隔 pt
 static NSString * const kFUFanSpan     = @"fanSpan";    // v1.3.2 扇形角度（60~180°，默认 180）
 static NSString * const kFUFanAutoHide = @"fanAutoHide"; // v1.3.21：扇形展开后闲置多少秒自动收回（0=不自动收，默认 5）
-static NSString * const kFUCaptureHide = @"captureHide"; // v1.3.25：截图/录屏时自动收拢扇形并临时隐藏悬浮球（默认开）
-static NSString * const kFUAutoMirror  = @"iconAutoMirror"; // v1.3.27：图标自动区分左右（主体跟球同侧），默认开
-static const NSInteger kFUKeepForever  = 999;            // v1.3.25：秒数滑杆最右一档「常驻」哨兵（永不吸附）
 static NSString * const kFUFanScale    = @"fanScale";   // v1.3.2 整体距离（%，默认 100）
 static NSString * const kFULayer1Count = @"layer1";     // v1.3.3：第一层入口数（0=自动）
 static NSString * const kFULayer2Count = @"layer2";     // v1.3.3：第二层入口数（0=自动）
@@ -356,7 +351,7 @@ static void fuStartAppHeartbeat(NSString *bid) {
         tf.delegate = self;
         y += h + 12; [scroll addSubview:tf]; return tf;
     };
-    _urlField    = (UITextField *)mkField(@"网址 / scheme（https://a.com、weixin://、prefs:root=xxx）", nil, UIKeyboardTypeURL);
+    _urlField    = (UITextField *)mkField(@"网址 / scheme（如 https://a.com 或 weixin://）", nil, UIKeyboardTypeURL);
 
     // 文字（汉字或字母，1 个字符）—— 合并为单框
     _labelField = [[UITextField alloc] initWithFrame:CGRectMake(pad, y, w, 40)];
@@ -584,9 +579,6 @@ static void fuStartAppHeartbeat(NSString *bid) {
 - (void)showRespringPrompt;                  // v1.3.17：升级后「立即注销 / 稍后」选择框
 - (void)fuOpenViaFBS:(NSURL *)u;             // v1.3.13：FrontBoard 异步接口（失败回调里继续往下兜底）
 - (void)fuOpenViaWorkspace:(NSURL *)u;       // v1.3.13：LSApplicationWorkspace 最后兜底
-- (void)fuOpenPrefsURL:(NSURL *)u;          // v1.3.26：设置页深链 prefs:/App-Prefs: 专用入口
-- (void)fuCaptureWillHide;                             // v1.3.27：截图按下快门前收拢扇形 + 藏球
-- (UIImage *)fuIconForDisplay:(UIImage *)img;           // v1.3.27：图标自动区分左右（按球在左/右半边）
 - (NSArray *)fuFanPointArray;                           // v1.3.13：扇形点位（openFan 与拖动重排共用同一套算法）
 - (void)fuScheduleFanAutoHide;                          // v1.3.21：重排「闲置自动收回」倒计时
 - (void)fuCancelFanAutoHide;                            // v1.3.21：取消空闲收回倒计时
@@ -602,66 +594,6 @@ static void fuStartAppHeartbeat(NSString *bid) {
 // v1.3.24 省电：息屏时直接跳过轮询（不读偏好、不判前台、不动 UI）。
 // SpringBoard 里直接问 SBBacklightController（本 dylib 就跑在 SpringBoard，类是真实存在的）；
 // 取不到就一律当作「亮屏」——最坏也只是回到原来的行为，不会锁死功能。
-// ===== v1.3.27：图标「自动区分左右」的底层工具 =====
-// 判断一张图的主体偏哪一侧：缩到 40x40，四角平均色当背景，统计与背景差异明显的像素的水平重心。
-// 返回 -1 = 主体偏左，1 = 主体偏右，0 = 居中（或判不出来）—— 居中的一律不翻，免得把正常图标翻坏。
-static NSInteger fuSubjectSideOfImage(UIImage *img) {
-    if (!img || !img.CGImage) return 0;
-    const size_t W = 40, H = 40;
-    unsigned char *buf = (unsigned char *)calloc(W * H * 4, 1);
-    if (!buf) return 0;
-    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    CGContextRef ctx = CGBitmapContextCreate(buf, W, H, 8, W * 4, cs,
-                                             kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
-    CGColorSpaceRelease(cs);
-    if (!ctx) { free(buf); return 0; }
-    CGContextDrawImage(ctx, CGRectMake(0, 0, (CGFloat)W, (CGFloat)H), img.CGImage);
-    CGContextRelease(ctx);
-    const size_t cxv[4] = {0, W - 1, 0, W - 1}, cyv[4] = {0, 0, H - 1, H - 1};
-    long br = 0, bg = 0, bb = 0;
-    for (int i = 0; i < 4; i++) {
-        unsigned char *p = buf + ((cyv[i] * W) + cxv[i]) * 4;
-        br += p[0]; bg += p[1]; bb += p[2];
-    }
-    br /= 4; bg /= 4; bb /= 4;
-    double sum = 0; long cnt = 0;
-    for (size_t y = 0; y < H; y++) {
-        for (size_t x = 0; x < W; x++) {
-            unsigned char *p = buf + (y * W + x) * 4;
-            if (p[3] < 24) continue;                       // 透明像素不算主体
-            int dr = (int)p[0] - (int)br; if (dr < 0) dr = -dr;
-            int dg = (int)p[1] - (int)bg; if (dg < 0) dg = -dg;
-            int db = (int)p[2] - (int)bb; if (db < 0) db = -db;
-            if (dr + dg + db > 48) { sum += (double)x; cnt++; }
-        }
-    }
-    free(buf);
-    if (cnt < 16) return 0;                                // 主体太小 → 不判
-    double meanX = (sum / (double)cnt) / (double)W;        // 0..1
-    if (meanX < 0.44) return -1;
-    if (meanX > 0.56) return  1;
-    return 0;
-}
-static NSInteger fuSubjectSideOfData(NSData *d) {
-    if (!d.length) return 0;
-    UIImage *im = [UIImage imageWithData:d];
-    return im ? fuSubjectSideOfImage(im) : 0;
-}
-// 水平镜像（重绘一份，原图不动）
-static UIImage *fuMirroredImage(UIImage *img) {
-    if (!img) return nil;
-    CGSize sz = img.size;
-    if (sz.width < 1.0 || sz.height < 1.0) return img;
-    UIGraphicsBeginImageContextWithOptions(sz, NO, img.scale);
-    CGContextRef c = UIGraphicsGetCurrentContext();
-    CGContextTranslateCTM(c, sz.width, 0);
-    CGContextScaleCTM(c, -1.0, 1.0);
-    [img drawInRect:CGRectMake(0, 0, sz.width, sz.height)];
-    UIImage *out = UIGraphicsGetImageFromCurrentImageContext();
-    UIGraphicsEndImageContext();
-    return out ?: img;
-}
-
 static BOOL fuScreenIsOn(void) {
     @try {
         Class cls = NSClassFromString(@"SBBacklightController");
@@ -726,12 +658,6 @@ static void fuFrontGoneCb(CFNotificationCenterRef center, void *observer,
     // v1.3.21：扇形闲置自动收回（设置里可调秒数，0=永不自动收）
     NSTimer              *_fanHideTimer;
     BOOL                  _edgeGuard;     // v1.3.24：悬浮球是否在「会撞车的边」上压住系统手势（默认开）
-    BOOL                  _captureHide;   // v1.3.25：截图/录屏时自动收拢扇形 + 临时隐藏悬浮球（默认开）
-    BOOL                  _captureHiding; // v1.3.25：当前正处于「截图/录屏隐藏」中
-    NSInteger             _captureToken;  // v1.3.25：隐藏→恢复的代次，防止画面还没拍完就提前把球显示回来
-    BOOL                  _autoMirror;        // v1.3.27：图标自动区分左右
-    NSInteger             _ballIconSide;      // v1.3.27：球图标主体偏侧（-1 左 / 0 居中 / 1 右）
-    BOOL                  _ballShownMirrored; // v1.3.27：球图标当前是否已镜像（变更检测用）
     BOOL                  _screenWasOn;   // v1.3.24：上次轮询时的亮屏状态（亮屏瞬间补一次完整刷新）
     CGFloat               _fanAutoHide;
     BOOL                  _applyingRemote;
@@ -791,8 +717,6 @@ static void fuFrontGoneCb(CFNotificationCenterRef center, void *observer,
         _snapDelay = 3.0;                                  // v1.3.13：默认吸附延时 3 秒（松手后先给完整图标）
         _layer1 = 8; _layer2 = 16; _layer3 = 24;           // v1.3.6：三层默认数量 8/16/24（合计 48）
         _edgeGuard = YES; _screenWasOn = YES;              // v1.3.24：默认压住冲突边 + 起始按亮屏算
-        _captureHide = YES; _captureHiding = NO; _captureToken = 0;   // v1.3.25
-        _autoMirror = YES; _ballIconSide = 0; _ballShownMirrored = NO;   // v1.3.27
         _frontWatched = [NSMutableSet set];
         _fanItems = [NSMutableArray array]; _fanOffsets = [NSMutableArray array];
         [self reloadPrefs];
@@ -843,14 +767,6 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     Boolean egValid;
     BOOL eg = CFPreferencesGetAppBooleanValue(CFSTR("edgeGuard"), (__bridge CFStringRef)kFUSuite, &egValid);
     _edgeGuard = egValid ? eg : YES;
-    // v1.3.25：截图/录屏时是否自动收拢 + 隐藏悬浮球（默认开）
-    Boolean chValid;
-    BOOL ch = CFPreferencesGetAppBooleanValue((__bridge CFStringRef)kFUCaptureHide, (__bridge CFStringRef)kFUSuite, &chValid);
-    _captureHide = chValid ? ch : YES;
-    // v1.3.27：图标自动区分左右（主体跟着球走），默认开
-    Boolean amValid;
-    BOOL am = CFPreferencesGetAppBooleanValue((__bridge CFStringRef)kFUAutoMirror, (__bridge CFStringRef)kFUSuite, &amValid);
-    _autoMirror = amValid ? am : YES;
     // v1.3.1 布局：停靠边(side) + 图标大小 + 图标间隔（位置不再用 X/Y 滑杆，球固定在左/右边）
     CFPropertyListRef sdRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUSide, (__bridge CFStringRef)kFUSuite);
     if (sdRef && CFGetTypeID(sdRef) == CFNumberGetTypeID()) { _side = [(__bridge NSNumber *)sdRef integerValue]; CFRelease(sdRef); }
@@ -902,7 +818,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
         _snapDelay = [(__bridge NSNumber *)sdlyRef doubleValue];
         CFRelease(sdlyRef);
     } else if (sdlyRef) { CFRelease(sdlyRef); }
-    if (_snapDelay < 0) _snapDelay = 0; if (_snapDelay > 15.0 && _snapDelay < kFUKeepForever) _snapDelay = 15.0;   // v1.3.25：999 = 常驻    // v1.3.9 修 05（真机实测确认的根因）：键被删掉时 CFPreferencesCopyAppValue 返回 NULL，
+    if (_snapDelay < 0) _snapDelay = 0; if (_snapDelay > 15) _snapDelay = 15;    // v1.3.9 修 05（真机实测确认的根因）：键被删掉时 CFPreferencesCopyAppValue 返回 NULL，
     // 而旧代码两个分支都不走 → _ballIcon / _ballColor / _ballTitle **保持上一次的旧值**，
     // 于是「设置里删了照片，球上照片还在」。这里必须在读到 NULL 时明确清空。
     CFPropertyListRef btRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallTitle, (__bridge CFStringRef)kFUSuite);
@@ -1015,24 +931,6 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 - (NSString *)normalizeURL:(NSString *)raw {
     NSString *s = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (!s.length) return nil;
-    // v1.3.26：自己按 RFC 3986 切一次 scheme。
-    //   scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )，必须出现在第一个 '/'、'?'、'#' 之前，且不含 '.'。
-    //   「不含 '.'」是用来把 weixin:// / prefs:root=X 这类真 scheme 与 www.a.com:8080 这种裸域名区分开。
-    //   旧写法依赖 NSURLComponents，碰到 prefs:root=X 这种没有「//」的串不稳，会被误加 https:// 前缀 —— 那正是
-    //   「设置页 URL 填了却点了没反应」的元凶之一。
-    NSRange cut = [s rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"/?#"]];
-    NSRange colon = [s rangeOfString:@":"];
-    if (colon.location != NSNotFound && colon.location > 0 &&
-        (cut.location == NSNotFound || colon.location < cut.location)) {
-        NSString *sch = [s substringToIndex:colon.location];
-        NSCharacterSet *bad = [[NSCharacterSet characterSetWithCharactersInString:
-                                @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+-."] invertedSet];
-        if ([sch rangeOfCharacterFromSet:bad].location == NSNotFound &&
-            [sch rangeOfString:@"."].location == NSNotFound) {
-            // scheme 统一小写：输入 Prefs: / APP-PREFS: 一样能开
-            return [[sch lowercaseString] stringByAppendingString:[s substringFromIndex:colon.location]];
-        }
-    }
     NSURLComponents *c = [NSURLComponents componentsWithString:s];
     if (c && c.scheme.length && [c.scheme rangeOfString:@"."].location == NSNotFound) return s;
     return [@"https://" stringByAppendingString:s];
@@ -1089,7 +987,6 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     // 进入前台时实时重判「作用 App」网关，免去重启 App 才生效。
     [[NSNotificationCenter defaultCenter] addObserver:self
         selector:@selector(onBecomeActive) name:UIApplicationDidBecomeActiveNotification object:nil];
-    [self fuSetupCaptureObservers];   // v1.3.25：截图 / 录屏 / 第三方局部截图 → 自动收拢 + 临时隐藏
     // v1.3.0 兜底：每秒重读偏好并重判黑名单/开关。Darwin 通知在某些 App（如 QQ）里会被
     // 延迟或吞掉，导致「设置里加了黑名单、球还在」——轮询保证 1 秒内必生效。
     if (!_pollTimer) {
@@ -1208,40 +1105,19 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     [self fuRefreshDeferredEdges];   // v1.3.24：按恢复出来的位置压住对应边
 }
 // v1.3.5 修 05：把自定义的名称/图标/底色应用到悬浮球（图标优先于文字）
-// v1.3.27：图标自动区分左右 —— 判断的是「屏幕左半边 / 右半边」，不是四个角。
-// 球在左半边 → 图标主体要出现在左边；球在右半边 → 主体要出现在右边。
-// 主体与球不同侧就水平镜像一次（同侧/居中不动，不会来回跳）。
-- (UIImage *)fuIconForDisplay:(UIImage *)img {
-    if (!img || !_autoMirror) return img;
-    NSInteger side = fuSubjectSideOfImage(img);
-    if (side == 0) return img;
-    CGRect s = _overlay ? _overlay.bounds : [UIScreen mainScreen].bounds;
-    CGFloat bx = _ball ? CGRectGetMidX(_ball.frame) : s.size.width / 2.0f;
-    BOOL ballRight = (bx > s.size.width / 2.0f);
-    if ((side > 0) != ballRight) return fuMirroredImage(img);
-    return img;
-}
-
 - (void)applyBallAppearance {
     if (!_ball) return;
     NSString *titleNow = (_ballTitle.length ? _ballTitle : @"URL");
     // v1.3.13：这个方法每秒都会被轮询调到 —— 外观没变就直接返回，别反复解码球图标（省电、少卡顿）。
-    BOOL iconChanged = !((_ballIcon == nil && _ballIconShown == nil) ||
-                         (_ballIcon != nil && _ballIconShown != nil && [_ballIcon isEqualToData:_ballIconShown]));
-    if (iconChanged) _ballIconSide = fuSubjectSideOfData(_ballIcon);   // v1.3.27：图标变了才重判主体侧（省电）
-    CGRect bs = _overlay ? _overlay.bounds : [UIScreen mainScreen].bounds;
-    CGFloat bmx = _ball ? CGRectGetMidX(_ball.frame) : bs.size.width / 2.0f;
-    BOOL ballRight = (bmx > bs.size.width / 2.0f);
-    BOOL mirrorNow = (_autoMirror && _ballIconSide != 0 && ((_ballIconSide > 0) != ballRight));
     if (_ballImageView) {
-        BOOL sameIcon  = !iconChanged;
+        BOOL sameIcon  = (_ballIcon == nil && _ballIconShown == nil) ||
+                         (_ballIcon != nil && _ballIconShown != nil && [_ballIcon isEqualToData:_ballIconShown]);
         BOOL sameTitle = [_ballShownTitle isEqualToString:titleNow];
         BOOL sameColor = (_ballColor == nil && _ballShownColor == nil) ||
                          (_ballColor != nil && _ballShownColor != nil && [_ballColor isEqualToString:_ballShownColor]);
-        if (sameIcon && sameTitle && sameColor && mirrorNow == _ballShownMirrored) return;
+        if (sameIcon && sameTitle && sameColor) return;
     }
     _ballIconShown = _ballIcon; _ballShownTitle = titleNow; _ballShownColor = _ballColor;
-    _ballShownMirrored = mirrorNow;
     if (!_ballImageView) {
         _ballImageView = [[UIImageView alloc] initWithFrame:_ball.bounds];
         _ballImageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -1251,7 +1127,6 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
         [_ballBlur.contentView addSubview:_ballImageView];
     }
     UIImage *img = _ballIcon.length ? [UIImage imageWithData:_ballIcon] : nil;
-    if (img && mirrorNow) img = fuMirroredImage(img);   // v1.3.27：按球所在左右半边自动镜像
     if (img) {
         _ballImageView.image = img; _ballImageView.hidden = NO; _ballLabel.hidden = YES;
         _ballBlur.backgroundColor = [UIColor clearColor];
@@ -1364,7 +1239,6 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 }
 - (void)scheduleSnapAfterDrop {
     if (!_ball || !_overlay) return;
-    if (_captureHiding) return;   // v1.3.25：截图/录屏隐藏期间不要把球重新点亮
     _snapGen++; NSInteger myGen = _snapGen;
     [self clampBallFullyIntoView];
     [self persistBallPos];       // 先把「完整可见」的落点记下来（重启后原位恢复）
@@ -1374,7 +1248,6 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     _ball.alpha = 1.0f;          // ★ 延时期间 = 完整的悬浮图标（用户明确要的效果）
     if (_fanOpen) { _snapPending = YES; return; }   // 扇形还开着 → 等关掉再排（见 closeFan）
     _snapPending = NO;
-    if (_snapDelay >= (NSTimeInterval)kFUKeepForever) { _ball.alpha = 1.0f; return; }   // v1.3.25：常驻 = 永不吸附，一直完整显示
     NSTimeInterval d = MAX(0.0, _snapDelay);
     if (d <= 0.05) { [self doSnapToEdgeWithGen:myGen]; return; }   // 设成 0 = 立即吸附（老行为）
     __weak FUFloatingManager *ws = self;
@@ -1407,83 +1280,6 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     }];
 }
 // 球处于「半隐吸附态」时，点击先把它完整拉回屏幕内（再弹环/面板）。
-
-#pragma mark - v1.3.25：截图 / 录屏时自动收拢并隐藏（不把悬浮球和扇形拍进画面）
-// 触发源（全部靠系统通知，不轮询、不额外耗电）：
-//   ① UIApplicationUserDidTakeScreenshotNotification —— 系统截图，瞬时事件，隐藏 1.6 秒
-//   ② UIScreenCapturedDidChangeNotification —— 录屏 / 第三方局部截图会置位 isCaptured，
-//      整个期间持续隐藏，停止后再自动恢复并把悬浮按钮显示出来
-- (void)fuSetupCaptureObservers {
-    [[NSNotificationCenter defaultCenter] addObserver:self
-        selector:@selector(fuCapturedStateChanged)
-        name:UIScreenCapturedDidChangeNotification object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self
-        selector:@selector(fuScreenshotTaken)
-        name:UIApplicationUserDidTakeScreenshotNotification object:nil];
-}
-- (void)fuScreenshotTaken {
-    if (!_captureHide) return;
-    [self fuBeginCaptureHide];
-    NSInteger tk = ++_captureToken;
-    __weak FUFloatingManager *ws = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        FUFloatingManager *ss = ws; if (!ss) return;
-        if (ss->_captureToken != tk) return;
-        if ([UIScreen mainScreen].captured) return;   // 还在录屏/截取中 → 交给状态回调收尾
-        [ss fuEndCaptureHide];
-    });
-}
-- (void)fuCapturedStateChanged {
-    BOOL cap = [UIScreen mainScreen].captured;
-    if (cap && _captureHide) { _captureToken++; [self fuBeginCaptureHide]; }
-    else if (!cap && _captureHiding) { _captureToken++; [self fuEndCaptureHide]; }
-}
-// v1.3.27：截图「按下快门之前」就收拢扇形 + 藏球。
-// 为什么必须有它：球和扇形只建在 SpringBoard 里（别的 App 进程只发心跳），而
-// UIApplicationUserDidTakeScreenshotNotification 是发给「最前面的那个 App」的 —— SpringBoard 收不到，
-// 所以 1.3.25 的截图路径永远不触发（录屏用的 UIScreenCapturedDidChangeNotification 是全局屏幕状态，
-// SpringBoard 能收到，所以只有录屏生效）。这里由 SpringBoard 侧的截图钩子直接调用。
-- (void)fuCaptureWillHide {
-    if (![NSThread isMainThread]) {
-        __weak FUFloatingManager *ww = self;
-        dispatch_async(dispatch_get_main_queue(), ^{ FUFloatingManager *ss = ww; if (ss) [ss fuCaptureWillHide]; });
-        return;
-    }
-    if (!_captureHide) return;
-    [self fuBeginCaptureHide];
-    NSInteger tk = ++_captureToken;
-    __weak FUFloatingManager *ws = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.8 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        FUFloatingManager *ss = ws; if (!ss) return;
-        if (ss->_captureToken != tk) return;
-        if ([UIScreen mainScreen].captured) return;   // 还在录屏/截取中 → 交给状态回调收尾
-        [ss fuEndCaptureHide];
-    });
-}
-
-// 收拢扇形 + 临时藏球（悬浮球与扇形都不会出现在截图/录像里）
-- (void)fuBeginCaptureHide {
-    if (!_ball || !_overlay) return;
-    if (_fanOpen) [self closeFan];
-    if (_captureHiding) return;
-    _captureHiding = YES;
-    for (UIButton *it in _fanItems) it.alpha = 0.0f;
-    _ball.userInteractionEnabled = NO;
-    _ball.alpha = 0.0f;
-}
-// 恢复：重新显示悬浮按钮，并按「吸附延时」重新排队归位
-- (void)fuEndCaptureHide {
-    if (!_captureHiding) return;
-    _captureHiding = NO;
-    if (!_ball) return;
-    _ball.userInteractionEnabled = YES;
-    _ball.alpha = 1.0f;
-    [self restoreBallFromSnap];
-    [self scheduleSnapAfterDrop];
-}
-
 - (void)restoreBallFromSnap {
     if (!_ball) return;
     CGRect s = _overlay.bounds; CGRect f = _ball.frame;
@@ -1737,7 +1533,6 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     it.layer.shadowOpacity = 0.3f; it.layer.shadowRadius = 5.0f; it.layer.shadowOffset = CGSizeMake(0, 2);
     it.clipsToBounds = YES; it.tag = idx;
     NSData *icon = entry[kFUEntryIcon]; UIImage *img = icon.length ? [UIImage imageWithData:icon] : nil;
-    if (img) img = [self fuIconForDisplay:img];   // v1.3.27：图标自动区分左右（按球在左/右半边）
     if (img) {
         [it setImage:[img imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal] forState:UIControlStateNormal];
         it.backgroundColor = [UIColor secondarySystemBackgroundColor];
@@ -1902,45 +1697,6 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 // v1.3.13 系统打开链路（每步都有回执，失败就往下走，绝不「点了没反应」）：
 //   ① UIApplication openURL:options:completionHandler:  —— 系统标准入口，异步、不卡主线程；
 //   ② FBSSystemService（FrontBoard）→ ③ LSApplicationWorkspace（后台队列）。
-// v1.3.26：设置页深链（prefs:root=X / App-Prefs:root=X）。
-// 这两个是 **系统私有 scheme**（不是任何插件注册的），普通 openURL: 会被系统直接拒掉 —— 在 App 进程里连
-// canOpenURL 都是 NO，表现就是「URL 填了、点了没反应」。唯一稳的入口是 LSApplicationWorkspace 的
-// openSensitiveURL:withOptions:（这个名字里的 Sensitive 就是为绕过私有 scheme 限制准备的）。
-// 它会同步等 FrontBoard 把设置 App 拉起来，所以整段丢后台队列，绝不占主线程。
-- (void)fuOpenPrefsURL:(NSURL *)u {
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-        @try {
-            Class wsc = NSClassFromString(@"LSApplicationWorkspace");
-            SEL defSel = NSSelectorFromString(@"defaultWorkspace");
-            id ws = (wsc && [wsc respondsToSelector:defSel]) ? [wsc performSelector:defSel] : nil;
-            SEL sen = NSSelectorFromString(@"openSensitiveURL:withOptions:");
-            if (ws && [ws respondsToSelector:sen]) {
-                BOOL ok = ((BOOL (*)(id, SEL, id, id))objc_msgSend)(ws, sen, u, nil);
-                NSLog(@"[FloatingURL] openSensitiveURL %@ -> %d", u.absoluteString, ok);
-                if (ok) return;
-            }
-            // 兜底 1：prefs: ←→ App-Prefs: 换个壳再试一次（不同 iOS 版本认的写法不一样）
-            NSString *s = u.absoluteString;
-            if ([s.lowercaseString hasPrefix:@"prefs:"]) {
-                NSString *alt = [@"App-Prefs:" stringByAppendingString:[s substringFromIndex:6]];
-                NSURL *u2 = [NSURL URLWithString:alt];
-                if (u2 && ws && [ws respondsToSelector:sen]) {
-                    BOOL ok2 = ((BOOL (*)(id, SEL, id, id))objc_msgSend)(ws, sen, u2, nil);
-                    NSLog(@"[FloatingURL] openSensitiveURL %@ -> %d", alt, ok2);
-                    if (ok2) return;
-                }
-            }
-        } @catch (NSException *e) { NSLog(@"[FloatingURL] prefs 深链异常（已忽略）: %@", e); }
-        // 兜底 2：普通 openURL（个别系统直接受理）
-        dispatch_async(dispatch_get_main_queue(), ^{
-            @try {
-                UIApplication *app = UIApplication.sharedApplication;
-                if (app) [app openURL:u options:@{} completionHandler:nil];
-            } @catch (NSException *e) { }
-        });
-    });
-}
-
 - (void)fuOpenViaSystem:(NSURL *)u {
     @try {
         __weak FUFloatingManager *wself = self;
@@ -1960,18 +1716,20 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     }
 }
 
-// v1.3.24：唯一的打开入口 —— 一律交给系统（Safari / 对应 App）。
+// v1.3.27：唯一的打开入口。http(s) 网页 → 系统（Safari / 默认浏览器）；
+//   自定义 scheme（cjt://、prefs://、weixin://、alipay:// 等）→ 直达 LSApplicationWorkspace，
+//   让无 App 承载的 scheme（如超级截图的 cjt://）在 SpringBoard 里也能被对应插件的 hook 兜住，
+//   避免 UIApplication.openURL / FBSSystemService 对无 handler 的 scheme 提前断链导致「点了没反应」。
 - (void)fuOpenExternally:(NSString *)s {
     NSURL *u = [NSURL URLWithString:s]; if (!u) return;
-    // v1.3.26：设置页深链走专用通道 —— openURL 对 prefs:/App-Prefs: 无效（静默失败）。
-    NSString *sch = u.scheme.lowercaseString ?: @"";
-    if ([sch isEqualToString:@"prefs"] || [sch isEqualToString:@"app-prefs"]) {
-        [self fuOpenPrefsURL:u];
+    NSString *sc = [u.scheme lowercaseString];
+    BOOL isWeb = [sc isEqualToString:@"http"] || [sc isEqualToString:@"https"];
+    if (!isWeb) {
+        // 自定义 scheme：跳过前两道会被系统拒收的关卡，直接在 SpringBoard 内调 LSApplicationWorkspace，
+        // 驱动自定义 scheme 的插件 hook（如 SuperScreenshot 的 cjt://）与系统都能收到该请求。
+        [self fuOpenViaWorkspace:u];
         return;
     }
-    // v1.3.24：内置面板 / App 端内置浏览器两套链路全部删除 —— 现在只有一条路：交给系统。
-    //   http(s) → Safari（用户默认浏览器）；weixin://、tel:、alipay:// 等 → 对应 App。
-    //  少一层就少一个故障点：以前「点了弹 App 内小窗」「点了半天没反应」都是从这两条链路漏出来的。
     dispatch_async(dispatch_get_main_queue(), ^{
         @try { [self fuOpenViaSystem:u]; }
         @catch (NSException *e) {
@@ -2073,65 +1831,8 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 //   · 其它 App 进程：不建任何 UI，只上报「我在前台」的 Darwin 心跳，供桌面球判断黑名单；
 //   · 设置 App（com.apple.Preferences）：完全跳过。
 // ============================================================
-// ===== v1.3.27：SpringBoard 侧「截图」钩子 =====
-// 截图手势 = 电源 + 音量上，最终走到 SBCombinationHardwareButtonActions -performTakeScreenshotAction。
-// 在这一步先收拢 + 藏球，再放行去拍 —— 截出来的图里就不会带悬浮球和扇形。
-// 兜底再挂一个 SBScreenFlash（闪光出现时再收一次），万一上面的入口在某个系统版本改名了也不至于全瞎。
-static CFAbsoluteTime fuLastCaptureSignal = 0;
-static void (*fuOrigTakeScreenshot)(id, SEL) = NULL;
-static void (*fuOrigFlashWhite)(id, SEL, id) = NULL;
-
-static void fuSignalCaptureWill(BOOL allowDelay) {
-    if (![NSThread isMainThread]) {
-        dispatch_async(dispatch_get_main_queue(), ^{ fuSignalCaptureWill(allowDelay); });
-        return;
-    }
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    BOOL first = (now - fuLastCaptureSignal) > 1.0;   // 同一次截图只等一次，别叠加延迟
-    fuLastCaptureSignal = now;
-    [[FUFloatingManager shared] fuCaptureWillHide];
-    if (allowDelay) {
-        [CATransaction flush];           // 把「球已隐藏」这一帧立刻提交给渲染服务
-        if (first) usleep(200 * 1000);   // 再留 0.2s，确保渲染服务真的把它从画面里拿掉
-    }
-}
-static void fuHookTakeScreenshot(id self, SEL _cmd) {
-    fuSignalCaptureWill(YES);
-    if (fuOrigTakeScreenshot) fuOrigTakeScreenshot(self, _cmd);
-}
-static void fuHookFlashWhite(id self, SEL _cmd, id completion) {
-    fuSignalCaptureWill(NO);
-    if (fuOrigFlashWhite) fuOrigFlashWhite(self, _cmd, completion);
-}
-static void fuInstallCaptureHooks(void) {
-    @try {
-        const char *names[2] = {"SBCombinationHardwareButtonActions", "SBScreenFlash"};
-        const char *sels[2]  = {"performTakeScreenshotAction", "flashWhiteWithCompletion:"};
-        IMP imps[2] = {(IMP)fuHookTakeScreenshot, (IMP)fuHookFlashWhite};
-        void **slots[2] = {(void **)&fuOrigTakeScreenshot, (void **)&fuOrigFlashWhite};
-        const char *types[2] = {"v@:", "v@:@"};
-        for (int i = 0; i < 2; i++) {
-            Class c = objc_getClass(names[i]);
-            if (!c) continue;
-            SEL s = sel_registerName(sels[i]);
-            Method m = class_getInstanceMethod(c, s);
-            if (!m) continue;
-            if (class_addMethod(c, s, imps[i], types[i])) {
-                Method pm = class_getInstanceMethod(class_getSuperclass(c), s);
-                *slots[i] = pm ? (void *)method_getImplementation(pm) : NULL;
-            } else {
-                *slots[i] = (void *)method_getImplementation(m);
-                method_setImplementation(m, imps[i]);
-            }
-            NSLog(@"[FloatingURL] capture hook installed: %s -%s", names[i], sels[i]);
-        }
-    } @catch (NSException *e) { NSLog(@"[FloatingURL] 装截图钩子异常（已忽略）: %@", e); }
-}
-
-
 %ctor {
     @autoreleasepool {
-        fuInstallCaptureHooks();   // v1.3.27：截图前收拢 + 藏球（只有 SpringBoard 里存在这俩类）
         NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
         if ([bid isEqualToString:@"com.apple.Preferences"]) return;   // 设置里不挂球
         if (![bid isEqualToString:@"com.apple.springboard"]) {
@@ -2148,3 +1849,4 @@ static void fuInstallCaptureHooks(void) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [[FUFloatingManager shared] setupWhenHostReady]; });
     }
 }
+
