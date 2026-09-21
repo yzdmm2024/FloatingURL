@@ -675,16 +675,19 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     if (_snapMode != 1) _snapMode = 0;
     Boolean wv = NO; CFPreferencesGetAppBooleanValue((__bridge CFStringRef)kFUWebMode, (__bridge CFStringRef)kFUSuite, &wv);
     _webMode = wv ? 1 : 0;
+    // v1.3.9 修 05（真机实测确认的根因）：键被删掉时 CFPreferencesCopyAppValue 返回 NULL，
+    // 而旧代码两个分支都不走 → _ballIcon / _ballColor / _ballTitle **保持上一次的旧值**，
+    // 于是「设置里删了照片，球上照片还在」。这里必须在读到 NULL 时明确清空。
     CFPropertyListRef btRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallTitle, (__bridge CFStringRef)kFUSuite);
     if (btRef && CFGetTypeID(btRef) == CFStringGetTypeID()) { _ballTitle = (__bridge_transfer NSString *)btRef; }
-    else if (btRef) { CFRelease(btRef); }
+    else { if (btRef) CFRelease(btRef); _ballTitle = nil; }
     if (!_ballTitle.length) _ballTitle = @"URL";
     CFPropertyListRef biRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallIcon, (__bridge CFStringRef)kFUSuite);
     if (biRef && CFGetTypeID(biRef) == CFDataGetTypeID()) { _ballIcon = (__bridge_transfer NSData *)biRef; }
-    else if (biRef) { CFRelease(biRef); }
+    else { if (biRef) CFRelease(biRef); _ballIcon = nil; }
     CFPropertyListRef bcRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallColor, (__bridge CFStringRef)kFUSuite);
     if (bcRef && CFGetTypeID(bcRef) == CFStringGetTypeID()) { _ballColor = (__bridge_transfer NSString *)bcRef; }
-    else if (bcRef) { CFRelease(bcRef); }
+    else { if (bcRef) CFRelease(bcRef); _ballColor = nil; }
     [self loadEntries];
     if (_didSetup) [self applyBallAppearance];   // 设置里改了外观 → 立即生效
 }
