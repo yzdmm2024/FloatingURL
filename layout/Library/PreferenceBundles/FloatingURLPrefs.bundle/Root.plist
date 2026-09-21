@@ -70,6 +70,25 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
+			<string>URL 深链（插件触发器，必须全小写）</string>
+			<key>footerText</key>
+			<string>Snapper 4 官方「URL 深链」共 10 条（设置 → Snapper 4 → URL 深链可自查）。把任意一条填进「管理快捷URI」的入口，点一下就直接触发对应动作（不会打开设置）：
+prefs:root=snapper4_freeze —— 冻结截图
+prefs:root=snapper4_long —— 长截图
+prefs:root=screenshot-shell —— 仅截屏套壳
+prefs:root=screenshot-watermark —— 仅截图水印
+prefs:root=screenshot-both —— 截屏套壳＋水印
+prefs:root=screenshot-off —— 关闭截屏套壳/水印
+prefs:root=recording-shell —— 仅录屏套壳
+prefs:root=recording-watermark —— 仅录屏水印
+prefs:root=recording-both —— 录屏套壳＋水印
+prefs:root=recording-off —— 关闭录屏套壳/水印
+注意：官方 id 全是小写，写成 snapper4_Freeze 这类大小写是匹配不到的（本版已自动纠正，但建议直接复制上面原文）。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
 			<string>布局调节（吸附模式 + 扇形）</string>
 			<key>footerText</key>
 			<string>预览即时反映你的设置。吸附可选「自动（按屏幕中心线吸左/右）」或「全屏固定」。秒数都按 1 秒一档：最低 1 秒，拖到最右显示「常驻」（永不）——「吸附延时」常驻 = 球永远保持完整图标不吸附，「扇形闲置收回」常驻 = 扇形展开后不自动收回。图标大小/间隔、扇形角度、整体距离、每层数量都能单独调，改完即时生效。</string>

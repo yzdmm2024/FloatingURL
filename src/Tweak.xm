@@ -586,6 +586,8 @@ static void fuStartAppHeartbeat(NSString *bid) {
 - (void)fuOpenViaFBS:(NSURL *)u;             // v1.3.13：FrontBoard 异步接口（失败回调里继续往下兜底）
 - (void)fuOpenViaWorkspace:(NSURL *)u;       // v1.3.13：LSApplicationWorkspace 最后兜底
 - (void)fuOpenPrefsURL:(NSURL *)u;          // v1.3.26：设置页深链 prefs:/App-Prefs: 专用入口
+- (BOOL)fuOpenPrefsOnce:(NSURL *)u method:(NSInteger)m;   // v1.3.29：prefs 深链单通道尝试
+- (void)fuDeepLinkFailed:(NSString *)abs;                 // v1.3.29：深链无人受理 → 明确提示（去重）
 - (void)fuCaptureWillHide;                             // v1.3.27：截图按下快门前收拢扇形 + 藏球
 - (void)fuApplyCaptureExclusion;                       // v1.3.28：把悬浮窗从截图/录屏里彻底排除（私有 API）
 - (NSArray *)fuFanPointArray;                           // v1.3.13：扇形点位（openFan 与拖动重排共用同一套算法）
@@ -666,6 +668,69 @@ static void fuFrontGoneCb(CFNotificationCenterRef center, void *observer,
         return;
     }
     [mgr clearFrontBid:bid];
+}
+
+// ===== v1.3.29：prefs: 深链「多渠道」打开 =====
+// 背景（实测 Snapper 4 5.2.0-40 的 deb 得出）：这类插件的 prefs:root=xxx **不是「设置页」**，
+//   而是给手势插件用的**触发器** —— URL 被插件在系统层截住后执行动作（冻结 / 长截图 / 套壳 / 水印…），
+//   设置 App 根本不会打开。Snapper 4 官方深链共 10 条（设置 → Snapper 4 → URL 深链）：
+//     prefs:root=snapper4_freeze / snapper4_long
+//     prefs:root=screenshot-shell / screenshot-watermark / screenshot-both / screenshot-off
+//     prefs:root=recording-shell / recording-watermark / recording-both / recording-off
+//   它是在 SpringBoard 侧钩 openURL 链路（MSHookMessageEx），而 v1.3.26 起「prefs: 一律先走
+//   openSensitiveURL」会**绕开**这类拦截点 → 用户点了没反应（本次反馈的根因）。
+// 所以改成按「从外到内」依次尝试，任一被受理立刻停：
+//   ① UIApplication openURL:options:completionHandler:  调用方进程最先经过，插件最容易钩这里
+//   ② LSApplicationWorkspace openURL:(withOptions:)     手势插件最常用的入口
+//   ③ FBSSystemService openURL:options:withResultBlock: FrontBoard 用户动作通道
+//   ④ LSApplicationWorkspace openSensitiveURL:withOptions: 私有 scheme 直通（系统设置页最终兜底）
+// 触发器类深链只走 ①②③（没人接就明确提示，不去白开设置页）；普通设置页走 ①④（与 1.3.28 行为一致，无回归）。
+// 另外：官方深链全是小写，而用户常写成 snapper4_Freeze —— 「xxx_yyy / xxx-yyy」形状的触发器 id
+//   若含大写，先按全小写试一次，再退回原样。
+static BOOL fuLooksLikeDeepLinkTrigger(NSString *v) {
+    if (v.length < 3) return NO;
+    static NSRegularExpression *re = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        re = [NSRegularExpression regularExpressionWithPattern:@"^[A-Za-z0-9]+([-_][A-Za-z0-9]+)+$"
+                                                      options:0 error:NULL];
+    });
+    if (!re) return NO;
+    if ([re firstMatchInString:v options:0 range:NSMakeRange(0, v.length)] == nil) return NO;
+    // 全大写（MOBILE_DATA_SETTINGS_ID 之类系统 id）不动
+    if ([v isEqualToString:v.uppercaseString]) return NO;
+    return YES;
+}
+// 从 prefs:root=X 里取出 root 的值（去掉 & 之后的附加参数）
+static NSString *fuPrefsRootValue(NSString *abs) {
+    if (![abs isKindOfClass:[NSString class]] || !abs.length) return nil;
+    NSRange r = [abs rangeOfString:@"root=" options:NSCaseInsensitiveSearch];
+    if (r.location == NSNotFound) return nil;
+    NSString *v = [abs substringFromIndex:(r.location + r.length)];
+    NSRange amp = [v rangeOfString:@"&"];
+    if (amp.location != NSNotFound) v = [v substringToIndex:amp.location];
+    return v;
+}
+// 展开成候选串：触发器 id 含大写时「全小写」优先
+static NSArray<NSString *> *fuPrefsCandidates(NSString *abs) {
+    NSMutableArray *out = [NSMutableArray array];
+    if (![abs isKindOfClass:[NSString class]] || !abs.length) return out;
+    NSRange r = [abs rangeOfString:@"root=" options:NSCaseInsensitiveSearch];
+    if (r.location == NSNotFound) { [out addObject:abs]; return out; }
+    NSString *head = [abs substringToIndex:(r.location + r.length)];
+    NSString *rest = [abs substringFromIndex:(r.location + r.length)];
+    NSRange amp = [rest rangeOfString:@"&"];
+    NSString *core = rest, *tail = @"";
+    if (amp.location != NSNotFound) {
+        core = [rest substringToIndex:amp.location];
+        tail = [rest substringFromIndex:amp.location];
+    }
+    NSString *low = core.lowercaseString;
+    if (fuLooksLikeDeepLinkTrigger(core) && ![low isEqualToString:core]) {
+        [out addObject:[head stringByAppendingFormat:@"%@%@", low, tail]];
+    }
+    [out addObject:[head stringByAppendingFormat:@"%@%@", core, tail]];
+    return out;
 }
 
 @implementation FUFloatingManager {
@@ -1869,42 +1934,126 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 // v1.3.13 系统打开链路（每步都有回执，失败就往下走，绝不「点了没反应」）：
 //   ① UIApplication openURL:options:completionHandler:  —— 系统标准入口，异步、不卡主线程；
 //   ② FBSSystemService（FrontBoard）→ ③ LSApplicationWorkspace（后台队列）。
-// v1.3.26：设置页深链（prefs:root=X / App-Prefs:root=X）。
-// 这两个是 **系统私有 scheme**（不是任何插件注册的），普通 openURL: 会被系统直接拒掉 —— 在 App 进程里连
-// canOpenURL 都是 NO，表现就是「URL 填了、点了没反应」。唯一稳的入口是 LSApplicationWorkspace 的
-// openSensitiveURL:withOptions:（这个名字里的 Sensitive 就是为绕过私有 scheme 限制准备的）。
-// 它会同步等 FrontBoard 把设置 App 拉起来，所以整段丢后台队列，绝不占主线程。
+// v1.3.29：prefs 深链单通道尝试（返回「是否被受理」）。
+//   m=0 UIApplication openURL:options:completionHandler:（主线程异步，用信号量等回执）
+//   m=1 LSApplicationWorkspace openURL:(withOptions:)           手势插件最常用入口
+//   m=2 FBSSystemService openURL:options:withResultBlock:       FrontBoard 用户动作通道
+//   m=3 LSApplicationWorkspace openSensitiveURL:withOptions:    私有 scheme 直通（系统设置页兜底）
+- (BOOL)fuOpenPrefsOnce:(NSURL *)u method:(NSInteger)m {
+    @try {
+        if (m == 0) {
+            __block BOOL accepted = NO;
+            dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                @try {
+                    UIApplication *app = UIApplication.sharedApplication;
+                    if (app) [app openURL:u options:@{} completionHandler:^(BOOL ok){ accepted = ok; dispatch_semaphore_signal(sem); }];
+                    else dispatch_semaphore_signal(sem);
+                } @catch (NSException *e) { dispatch_semaphore_signal(sem); }
+            });
+            dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)));
+            return accepted;
+        }
+        Class wsc = NSClassFromString(@"LSApplicationWorkspace");
+        SEL defSel = NSSelectorFromString(@"defaultWorkspace");
+        id ws = (wsc && [wsc respondsToSelector:defSel]) ? [wsc performSelector:defSel] : nil;
+        if (m == 1) {
+            SEL s1 = NSSelectorFromString(@"openURL:withOptions:");
+            if (ws && [ws respondsToSelector:s1])
+                return ((BOOL (*)(id, SEL, id, id))objc_msgSend)(ws, s1, u, nil);
+            SEL s2 = NSSelectorFromString(@"openURL:");
+            if (ws && [ws respondsToSelector:s2])
+                return ((BOOL (*)(id, SEL, id))objc_msgSend)(ws, s2, u);
+            return NO;
+        }
+        if (m == 2) {
+            Class fbc = NSClassFromString(@"FBSSystemService");
+            SEL sh = NSSelectorFromString(@"sharedService");
+            SEL op = NSSelectorFromString(@"openURL:options:withResultBlock:");
+            if (!fbc || ![fbc respondsToSelector:sh]) return NO;
+            id svc = [fbc performSelector:sh];
+            if (!svc || ![svc respondsToSelector:op]) return NO;
+            __block BOOL accepted = NO;
+            dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+            void (^blk)(BOOL, NSError *) = ^(BOOL ok, NSError *err){ accepted = ok; dispatch_semaphore_signal(sem); };
+            ((void (*)(id, SEL, id, id, id))objc_msgSend)(svc, op, u, @{}, blk);
+            dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)));
+            return accepted;
+        }
+        // m == 3：私有 scheme 直通
+        SEL sen = NSSelectorFromString(@"openSensitiveURL:withOptions:");
+        if (ws && [ws respondsToSelector:sen])
+            return ((BOOL (*)(id, SEL, id, id))objc_msgSend)(ws, sen, u, nil);
+        return NO;
+    } @catch (NSException *e) {
+        NSLog(@"[FloatingURL] prefs 通道 %ld 异常（已忽略）: %@", (long)m, e);
+        return NO;
+    }
+}
+
+// v1.3.29：prefs: 深链统一入口。
+//   触发器类（snapper4_freeze / screenshot-shell …）：只走 ①②③ —— 由目标插件在系统层截住执行动作；
+//     没人接说明插件没装 / 版本太旧，明确弹框告知，**不去白开设置页**（设置里根本没有这个页面）。
+//   普通设置页（WIFI、Bluetooth、com.xxx.tweak …）：① 不行就直接 ④ 私有 scheme 直通，与 1.3.28 行为一致。
 - (void)fuOpenPrefsURL:(NSURL *)u {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
         @try {
-            Class wsc = NSClassFromString(@"LSApplicationWorkspace");
-            SEL defSel = NSSelectorFromString(@"defaultWorkspace");
-            id ws = (wsc && [wsc respondsToSelector:defSel]) ? [wsc performSelector:defSel] : nil;
-            SEL sen = NSSelectorFromString(@"openSensitiveURL:withOptions:");
-            if (ws && [ws respondsToSelector:sen]) {
-                BOOL ok = ((BOOL (*)(id, SEL, id, id))objc_msgSend)(ws, sen, u, nil);
-                NSLog(@"[FloatingURL] openSensitiveURL %@ -> %d", u.absoluteString, ok);
-                if (ok) return;
-            }
-            // 兜底 1：prefs: ←→ App-Prefs: 换个壳再试一次（不同 iOS 版本认的写法不一样）
-            NSString *s = u.absoluteString;
-            if ([s.lowercaseString hasPrefix:@"prefs:"]) {
-                NSString *alt = [@"App-Prefs:" stringByAppendingString:[s substringFromIndex:6]];
-                NSURL *u2 = [NSURL URLWithString:alt];
-                if (u2 && ws && [ws respondsToSelector:sen]) {
-                    BOOL ok2 = ((BOOL (*)(id, SEL, id, id))objc_msgSend)(ws, sen, u2, nil);
-                    NSLog(@"[FloatingURL] openSensitiveURL %@ -> %d", alt, ok2);
-                    if (ok2) return;
+            NSString *abs = u.absoluteString;
+            NSArray *cands = fuPrefsCandidates(abs);
+            if (!cands.count) cands = @[abs];
+            BOOL trigger = fuLooksLikeDeepLinkTrigger(fuPrefsRootValue(abs) ?: @"");
+            NSArray *methods = trigger ? @[@0, @1, @2] : @[@0, @3];
+            for (NSNumber *mn in methods) {
+                for (NSString *c in cands) {
+                    NSURL *cu = [NSURL URLWithString:c]; if (!cu) continue;
+                    if ([self fuOpenPrefsOnce:cu method:mn.integerValue]) {
+                        NSLog(@"[FloatingURL] prefs 深链已受理（通道 %@）：%@", mn, c);
+                        return;
+                    }
                 }
             }
+            if (!trigger) {
+                // ④ 也不行 → 换 App-Prefs: 壳再来一次（个别 iOS 只认其中一种写法）
+                NSString *last = cands.lastObject;
+                if ([last.lowercaseString hasPrefix:@"prefs:"]) {
+                    NSString *alt = [@"App-Prefs:" stringByAppendingString:[last substringFromIndex:6]];
+                    NSURL *au = [NSURL URLWithString:alt];
+                    if (au && [self fuOpenPrefsOnce:au method:3]) {
+                        NSLog(@"[FloatingURL] prefs 深链已受理（App-Prefs 壳）：%@", alt);
+                        return;
+                    }
+                }
+            }
+            NSLog(@"[FloatingURL] prefs 深链无人受理：%@", abs);
+            [self fuDeepLinkFailed:abs];
         } @catch (NSException *e) { NSLog(@"[FloatingURL] prefs 深链异常（已忽略）: %@", e); }
-        // 兜底 2：普通 openURL（个别系统直接受理）
-        dispatch_async(dispatch_get_main_queue(), ^{
-            @try {
-                UIApplication *app = UIApplication.sharedApplication;
-                if (app) [app openURL:u options:@{} completionHandler:nil];
-            } @catch (NSException *e) { }
-        });
+    });
+}
+
+// v1.3.29：深链没人接 → 直接说清原因（同一条只提示一次，最多 3 条，别烦人）。
+// 临时把悬浮窗变成 key，保证弹框一定显示得出来（跟编辑器同一套做法）。
+- (void)fuDeepLinkFailed:(NSString *)abs {
+    static NSMutableSet *notified = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ notified = [NSMutableSet set]; });
+    @synchronized (notified) {
+        if ([notified containsObject:abs] || notified.count >= 3) return;
+        [notified addObject:abs];
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"这条深链没有被受理"
+                message:[NSString stringWithFormat:@"%@\n\n可能原因：\n• 目标插件没装或版本太旧（Snapper 4 的 URL 深链需 5.x）\n• 拼写不对 —— 官方深链全是小写，是 prefs:root=snapper4_freeze，不是 snapper4_Freeze", abs]
+                preferredStyle:UIAlertControllerStyleAlert];
+            __weak FUFloatingManager *ws = self;
+            [a addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleCancel handler:^(UIAlertAction *act){
+                FUFloatingManager *ss = ws; if (ss) [ss setInteractive:NO];
+            }]];
+            UIViewController *host = _overlayRoot ? (_overlayRoot.presentedViewController ?: _overlayRoot) : fuTopViewController();
+            if (!host) return;
+            [self setInteractive:YES];
+            [host presentViewController:a animated:YES completion:nil];
+        } @catch (NSException *e) { NSLog(@"[FloatingURL] 深链提示异常（已忽略）: %@", e); }
     });
 }
 
