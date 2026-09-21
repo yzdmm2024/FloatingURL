@@ -353,7 +353,7 @@ static void fuStartAppHeartbeat(NSString *bid) {
         tf.delegate = self;
         y += h + 12; [scroll addSubview:tf]; return tf;
     };
-    _urlField    = (UITextField *)mkField(@"网址 / scheme（如 https://a.com 或 weixin://）", nil, UIKeyboardTypeURL);
+    _urlField    = (UITextField *)mkField(@"网址 / scheme（https://a.com、weixin://、prefs:root=xxx）", nil, UIKeyboardTypeURL);
 
     // 文字（汉字或字母，1 个字符）—— 合并为单框
     _labelField = [[UITextField alloc] initWithFrame:CGRectMake(pad, y, w, 40)];
@@ -581,6 +581,7 @@ static void fuStartAppHeartbeat(NSString *bid) {
 - (void)showRespringPrompt;                  // v1.3.17：升级后「立即注销 / 稍后」选择框
 - (void)fuOpenViaFBS:(NSURL *)u;             // v1.3.13：FrontBoard 异步接口（失败回调里继续往下兜底）
 - (void)fuOpenViaWorkspace:(NSURL *)u;       // v1.3.13：LSApplicationWorkspace 最后兜底
+- (void)fuOpenPrefsURL:(NSURL *)u;          // v1.3.26：设置页深链 prefs:/App-Prefs: 专用入口
 - (NSArray *)fuFanPointArray;                           // v1.3.13：扇形点位（openFan 与拖动重排共用同一套算法）
 - (void)fuScheduleFanAutoHide;                          // v1.3.21：重排「闲置自动收回」倒计时
 - (void)fuCancelFanAutoHide;                            // v1.3.21：取消空闲收回倒计时
@@ -941,6 +942,24 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 - (NSString *)normalizeURL:(NSString *)raw {
     NSString *s = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (!s.length) return nil;
+    // v1.3.26：自己按 RFC 3986 切一次 scheme。
+    //   scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )，必须出现在第一个 '/'、'?'、'#' 之前，且不含 '.'。
+    //   「不含 '.'」是用来把 weixin:// / prefs:root=X 这类真 scheme 与 www.a.com:8080 这种裸域名区分开。
+    //   旧写法依赖 NSURLComponents，碰到 prefs:root=X 这种没有「//」的串不稳，会被误加 https:// 前缀 —— 那正是
+    //   「设置页 URL 填了却点了没反应」的元凶之一。
+    NSRange cut = [s rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"/?#"]];
+    NSRange colon = [s rangeOfString:@":"];
+    if (colon.location != NSNotFound && colon.location > 0 &&
+        (cut.location == NSNotFound || colon.location < cut.location)) {
+        NSString *sch = [s substringToIndex:colon.location];
+        NSCharacterSet *bad = [[NSCharacterSet characterSetWithCharactersInString:
+                                @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+-."] invertedSet];
+        if ([sch rangeOfCharacterFromSet:bad].location == NSNotFound &&
+            [sch rangeOfString:@"."].location == NSNotFound) {
+            // scheme 统一小写：输入 Prefs: / APP-PREFS: 一样能开
+            return [[sch lowercaseString] stringByAppendingString:[s substringFromIndex:colon.location]];
+        }
+    }
     NSURLComponents *c = [NSURLComponents componentsWithString:s];
     if (c && c.scheme.length && [c.scheme rangeOfString:@"."].location == NSNotFound) return s;
     return [@"https://" stringByAppendingString:s];
@@ -1763,6 +1782,45 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 // v1.3.13 系统打开链路（每步都有回执，失败就往下走，绝不「点了没反应」）：
 //   ① UIApplication openURL:options:completionHandler:  —— 系统标准入口，异步、不卡主线程；
 //   ② FBSSystemService（FrontBoard）→ ③ LSApplicationWorkspace（后台队列）。
+// v1.3.26：设置页深链（prefs:root=X / App-Prefs:root=X）。
+// 这两个是 **系统私有 scheme**（不是任何插件注册的），普通 openURL: 会被系统直接拒掉 —— 在 App 进程里连
+// canOpenURL 都是 NO，表现就是「URL 填了、点了没反应」。唯一稳的入口是 LSApplicationWorkspace 的
+// openSensitiveURL:withOptions:（这个名字里的 Sensitive 就是为绕过私有 scheme 限制准备的）。
+// 它会同步等 FrontBoard 把设置 App 拉起来，所以整段丢后台队列，绝不占主线程。
+- (void)fuOpenPrefsURL:(NSURL *)u {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        @try {
+            Class wsc = NSClassFromString(@"LSApplicationWorkspace");
+            SEL defSel = NSSelectorFromString(@"defaultWorkspace");
+            id ws = (wsc && [wsc respondsToSelector:defSel]) ? [wsc performSelector:defSel] : nil;
+            SEL sen = NSSelectorFromString(@"openSensitiveURL:withOptions:");
+            if (ws && [ws respondsToSelector:sen]) {
+                BOOL ok = ((BOOL (*)(id, SEL, id, id))objc_msgSend)(ws, sen, u, nil);
+                NSLog(@"[FloatingURL] openSensitiveURL %@ -> %d", u.absoluteString, ok);
+                if (ok) return;
+            }
+            // 兜底 1：prefs: ←→ App-Prefs: 换个壳再试一次（不同 iOS 版本认的写法不一样）
+            NSString *s = u.absoluteString;
+            if ([s.lowercaseString hasPrefix:@"prefs:"]) {
+                NSString *alt = [@"App-Prefs:" stringByAppendingString:[s substringFromIndex:6]];
+                NSURL *u2 = [NSURL URLWithString:alt];
+                if (u2 && ws && [ws respondsToSelector:sen]) {
+                    BOOL ok2 = ((BOOL (*)(id, SEL, id, id))objc_msgSend)(ws, sen, u2, nil);
+                    NSLog(@"[FloatingURL] openSensitiveURL %@ -> %d", alt, ok2);
+                    if (ok2) return;
+                }
+            }
+        } @catch (NSException *e) { NSLog(@"[FloatingURL] prefs 深链异常（已忽略）: %@", e); }
+        // 兜底 2：普通 openURL（个别系统直接受理）
+        dispatch_async(dispatch_get_main_queue(), ^{
+            @try {
+                UIApplication *app = UIApplication.sharedApplication;
+                if (app) [app openURL:u options:@{} completionHandler:nil];
+            } @catch (NSException *e) { }
+        });
+    });
+}
+
 - (void)fuOpenViaSystem:(NSURL *)u {
     @try {
         __weak FUFloatingManager *wself = self;
@@ -1785,6 +1843,12 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 // v1.3.24：唯一的打开入口 —— 一律交给系统（Safari / 对应 App）。
 - (void)fuOpenExternally:(NSString *)s {
     NSURL *u = [NSURL URLWithString:s]; if (!u) return;
+    // v1.3.26：设置页深链走专用通道 —— openURL 对 prefs:/App-Prefs: 无效（静默失败）。
+    NSString *sch = u.scheme.lowercaseString ?: @"";
+    if ([sch isEqualToString:@"prefs"] || [sch isEqualToString:@"app-prefs"]) {
+        [self fuOpenPrefsURL:u];
+        return;
+    }
     // v1.3.24：内置面板 / App 端内置浏览器两套链路全部删除 —— 现在只有一条路：交给系统。
     //   http(s) → Safari（用户默认浏览器）；weixin://、tel:、alipay:// 等 → 对应 App。
     //  少一层就少一个故障点：以前「点了弹 App 内小窗」「点了半天没反应」都是从这两条链路漏出来的。

@@ -213,7 +213,7 @@ static NSArray *FUColorPalette(void) {
         tf.autocorrectionType = UITextAutocorrectionTypeNo; tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
         tf.delegate = self; y += h + 12; [scroll addSubview:tf]; return tf;
     };
-    _urlField    = (UITextField *)mkField(@"网址 / scheme（如 https://a.com 或 weixin://）", nil, UIKeyboardTypeURL);
+    _urlField    = (UITextField *)mkField(@"网址 / scheme（https://a.com、weixin://、prefs:root=xxx）", nil, UIKeyboardTypeURL);
 
     // 文字（名称，最多 8 字）—— 合并为单框
     _labelField = [[UITextField alloc] initWithFrame:CGRectMake(pad, y, w, 40)];
@@ -787,6 +787,8 @@ static NSArray *FUColorPalette(void) {
         @{@"t":@"㉓ 工作门户", @"c":@"把公司 OA / 项目系统网址设为主 URL", @"d":@"悬浮球一键直达工作台，点开直接跳 Safari，全屏看最舒服"},
         @{@"t":@"㉔ 直播监控", @"c":@"监控摄像头/直播流的 http 网页地址", @"d":@"点开直接在 Safari 里打开监控画面，不用再挂着浮窗"},
         @{@"t":@"㉕ 查快递", @"c":@"快递查询网页 + 运单号参数", @"d":@"常用查件页设成快捷入口，收件高峰一键查"},
+        @{@"t":@"㉖ 直达设置某一页", @"c":@"prefs:root=WIFI", @"d":@"填 prefs:root=页面ID 直接跳到「设置」里某一页（例：WIFI / Bluetooth / Battery / General）。第三方插件也走这个：ID 就是它设置面板的标识 —— PreferenceBundle 的 .bundle 目录名、或 PreferenceLoader 的 .plist 文件名，去掉后缀。ID 写错或该页不存在时，只会停在设置首页，不会报错。"},
+        @{@"t":@"㉗ 直达本插件设置", @"c":@"prefs:root=FloatingURLPrefs", @"d":@"本插件设置页 ID 就是 FloatingURLPrefs，填这个可一键跳到「悬浮URL」设置页。同理 prefs:root=snapper4_Freeze 这类写法要生效，前提是设备上真装了那个插件、且它的设置面板名字与冒号后的 ID 完全一致。"},
     ];
     _tv = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleGrouped];
     _tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
