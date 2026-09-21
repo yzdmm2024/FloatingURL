@@ -1535,7 +1535,6 @@ static void fuInAppWebAckCb(CFNotificationCenterRef center, void *observer,
     // （收缩会让同层弧距变小 → 一旦会挤到一起就停止收缩，改由下方「整体平移」兜底。）
     CGFloat span = [self fuFittingSpanForCenter:centerA radii:R caps:caps icon:isz margin:6.0f maxSpan:spanMax];
     // 3) 摆点（v1.3.10 重做）：用**最终** span 重算每圈容量；第三圈满了继续动态加圈（最多 8 圈）
-    NSMutableArray *pts = [NSMutableArray array];
     {
         CGFloat spanRad = span * (CGFloat)M_PI / 180.0f;
         NSInteger placed2 = 0;
