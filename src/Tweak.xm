@@ -14,6 +14,14 @@
 // 悬浮URL —— 系统级悬浮窗 tweak（rootless / iOS16 / A14 arm64e）
 // 包名：com.yzdmm.floatingurl
 //
+// v1.3.5 变更（6 条修复）：
+//  01 自动吸附改为「以屏幕中心线为界」：球在左半屏→吸左边，右半屏→吸右边（不再四边乱吸）。
+//  02 新增「自动吸附 / 全屏固定」两种模式（设置→布局调节 里滑动选择）。
+//  03 扇形朝向按球的实际位置自动识别左右：球在左→扇形朝右展开，球在右→扇形朝左展开。
+//  04 网页改回「系统浏览器打开」为默认（SpringBoard 内置 WKWebView 打不开），
+//     并保留「内置面板」开关给需要的用户。
+//  05 新增悬浮球自定义：名称（默认 URL）、图标（相册选取+方形裁剪）、底色（无图标时生效）。
+//  06 修「删光快捷 URL 后点球还弹网页」：删空即视为无入口，点球不再弹任何面板。
 // v1.2.5 变更（关键修复 + 新功能）：
 //  - 【冻结修复】悬浮窗 FUOverlayWindow 永远不抢 key：平时非 key + hitTest 空白穿透，
 //    App 照常可点；只在面板/扇形/编辑器中打开时临时 makeKeyWindow，关闭立即还给 App。
@@ -49,8 +57,15 @@ static NSString * const kFULayer1Count = @"layer1";     // v1.3.3：第一层入
 static NSString * const kFULayer2Count = @"layer2";     // v1.3.3：第二层入口数（0=自动）
 static NSString * const kFULayer3Count = @"layer3";     // v1.3.3：第三层入口数（0=自动）
 static NSString * const kFUSilent      = @"silent";     // v1.3.3：静默模式（1=不注入 App 进程、零打扰）
+static NSString * const kFUSnapMode    = @"snapMode";   // v1.3.5：0=自动吸附 1=全屏固定
+static NSString * const kFUBallX       = @"ballX";      // v1.3.5：球中心 X（归一化 0~1）
+static NSString * const kFUBallY       = @"ballY";      // v1.3.5：球中心 Y（归一化 0~1）
+static NSString * const kFUBallTitle   = @"ballTitle";  // v1.3.5：球的文字（默认 URL）
+static NSString * const kFUBallIcon    = @"ballIcon";   // v1.3.5：球的图标（PNG data）
+static NSString * const kFUBallColor   = @"ballColor";  // v1.3.5：球的底色 hex（无图标时生效）
+static NSString * const kFUWebMode     = @"webMode";    // v1.3.5：YES=内置面板打开网页
 
-static const NSInteger kFUMaxEntries = 10;   // v1.3.1：扇形两层（第一层 4 + 第二层 6 = 10）
+static const NSInteger kFUMaxEntries = 24;   // v1.3.5：上限提到 24（三层，每层最多 8~12，按弧长自动分）
 static const NSInteger kFULayer1Max  = 4;    // 第一层（内环）最多 4 个
 static const NSInteger kFULayer2Max  = 6;    // 第二层（外环）最多 6 个
 static const CGFloat   kFUButtonSize = 40.0f;   // 悬浮球尺寸
@@ -545,6 +560,13 @@ static void fuFrontGoneCb(CFNotificationCenterRef center, void *observer,
     NSInteger             _layer2;           // v1.3.3 第二层入口数（0=自动）
     NSInteger             _layer3;           // v1.3.3 第三层入口数（0=自动）
     BOOL                  _silent;           // v1.3.3 静默模式（旗标文件存在即为开）
+    NSInteger             _snapMode;         // v1.3.5 0=自动吸附 1=全屏固定
+    NSString             *_ballTitle;        // v1.3.5 球上的文字
+    NSData               *_ballIcon;         // v1.3.5 球的图标
+    NSString             *_ballColor;        // v1.3.5 球的底色 hex
+    NSInteger             _webMode;          // v1.3.5 0=系统浏览器 1=内置面板
+    UIImageView          *_ballImageView;    // v1.3.5 球图标显示
+    BOOL                  _draggingBall;     // v1.3.5 拖动中（避免 1s 轮询把 alpha 抢回去）
     NSString             *_frontBid;         // v1.3.2 当前前台 App 的 bundle id（来自 Darwin 心跳）
     CFAbsoluteTime        _frontBidTs;       // 心跳时间戳（>3s 视为过期）
     NSMutableSet         *_frontWatched;     // 已注册通知监听的黑名单 bundle id
@@ -562,6 +584,7 @@ static void fuFrontGoneCb(CFNotificationCenterRef center, void *observer,
         _winW = 340; _winH = 480; _expanded = NO; _didSetup = NO; _fanOpen = NO;
         _side = 0; _iconSize = 40.0f; _iconGap = 56.0f;   // v1.3.1：球默认停靠右侧
         _fanSpan = 180.0f; _fanScale = 100.0f;            // v1.3.2 扇形角度 / 整体距离
+        _snapMode = 0; _webMode = 0; _ballTitle = @"URL";  // v1.3.5 默认：自动吸附 + 系统浏览器
         _frontWatched = [NSMutableSet set];
         _history = [NSMutableArray array]; _fanItems = [NSMutableArray array]; _fanOffsets = [NSMutableArray array];
         [self reloadPrefs]; [self loadHistory];
@@ -637,12 +660,29 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     if (l2 && CFGetTypeID(l2) == CFNumberGetTypeID()) { _layer2 = [(__bridge NSNumber *)l2 integerValue]; CFRelease(l2); }
     CFPropertyListRef l3 = CFPreferencesCopyAppValue((__bridge CFStringRef)kFULayer3Count, (__bridge CFStringRef)kFUSuite);
     if (l3 && CFGetTypeID(l3) == CFNumberGetTypeID()) { _layer3 = [(__bridge NSNumber *)l3 integerValue]; CFRelease(l3); }
-    if (_layer1 < 0) _layer1 = 0; if (_layer1 > 10) _layer1 = 10;
-    if (_layer2 < 0) _layer2 = 0; if (_layer2 > 10) _layer2 = 10;
-    if (_layer3 < 0) _layer3 = 0; if (_layer3 > 10) _layer3 = 10;
+    if (_layer1 < 0) _layer1 = 0; if (_layer1 > 12) _layer1 = 12;
+    if (_layer2 < 0) _layer2 = 0; if (_layer2 > 12) _layer2 = 12;
+    if (_layer3 < 0) _layer3 = 0; if (_layer3 > 12) _layer3 = 12;
     // v1.3.3：静默模式（旗标文件存在 = 开；App 心跳与桌面球都据此休眠）
     _silent = [[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"];
+    // ---- v1.3.5：吸附模式 / 网页打开方式 / 悬浮球外观 ----
+    CFPropertyListRef smRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUSnapMode, (__bridge CFStringRef)kFUSuite);
+    if (smRef && CFGetTypeID(smRef) == CFNumberGetTypeID()) { _snapMode = [(__bridge NSNumber *)smRef integerValue]; CFRelease(smRef); }
+    if (_snapMode != 1) _snapMode = 0;
+    Boolean wv = NO; CFPreferencesGetAppBooleanValue((__bridge CFStringRef)kFUWebMode, (__bridge CFStringRef)kFUSuite, &wv);
+    _webMode = wv ? 1 : 0;
+    CFPropertyListRef btRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallTitle, (__bridge CFStringRef)kFUSuite);
+    if (btRef && CFGetTypeID(btRef) == CFStringGetTypeID()) { _ballTitle = (__bridge_transfer NSString *)btRef; }
+    else if (btRef) { CFRelease(btRef); }
+    if (!_ballTitle.length) _ballTitle = @"URL";
+    CFPropertyListRef biRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallIcon, (__bridge CFStringRef)kFUSuite);
+    if (biRef && CFGetTypeID(biRef) == CFDataGetTypeID()) { _ballIcon = (__bridge_transfer NSData *)biRef; }
+    else if (biRef) { CFRelease(biRef); }
+    CFPropertyListRef bcRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallColor, (__bridge CFStringRef)kFUSuite);
+    if (bcRef && CFGetTypeID(bcRef) == CFStringGetTypeID()) { _ballColor = (__bridge_transfer NSString *)bcRef; }
+    else if (bcRef) { CFRelease(bcRef); }
     [self loadEntries];
+    if (_didSetup) [self applyBallAppearance];   // 设置里改了外观 → 立即生效
 }
 #pragma mark - v1.3.2 黑名单（前台 App 心跳驱动）
 - (NSArray *)fuBlacklist {
@@ -722,7 +762,14 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUURLs, (__bridge CFStringRef)kFUSuite);
     NSArray *arr = nil;
     if (r) { arr = (__bridge_transfer NSArray *)r; if (![arr isKindOfClass:[NSArray class]]) arr = nil; }
-    _entries = arr.count ? arr : @[ @{ kFUEntryURL: (_url ?: @"https://www.apple.com") } ];
+    // v1.3.5 修 06：用户把快捷 URL 全删了（urls 存在但为空数组）→ 就是「没有入口」，
+    // 绝不能再用默认网址兜底（那正是「删完还弹出一个打不开的网页」的根因）。
+    if (arr) { _entries = arr; return; }
+    // 兼容老版本：只设了主 URL、没有 urls 数组 → 当成唯一一条入口。
+    CFPropertyListRef ur = CFPreferencesCopyAppValue(CFSTR("url"), (__bridge CFStringRef)kFUSuite);
+    NSString *u = nil;
+    if (ur) { u = (__bridge_transfer NSString *)ur; if (![u isKindOfClass:[NSString class]]) u = nil; }
+    _entries = u.length ? @[ @{ kFUEntryURL: u } ] : @[];
 }
 
 #pragma mark - 历史
@@ -795,6 +842,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     }
     done = YES;
     [self buildUI];
+    [self applyBallAppearance];   // v1.3.5：应用自定义球名称/图标/颜色
     // 进入前台时实时重判「作用 App」网关，免去重启 App 才生效。
     [[NSNotificationCenter defaultCenter] addObserver:self
         selector:@selector(onBecomeActive) name:UIApplicationDidBecomeActiveNotification object:nil];
@@ -990,12 +1038,66 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 }
 - (void)placeBallInWindow:(UIWindow *)w {
     if (!_ball || !w) return;
-    // v1.3.1：球固定在左/右边（side），竖向往中；拖球仍可临时移动（松手按吸附逻辑归位）。
-    CGFloat bw = w.bounds.size.width, bh = w.bounds.size.height;
-    CGFloat x = (_side == 1) ? 4.0f : (bw - kFUButtonSize - 4.0f);
-    CGFloat y = bh * 0.45f - kFUButtonSize/2.0f;
-    _ball.frame = CGRectMake(x, MAX(2, MIN(bh - kFUButtonSize - 2, y)), kFUButtonSize, kFUButtonSize);
+    // v1.3.5：球位置改成「归一化坐标」持久化（ballX/ballY）——自动吸附模式记吸附边，
+    // 全屏固定模式记用户拖到哪就停哪，重启后原位恢复。
+    CGRect s = w.bounds;
+    CFPropertyListRef bx = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallX, (__bridge CFStringRef)kFUSuite);
+    CFPropertyListRef by = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallY, (__bridge CFStringRef)kFUSuite);
+    BOOL hasPos = (bx || by);
+    CGFloat nx = 0.92f, ny = 0.45f;
+    if (bx && CFGetTypeID(bx) == CFNumberGetTypeID()) nx = [(__bridge NSNumber *)bx floatValue];
+    if (by && CFGetTypeID(by) == CFNumberGetTypeID()) ny = [(__bridge NSNumber *)by floatValue];
+    if (bx) CFRelease(bx); if (by) CFRelease(by);
+    if (!hasPos) { nx = (s.size.width - kFUButtonSize - 8.0f) / MAX(1.0f, s.size.width); ny = 0.45f; }
+    if (nx < 0) nx = 0; if (nx > 1) nx = 1;
+    if (ny < 0) ny = 0; if (ny > 1) ny = 1;
+    CGFloat cx = nx * s.size.width, cy = ny * s.size.height;
+    CGFloat x = MAX(-kFUButtonSize/2.0f, MIN(s.size.width  - kFUButtonSize/2.0f, cx - kFUButtonSize/2.0f));
+    CGFloat y = MAX(2.0f,             MIN(s.size.height - kFUButtonSize - 2.0f, cy - kFUButtonSize/2.0f));
+    _ball.frame = CGRectMake(x, y, kFUButtonSize, kFUButtonSize);
     _ball.alpha = 0.4f;   // 初始即半透明待机（拖动/点击会临时变实心）
+}
+// v1.3.5 修 05：把自定义的名称/图标/底色应用到悬浮球（图标优先于文字）
+- (void)applyBallAppearance {
+    if (!_ball) return;
+    if (!_ballImageView) {
+        _ballImageView = [[UIImageView alloc] initWithFrame:_ball.bounds];
+        _ballImageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        _ballImageView.contentMode = UIViewContentModeScaleAspectFill;
+        _ballImageView.clipsToBounds = YES;
+        _ballImageView.layer.cornerRadius = kFUButtonSize/2.0f;
+        [_ballBlur.contentView addSubview:_ballImageView];
+    }
+    UIImage *img = _ballIcon.length ? [UIImage imageWithData:_ballIcon] : nil;
+    if (img) {
+        _ballImageView.image = img; _ballImageView.hidden = NO; _ballLabel.hidden = YES;
+        _ballBlur.backgroundColor = [UIColor clearColor];
+    } else {
+        _ballImageView.image = nil; _ballImageView.hidden = YES; _ballLabel.hidden = NO;
+        NSString *t = _ballTitle.length ? _ballTitle : @"URL";
+        _ballLabel.text = t;
+        _ballLabel.font = [UIFont boldSystemFontOfSize:(t.length >= 4 ? 8.0f : (t.length == 3 ? 9.0f : 10.0f))];
+        UIColor *bg = [self fuColorFromHex:_ballColor];
+        _ballBlur.backgroundColor = bg ?: [UIColor clearColor];   // 不填底色 = 玻璃质感
+    }
+}
+// v1.3.5 修 03：扇形朝向 = 由球的「实际位置」判定左右，而不是设置里手选的边。
+// 球在屏幕中心线左边 → 扇形朝右（屏幕内侧）展开；在右边 → 朝左展开。
+- (NSInteger)fuBallSide {
+    if (!_ball || !_overlay) return 0;
+    CGFloat cx = CGRectGetMidX(_ball.frame);
+    return (cx < _overlay.bounds.size.width / 2.0f) ? 1 : 0;   // 1=左 0=右
+}
+// v1.3.5：把球当前位置写成归一化坐标（不动 settingsChanged 通知，避免自触发死循环）
+- (void)persistBallPos {
+    if (!_ball || !_overlay) return;
+    CGRect s = _overlay.bounds;
+    if (s.size.width < 1 || s.size.height < 1) return;
+    CFPreferencesSetAppValue((__bridge CFStringRef)kFUBallX,
+        (__bridge CFPropertyListRef)@(CGRectGetMidX(_ball.frame) / s.size.width), (__bridge CFStringRef)kFUSuite);
+    CFPreferencesSetAppValue((__bridge CFStringRef)kFUBallY,
+        (__bridge CFPropertyListRef)@(CGRectGetMidY(_ball.frame) / s.size.height), (__bridge CFStringRef)kFUSuite);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
 }
 - (void)layoutPanel {
     if (!_panel) return;
@@ -1033,13 +1135,14 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     [self restoreBallFromSnap];   // 半隐吸附态 → 先拉回完整可见
     if (_expanded) { [self collapse]; return; }
     if (_fanOpen)  { [self closeFan]; return; }
-    // 没有配置任何入口 → 直接展开默认网页；有入口 → 弹出扇形（几个入口排几个）。
-    if (_entries.count == 0) { [self expand]; return; }
-    [self openFan];
+    // v1.3.5 修 06：一个入口都没有（用户把快捷 URL 删光了）→ 什么都不做，
+    // 不能再弹出一个默认网页（那既莫名又打不开）。
+    if (_entries.count == 0) return;
+    [self openFan];   // 有入口 → 弹出扇形（几个入口排几个）
 }
 - (void)panBall:(UIPanGestureRecognizer *)g {
     if (!_ball) return;
-    if (g.state == UIGestureRecognizerStateBegan) { _ballDragOrigin = _ball.frame.origin; _ball.alpha = 1.0f; }  // 拖动时变实心
+    if (g.state == UIGestureRecognizerStateBegan) { _ballDragOrigin = _ball.frame.origin; _ball.alpha = 1.0f; _draggingBall = YES; }  // 拖动时变实心
     else if (g.state == UIGestureRecognizerStateChanged) {
         CGPoint t = [g translationInView:_overlay];
         CGRect f = _ball.frame;
@@ -1057,30 +1160,34 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
             }
         }
     }
-    else if (g.state == UIGestureRecognizerStateEnded) [self snapBallToEdge];   // 松手 → 近边才吸附 + 半透明
+    else if (g.state == UIGestureRecognizerStateEnded || g.state == UIGestureRecognizerStateCancelled) {
+        _draggingBall = NO;   // 取消/中断也要复位，否则球的半透明待机态回不来
+        if (g.state == UIGestureRecognizerStateEnded) [self snapBallToEdge];   // 松手 → 按模式吸附/固定
+    }
 }
 // v1.3.0 修复「没靠近屏幕边也自动吸走」：只有球心距某条边 ≤48pt 才吸附；
 // 吸附态 = 图标只露出一半（另一半藏在屏幕外），带回弹动画。远处松手则原地半透明待机。
 - (void)snapBallToEdge {
     if (!_ball) return;
     CGRect b = _ball.frame; CGRect s = _overlay.bounds;
-    CGFloat cx = CGRectGetMidX(b), cy = CGRectGetMidY(b);
-    CGFloat dl = cx, dr = s.size.width - cx, dt = cy, db = s.size.height - cy;
-    CGFloat m = MIN(MIN(dl, dr), MIN(dt, db));
-    if (m > kFUSnapThreshold) {   // 不靠近任何边 → 原地驻留，只回半透明
-        [UIView animateWithDuration:0.2 animations:^{ _ball.alpha = 0.4f; }];
+    CGFloat half = b.size.width / 2.0f;
+    // 竖向永远停在松手位置（不吸上/下边，避免球跑到状态栏或 Dock 上）
+    CGFloat ty = MAX(2.0f, MIN(s.size.height - b.size.height - 2.0f, b.origin.y));
+    CGRect f = b; f.origin.y = ty;
+    // ---- v1.3.5 修 01 / 02 ----
+    // 自动吸附：以「屏幕中心线」为界——球心在左半屏就吸左边，右半屏就吸右边（只露一半）。
+    // 全屏固定：松手停在原地，绝不自动吸走。
+    if (_snapMode == 1) {
+        [UIView animateWithDuration:0.2 animations:^{ _ball.frame = f; _ball.alpha = 0.4f; }
+                         completion:^(BOOL done){ [self persistBallPos]; }];
         return;
     }
-    CGFloat half = b.size.width / 2.0f;
-    CGRect f = b;
-    if      (m == dl) f.origin.x = -half;                              // 左吸：只露右半
-    else if (m == dr) f.origin.x = s.size.width - half;                // 右吸：只露左半
-    else if (m == dt) f.origin.y = -half;                              // 上吸：只露下半
-    else              f.origin.y = s.size.height - half;               // 下吸：只露上半
+    NSInteger side = (CGRectGetMidX(b) < s.size.width / 2.0f) ? 1 : 0;   // 1=左 0=右
+    f.origin.x = (side == 1) ? -half : (s.size.width - half);
     [UIView animateWithDuration:0.3 delay:0.0 usingSpringWithDamping:0.65 initialSpringVelocity:0.5
                         options:UIViewAnimationOptionCurveEaseOut
                      animations:^{ _ball.frame = f; _ball.alpha = 0.4f; }
-                     completion:nil];
+                     completion:^(BOOL done){ [self persistBallPos]; }];
 }
 // 球处于「半隐吸附态」时，点击先把它完整拉回屏幕内（再弹环/面板）。
 - (void)restoreBallFromSnap {
@@ -1192,14 +1299,18 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
         if (target < 0) target = 2;   // 全部指定仍不够 → 兜底第三层
         CGFloat arc = R[target] * spanMax * (CGFloat)M_PI / 180.0f;
         NSInteger autoCap = MAX(1, (NSInteger)floor(arc / (isz + gap)));
-        if (autoCap > 8) autoCap = 8;
+        if (autoCap > 12) autoCap = 12;   // v1.3.5：每层上限 12（三层合计可放 24 个）
         NSInteger space = n - placed;
         NSInteger add = MIN(autoCap, space);
         caps[target] += add; placed += add;
         li = target + 1;
         if (li >= 3 && placed < n) { caps[2] += (n - placed); placed = n; }
     }
-    CGFloat centerA = (_side != 1) ? 180.0f : 0.0f;   // 屏坐标：0°右 90°下 180°左 270°上
+    // v1.3.5 修 03：扇形朝向按球的**实际位置**自动判定左右（不再依赖设置里手选的边）。
+    // 屏坐标：0°=右 90°=下 180°=左 270°=上。球在左半屏 → centerA=0°（朝屏幕内侧右方展开）；
+    // 球在右半屏 → centerA=180°（朝屏幕内侧左方展开）。
+    NSInteger ballSide = [self fuBallSide];
+    CGFloat centerA = (ballSide == 1) ? 0.0f : 180.0f;
     CGFloat span = spanMax;   // v1.3.3：不再靠“缩小角度”避免重叠，而是整体平移到屏内（见下方 fit）
     // 3) 先按理想角度摆好（不裁剪），收集所有图标中心
     NSMutableArray *pts = [NSMutableArray array];
@@ -1323,13 +1434,17 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     // 确认模式（设置里可开）：不直接触发，先弹输入框+打开按钮，用户点「打开」才执行。
     if (_tapConfirm) { [self showSchemeBox:norm]; return; }
     if (web) {
-        // v1.3.3：统一用内置可拖拽 / 双指缩放的 WKWebView 面板打开（桌面也是），不再跳系统浏览器。
-        // 若面板实际加载失败（WKNavigation 回调）会显示错误提示，必要时可点地址栏重新加载。
-        _url = norm; [self expand];
+        [self pushHistory:norm];
+        if (_webMode == 1) {
+            // 内置面板（实验）：SpringBoard 进程里 WKWebView 常白屏，默认不用；设置里可开。
+            _url = norm; [self expand];
+        } else {
+            // v1.3.5 修 04：默认交给系统浏览器打开——真机实测只有这条路一定能出网页。
+            [self fuOpenExternally:norm];
+        }
     }
-    else {   // 非网页：直接拉起对应 app，不再多一步确认
-        UIApplication *app = UIApplication.sharedApplication; NSURL *nu = [NSURL URLWithString:norm];
-        if (app && nu) [app openURL:nu options:@{} completionHandler:nil];
+    else {   // 非网页：直接拉起对应 app（走 LSApplicationWorkspace，SpringBoard 里比 openURL 稳）
+        [self fuOpenExternally:norm];
     }
 }
 - (void)fanItemLongPressed:(UILongPressGestureRecognizer *)g {
@@ -1448,7 +1563,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     NSString *scheme = u.scheme.lowercaseString;
     NSSet *webSchemes = [NSSet setWithObjects:@"http",@"https",@"about",@"data",@"blob",@"file",@"javascript", nil];
     if (scheme.length && ![webSchemes containsObject:scheme]) {
-        UIApplication *app = UIApplication.sharedApplication; if (app) [app openURL:u options:@{} completionHandler:nil]; return;
+        [self fuOpenExternally:u.absoluteString]; return;   // v1.3.5：统一走跨进程打开
     }
     [_webView loadRequest:[NSURLRequest requestWithURL:u]];
 }
@@ -1490,7 +1605,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
         return;
     }
     _overlay.hidden = NO;   // 允许显示：确保窗口一定恢复（含控制中心收起后）
-    if (!_expanded && !_fanOpen) { _ball.hidden = NO; _ball.alpha = 0.4f; [_overlay bringSubviewToFront:_ball]; [self setInteractive:NO]; }
+    if (!_expanded && !_fanOpen && !_draggingBall) { _ball.hidden = NO; _ball.alpha = 0.4f; [_overlay bringSubviewToFront:_ball]; [self setInteractive:NO]; }
 }
 
 #pragma mark - 跨 App 轻量同步（v1.3.2：只剩 SpringBoard 一个实例，同步已无意义，直接空转）
@@ -1580,7 +1695,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     NSURL *u = navigationAction.request.URL; NSString *scheme = u.scheme.lowercaseString;
     NSSet *webSchemes = [NSSet setWithObjects:@"http",@"https",@"about",@"data",@"blob",@"file",@"javascript", nil];
     if (u && scheme.length && ![webSchemes containsObject:scheme]) {
-        UIApplication *app = UIApplication.sharedApplication; if (app) [app openURL:u options:@{} completionHandler:nil];
+        [self fuOpenExternally:u.absoluteString];   // v1.3.5：统一走跨进程打开
         decisionHandler(WKNavigationActionPolicyCancel); return;
     }
     decisionHandler(WKNavigationActionPolicyAllow);

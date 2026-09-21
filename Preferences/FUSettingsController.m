@@ -21,7 +21,12 @@ static NSString * const kFULayer1Count = @"layer1";     // v1.3.3 第一层入�
 static NSString * const kFULayer2Count = @"layer2";     // v1.3.3 第二层入口数（0=自动）
 static NSString * const kFULayer3Count = @"layer3";     // v1.3.3 第三层入口数（0=自动）
 static NSString * const kFUSilent      = @"silent";     // v1.3.3 静默模式
-static const NSInteger kFUMaxEntries   = 10;   // v1.3.1：扇形两层（第一层 4 + 第二层 6 = 10）
+static NSString * const kFUSnapMode    = @"snapMode";   // v1.3.5 0=自动吸附 1=全屏固定
+static NSString * const kFUBallX       = @"ballX";      // v1.3.5 球中心 X（归一化）
+static NSString * const kFUBallTitle   = @"ballTitle";  // v1.3.5 球的文字（默认 URL）
+static NSString * const kFUBallIcon    = @"ballIcon";   // v1.3.5 球的图标（PNG data）
+static NSString * const kFUBallColor   = @"ballColor";  // v1.3.5 球的底色 hex
+static const NSInteger kFUMaxEntries   = 24;   // v1.3.5：上限提到 24（三层自动分层）
 static const NSInteger kFULayer1Max    = 4;    // 第一层（内环）最多 4 个
 static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 个
 
@@ -264,6 +269,172 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
 - (void)cancel { [self.navigationController popViewControllerAnimated:YES]; }
 @end
 
+#pragma mark - v1.3.5 悬浮球外观编辑（名称 / 图标 / 底色）
+@interface FUBallEditController : UIViewController <PHPickerViewControllerDelegate, UITextFieldDelegate>
+@property (nonatomic, strong) UITextField *nameField;
+@property (nonatomic, strong) UIButton    *iconButton;
+@property (nonatomic, strong) NSData      *iconData;
+@property (nonatomic, copy)   NSString    *colorHex;
+@property (nonatomic, strong) NSMutableArray *colorButtons;
+@property (nonatomic, strong) NSArray     *colorPresets;
+@end
+@implementation FUBallEditController
+- (void)viewDidLoad {
+    [super viewDidLoad]; self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.title = @"悬浮球外观";
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"保存"
+        style:UIBarButtonItemStyleDone target:self action:@selector(save)];
+    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"取消"
+        style:UIBarButtonItemStylePlain target:self action:@selector(cancel)];
+    UIScrollView *scroll = [[UIScrollView alloc] initWithFrame:self.view.bounds];
+    scroll.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    scroll.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag; [self.view addSubview:scroll];
+    __block CGFloat y = 20; CGFloat pad = 16, w = self.view.bounds.size.width - pad*2;
+    // 读取现有值
+    CFPropertyListRef bt = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallTitle, (__bridge CFStringRef)kFUSuite);
+    NSString *curTitle = nil;
+    if (bt) { curTitle = (__bridge_transfer NSString *)bt; if (![curTitle isKindOfClass:[NSString class]]) curTitle = nil; }
+    CFPropertyListRef bi = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallIcon, (__bridge CFStringRef)kFUSuite);
+    if (bi) { _iconData = (__bridge_transfer NSData *)bi; if (![_iconData isKindOfClass:[NSData class]]) _iconData = nil; }
+    CFPropertyListRef bc = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallColor, (__bridge CFStringRef)kFUSuite);
+    if (bc) { _colorHex = (__bridge_transfer NSString *)bc; if (![_colorHex isKindOfClass:[NSString class]]) _colorHex = nil; }
+    // 名称
+    UILabel *nl = [[UILabel alloc] initWithFrame:CGRectMake(pad, y, w, 18)];
+    nl.font = [UIFont systemFontOfSize:12]; nl.textColor = [UIColor secondaryLabelColor];
+    nl.text = @"悬浮球名称（最多 8 字，默认 URL）"; [scroll addSubview:nl]; y += 22;
+    _nameField = [[UITextField alloc] initWithFrame:CGRectMake(pad, y, w, 40)];
+    _nameField.placeholder = @"如 URL / 快捷 / 工具";
+    _nameField.text = curTitle.length ? curTitle : @"";
+    _nameField.borderStyle = UITextBorderStyleRoundedRect;
+    _nameField.font = [UIFont systemFontOfSize:14]; _nameField.textAlignment = NSTextAlignmentCenter;
+    _nameField.autocorrectionType = UITextAutocorrectionTypeNo;
+    _nameField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    _nameField.delegate = self;
+    [scroll addSubview:_nameField]; y += 40 + 18;
+    // 图标
+    UILabel *il = [[UILabel alloc] initWithFrame:CGRectMake(pad, y, w, 18)];
+    il.font = [UIFont systemFontOfSize:12]; il.textColor = [UIColor secondaryLabelColor];
+    il.text = @"悬浮球图标（从相册选取，方形裁剪；设了图标就盖住文字）"; [scroll addSubview:il]; y += 22;
+    CGFloat sq = 150;
+    _iconButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    _iconButton.frame = CGRectMake((w - sq)/2.0 + pad, y, sq, sq);
+    _iconButton.layer.cornerRadius = 14; _iconButton.layer.borderWidth = 1.5;
+    _iconButton.layer.borderColor = [UIColor separatorColor].CGColor; _iconButton.clipsToBounds = YES;
+    _iconButton.titleLabel.textAlignment = NSTextAlignmentCenter;
+    _iconButton.titleLabel.numberOfLines = 0; _iconButton.titleLabel.font = [UIFont systemFontOfSize:13];
+    [_iconButton setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal];
+    [_iconButton addTarget:self action:@selector(pickIcon) forControlEvents:UIControlEventTouchUpInside];
+    [scroll addSubview:_iconButton]; y += sq + 8;
+    UIButton *clear = [UIButton buttonWithType:UIButtonTypeSystem];
+    clear.frame = CGRectMake(pad, y, w, 40);
+    [clear setTitle:@"清除图标（用名称/底色显示）" forState:UIControlStateNormal];
+    [clear addTarget:self action:@selector(clearIcon) forControlEvents:UIControlEventTouchUpInside];
+    [scroll addSubview:clear]; y += 40 + 16;
+    // 底色
+    UILabel *cl = [[UILabel alloc] initWithFrame:CGRectMake(pad, y, w, 18)];
+    cl.font = [UIFont systemFontOfSize:12]; cl.textColor = [UIColor secondaryLabelColor];
+    cl.text = @"悬浮球底色（不设图标时生效，留空 = 玻璃质感）"; [scroll addSubview:cl]; y += 22;
+    _colorPresets = @[@"#3385E6",@"#E63946",@"#2EA44F",@"#F4801A",@"#8E44AD",@"#16A2B8",@"#E84393",@""];
+    _colorButtons = [NSMutableArray array];
+    CGFloat sw = 36, csp = 8; CGFloat cx = pad;
+    for (NSString *hex in _colorPresets) {
+        if (cx + sw > pad + w) { cx = pad; y += sw + csp; }
+        UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+        b.frame = CGRectMake(cx, y, sw, sw);
+        b.layer.cornerRadius = sw/2.0f; b.layer.borderWidth = 2.0f;
+        b.layer.borderColor = [UIColor separatorColor].CGColor; b.clipsToBounds = YES;
+        if (hex.length) b.backgroundColor = [self colorFromHex:hex];
+        else { b.backgroundColor = [UIColor secondarySystemBackgroundColor];
+               [b setTitle:@"玻璃" forState:UIControlStateNormal]; b.titleLabel.font = [UIFont systemFontOfSize:10];
+               [b setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal]; }
+        b.tag = 900 + [_colorPresets indexOfObject:hex];
+        [b addTarget:self action:@selector(colorTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [scroll addSubview:b]; [_colorButtons addObject:b]; cx += sw + csp;
+    }
+    y += sw + 20;
+    scroll.contentSize = CGSizeMake(self.view.bounds.size.width, y);
+    [self refreshIcon:_iconData]; [self refreshColor];
+}
+- (BOOL)textField:(UITextField *)tf shouldChangeCharactersInRange:(NSRange)r replacementString:(NSString *)s {
+    if (tf == _nameField) {
+        NSString *next = [tf.text stringByReplacingCharactersInRange:r withString:s];
+        if (next.length > 8) return NO;
+    } return YES;
+}
+- (void)refreshIcon:(NSData *)d {
+    UIImage *img = d.length ? [UIImage imageWithData:d] : nil;
+    if (img) { [_iconButton setImage:[img imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal] forState:UIControlStateNormal];
+        _iconButton.imageView.contentMode = UIViewContentModeScaleAspectFill; [_iconButton setTitle:nil forState:UIControlStateNormal]; }
+    else { [_iconButton setImage:nil forState:UIControlStateNormal];
+        [_iconButton setTitle:@"选择图标\n（从相册，方形裁剪）" forState:UIControlStateNormal]; }
+}
+- (void)pickIcon {
+    PHPickerConfiguration *cfg = [[PHPickerConfiguration alloc] init];
+    cfg.selectionLimit = 1; cfg.filter = [PHPickerFilter imagesFilter];
+    PHPickerViewController *p = [[PHPickerViewController alloc] initWithConfiguration:cfg]; p.delegate = self;
+    [self presentViewController:p animated:YES completion:nil];
+}
+- (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
+    [picker dismissViewControllerAnimated:YES completion:nil]; if (!results.count) return;
+    [results.firstObject.itemProvider loadObjectOfClass:[UIImage class]
+                                 completionHandler:^(__kindof id obj, NSError *err){
+        if ([obj isKindOfClass:[UIImage class]]) dispatch_async(dispatch_get_main_queue(), ^{
+            FUCropVC *crop = [[FUCropVC alloc] init]; crop.image = obj;
+            crop.onCropped = ^(NSData *png){ self.iconData = png; [self refreshIcon:png]; };
+            UINavigationController *nc = [[UINavigationController alloc] initWithRootViewController:crop];
+            [self presentViewController:nc animated:YES completion:nil];
+        });
+    }];
+}
+- (void)clearIcon { _iconData = nil; [self refreshIcon:nil]; }
+- (void)colorTapped:(UIButton *)b {
+    NSInteger idx = b.tag - 900;
+    if (idx < 0 || idx >= (NSInteger)_colorPresets.count) return;
+    NSString *hex = _colorPresets[idx];
+    _colorHex = hex.length ? hex : nil;
+    [self refreshColor];
+}
+- (void)refreshColor {
+    NSString *cur = _colorHex ?: @"";
+    for (UIButton *b in _colorButtons) {
+        NSInteger idx = b.tag - 900; if (idx < 0) continue;
+        NSString *hex = _colorPresets[idx];
+        BOOL sel = (hex.length == 0 && cur.length == 0) ||
+                  (hex.length && [cur caseInsensitiveCompare:hex] == NSOrderedSame);
+        b.layer.borderColor = (sel ? [UIColor systemBlueColor] : [UIColor separatorColor]).CGColor;
+        b.layer.borderWidth = sel ? 3.0f : 2.0f;
+    }
+}
+- (UIColor *)colorFromHex:(NSString *)hex {
+    if (![hex isKindOfClass:[NSString class]] || hex.length < 6) return nil;
+    NSString *h = [hex stringByReplacingOccurrencesOfString:@"#" withString:@""];
+    if (h.length == 3) h = [NSString stringWithFormat:@"%c%c%c%c%c%c",
+        [h characterAtIndex:0],[h characterAtIndex:0],[h characterAtIndex:1],
+        [h characterAtIndex:1],[h characterAtIndex:2],[h characterAtIndex:2]];
+    if (h.length != 6) return nil;
+    unsigned int v = 0; NSScanner *s = [NSScanner scannerWithString:h]; [s scanHexInt:&v];
+    return [UIColor colorWithRed:((v>>16)&0xFF)/255.0f green:((v>>8)&0xFF)/255.0f
+                             blue:(v&0xFF)/255.0f alpha:1.0f];
+}
+- (void)save {
+    NSString *t = _nameField.text ?: @"";
+    if (t.length) CFPreferencesSetAppValue((__bridge CFStringRef)kFUBallTitle,
+        (__bridge CFPropertyListRef)t, (__bridge CFStringRef)kFUSuite);
+    else CFPreferencesSetAppValue((__bridge CFStringRef)kFUBallTitle,
+        (__bridge CFPropertyListRef)@"URL", (__bridge CFStringRef)kFUSuite);
+    if (_iconData) CFPreferencesSetAppValue((__bridge CFStringRef)kFUBallIcon,
+        (__bridge CFPropertyListRef)_iconData, (__bridge CFStringRef)kFUSuite);
+    else CFPreferencesSetAppValue((__bridge CFStringRef)kFUBallIcon, NULL, (__bridge CFStringRef)kFUSuite);
+    if (_colorHex.length) CFPreferencesSetAppValue((__bridge CFStringRef)kFUBallColor,
+        (__bridge CFPropertyListRef)_colorHex, (__bridge CFStringRef)kFUSuite);
+    else CFPreferencesSetAppValue((__bridge CFStringRef)kFUBallColor, NULL, (__bridge CFStringRef)kFUSuite);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
+    notify_post("com.yzdmm.floatingurl/settingsChanged");
+    [self.navigationController popViewControllerAnimated:YES];
+}
+- (void)cancel { [self.navigationController popViewControllerAnimated:YES]; }
+@end
+
 #pragma mark - URI 列表控制器
 @interface FUUrlListController : UIViewController <UITableViewDelegate, UITableViewDataSource>
 @property (nonatomic, strong) NSMutableArray *entries;
@@ -341,7 +512,7 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
         @{@"t":@"⑨ 装插件(Sileo)", @"c":@"sileo://package/com.example.foo", @"d":@"填 sileo://package/包名 拉起 Sileo 装包"},
         @{@"t":@"⑩ 打开本地文件", @"c":@"file:///var/jb/...", @"d":@"填 file:// 路径打开本地文件（rootless 路径以 /var/jb 开头）"},
         @{@"t":@"⑪ 如何获取URL", @"c":@"在 Safari 打开网页→分享→拷贝 即可得到网址", @"d":@"长按网页链接也可拷贝；把链接粘到地址栏/快捷入口即可"},
-        @{@"t":@"⑫ 多环快捷菜单", @"c":@"设置→快捷URI 添加入口（内环6+外环10，最多16个）", @"d":@"点球展开三层层叠环：URL 球居中不变；长按环上图标可就地编辑；拖球时整环跟随"},
+        @{@"t":@"⑫ 多环快捷菜单", @"c":@"设置→快捷URI 添加入口（最多 24 个，按数量自动分三层）", @"d":@"点球展开扇形快捷环：URL 球固定不动；添加几个就排几个，第一层满了自动溢到第二、三层；长按环上图标可就地编辑；拖球时整环跟随"},
         @{@"t":@"⑬ 布局调节", @"c":@"设置→布局调节（实时预览）", @"d":@"滑杆调位置/图标大小/图标间隔，预览即时变化，手机上同时生效"},
         @{@"t":@"⑭ 支付宝付款码", @"c":@"alipays://platformapi/startapp?appId=20000056", @"d":@"一键拉起支付宝付款码，付款更快"},
         @{@"t":@"⑮ 淘宝", @"c":@"taobao://", @"d":@"拉起手机淘宝；商品页链接前缀换成 taobao:// 可直达商品"},
@@ -590,6 +761,14 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     CGRect s = self.bounds;
     // 模拟屏幕底色（深色，像熄屏桌面）
     [self fuFill:[UIColor colorWithRed:0.07 green:0.09 blue:0.12 alpha:1.0] rect:s];
+    // v1.3.5：画出「屏幕中心线」，让左右一眼可辨（球在哪半边 → 吸附哪边 + 扇形朝内展开）
+    CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:1.0 alpha:0.22].CGColor);
+    CGContextSetLineWidth(ctx, 1.0f);
+    CGContextSetLineDash(ctx, 0, (CGFloat[]){ 4.0f, 4.0f }, 2);
+    CGContextMoveToPoint(ctx, s.size.width/2.0f, 0);
+    CGContextAddLineToPoint(ctx, s.size.width/2.0f, s.size.height);
+    CGContextStrokePath(ctx);
+    CGContextSetLineDash(ctx, 0, NULL, 0);
     CGFloat bs = MAX(24.0f, s.size.width * 0.11f);       // 预览里球的直径（对应 40pt 基准）
     CGFloat k  = bs / 40.0f;                             // 真机 pt → 预览 px 的缩放
     CGFloat isz = _iconSize * k;
@@ -706,6 +885,8 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
 @property (nonatomic, strong) UILabel *ls, *lg, *lspan, *lsc;
 @property (nonatomic, strong) UISlider *l1s, *l2s, *l3s;   // v1.3.3 每层数量
 @property (nonatomic, strong) UILabel *ll1, *ll2, *ll3;
+@property (nonatomic, strong) UISlider *modeS;                 // v1.3.5 吸附模式（0=自动吸附 1=全屏固定）
+@property (nonatomic, strong) UILabel *lmode;                  // v1.3.5 模式说明
 @end
 @implementation FULayoutController
 - (CGFloat)prefFloat:(NSString *)key dft:(CGFloat)d {
@@ -773,19 +954,33 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     UILabel *pvTip = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 30)];
     pvTip.numberOfLines = 0; pvTip.font = [UIFont systemFontOfSize:11];
     pvTip.textColor = [UIColor tertiaryLabelColor];
-    pvTip.text = @"▲ 实时预览：URL 球在左/右边，点开按扇形展开（三层）。每层数量可单独设定（0=自动）。改下方选项，预览与手机上的球同步变化。";
+    pvTip.text = @"▲ 实时预览：虚线 = 屏幕中心线。球在中心线左边 → 自动吸左边、扇形朝右展开；在右边 → 吸右边、扇形朝左展开。每层数量可单独设定（0=自动）。";
     [pvTip sizeToFit]; [_scroll addSubview:pvTip]; y += pvTip.frame.size.height + 16;
-    // ---- 停靠位置（左 / 右）----
+    // ---- v1.3.5 修 02：吸附模式（滑动选择，滑到哪个就是哪个模式）----
+    _lmode = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 20)];
+    _lmode.font = [UIFont systemFontOfSize:12]; _lmode.textColor = [UIColor secondaryLabelColor];
+    [_scroll addSubview:_lmode]; y += 22;
+    _modeS = [[UISlider alloc] initWithFrame:CGRectMake(16, y, w-32, 30)];
+    _modeS.minimumValue = 0; _modeS.maximumValue = 1;
+    _modeS.value = ([self prefInt:kFUSnapMode dft:0] == 1) ? 1.0f : 0.0f;
+    _modeS.continuous = NO; _modeS.tag = 9;
+    [_modeS addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+    [_scroll addSubview:_modeS]; y += 36;
+    [self refreshModeLabel];
+    // ---- v1.3.5 修 03：真实运行时按「屏幕中心线」自动识别左右；这里只切换预览画哪一侧 ----
     UILabel *sideLab = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 20)];
     sideLab.font = [UIFont systemFontOfSize:12]; sideLab.textColor = [UIColor secondaryLabelColor];
-    sideLab.text = @"停靠位置（球在屏幕哪一侧）";
+    sideLab.text = @"预览方位（真实运行时按屏幕中心线自动识别左右）";
     [_scroll addSubview:sideLab]; y += 24;
-    _sideSeg = [[UISegmentedControl alloc] initWithItems:@[@"右侧", @"左侧"]];
+    _sideSeg = [[UISegmentedControl alloc] initWithItems:@[@"球在右侧", @"球在左侧"]];
     _sideSeg.frame = CGRectMake(16, y, w-32, 32);
-    _sideSeg.selectedSegmentIndex = _preview.side;   // 0=右 1=左
+    CGFloat pbx = [self prefFloat:kFUBallX dft:0.92f];
+    _sideSeg.selectedSegmentIndex = (pbx < 0.5f) ? 1 : 0;   // 跟随球当前实际位置
+    _preview.side = _sideSeg.selectedSegmentIndex;
     [_sideSeg addTarget:self action:@selector(sideChanged:) forControlEvents:UIControlEventValueChanged];
     [_scroll addSubview:_sideSeg]; y += 44;
     // ---- 滑杆：图标大小 / 间隔 / 扇形角度 / 整体距离 ----
+    y += 4;
     CGFloat pis = [self prefFloat:kFUIconSize dft:40], pig = [self prefFloat:kFUIconGap dft:56];
     CGFloat psp = [self prefFloat:kFUFanSpan dft:180], psc = [self prefFloat:kFUFanScale dft:100];
     _ss = [self mkSlider:CGRectMake(16, y, w-32, 52) min:24 max:64 val:pis label:@"图标大小" out:&y lout:&_ls];
@@ -802,9 +997,9 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     lLab.text = @"每层数量（0 = 自动，按添加的 URL 自动分层）";
     [_scroll addSubview:lLab]; y += 24;
     NSInteger pl1 = [self prefInt:kFULayer1Count dft:0], pl2 = [self prefInt:kFULayer2Count dft:0], pl3 = [self prefInt:kFULayer3Count dft:0];
-    _l1s = [self mkSlider:CGRectMake(16, y, w-32, 52) min:0 max:8 val:pl1 label:@"第一层数量" out:&y lout:&_ll1];
-    _l2s = [self mkSlider:CGRectMake(16, y, w-32, 52) min:0 max:8 val:pl2 label:@"第二层数量" out:&y lout:&_ll2];
-    _l3s = [self mkSlider:CGRectMake(16, y, w-32, 52) min:0 max:8 val:pl3 label:@"第三层数量" out:&y lout:&_ll3];
+    _l1s = [self mkSlider:CGRectMake(16, y, w-32, 52) min:0 max:12 val:pl1 label:@"第一层数量" out:&y lout:&_ll1];
+    _l2s = [self mkSlider:CGRectMake(16, y, w-32, 52) min:0 max:12 val:pl2 label:@"第二层数量" out:&y lout:&_ll2];
+    _l3s = [self mkSlider:CGRectMake(16, y, w-32, 52) min:0 max:12 val:pl3 label:@"第三层数量" out:&y lout:&_ll3];
     _l1s.tag = 6; _l2s.tag = 7; _l3s.tag = 8;
     for (UISlider *sl in @[_l1s, _l2s, _l3s])
         [sl addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
@@ -822,9 +1017,16 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     *y = f.origin.y + 22 + 34 + 6;
     return sl;
 }
+// v1.3.5 修 03：这里只切「预览画哪一侧」（真实运行时球在哪半边就自动按哪半边算，
+// 右侧→扇形朝左展开，左侧→扇形朝右展开），不再写死一个 side 设置。
 - (void)sideChanged:(UISegmentedControl *)seg {
-    NSInteger v = seg.selectedSegmentIndex;   // 0=右 1=左
-    [self writeSide:v]; _preview.side = v; [_preview refresh];
+    _preview.side = seg.selectedSegmentIndex;   // 0=球在右 1=球在左
+    [_preview refresh];
+}
+- (void)refreshModeLabel {
+    BOOL fix = (_modeS && _modeS.value >= 0.5f);
+    if (_lmode) _lmode.text = fix ? @"吸附模式：全屏固定（松手停在哪就停哪，不自动吸附）"
+                                  : @"吸附模式：自动吸附（按屏幕中心线：左半屏吸左、右半屏吸右）";
 }
 - (void)sliderChanged:(UISlider *)sl {
     CGFloat v = roundf(sl.value);
@@ -837,6 +1039,10 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
         case 6: key = kFULayer1Count; l = _ll1; name = @"第一层数量"; _preview.layer1 = (NSInteger)v; break;
         case 7: key = kFULayer2Count; l = _ll2; name = @"第二层数量"; _preview.layer2 = (NSInteger)v; break;
         case 8: key = kFULayer3Count; l = _ll3; name = @"第三层数量"; _preview.layer3 = (NSInteger)v; break;
+        case 9:
+            [self writeInt:kFUSnapMode value:(v >= 1.0f ? 1 : 0)];
+            [self refreshModeLabel];
+            return;
     }
     if (!key) return;
     l.text = [NSString stringWithFormat:@"%@（当前 %.0f）", name, v];
@@ -845,7 +1051,8 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     [_preview refresh];
 }
 - (void)reset {
-    _sideSeg.selectedSegmentIndex = 0; _ss.value = 40; _sg.value = 56; _span.value = 180; _sc.value = 100;
+    _sideSeg.selectedSegmentIndex = 0; _modeS.value = 0; [self refreshModeLabel];
+    _ss.value = 40; _sg.value = 56; _span.value = 180; _sc.value = 100;
     _l1s.value = 0; _l2s.value = 0; _l3s.value = 0;
     _ls.text = @"图标大小（当前 40）"; _lg.text = @"图标间隔（当前 56）";
     _lspan.text = @"扇形角度°（当前 180）"; _lsc.text = @"整体距离%（当前 100）";
@@ -853,7 +1060,8 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     _preview.side = 0; _preview.iconSize = 40; _preview.iconGap = 56;
     _preview.span = 180; _preview.scale = 100;
     _preview.layer1 = 0; _preview.layer2 = 0; _preview.layer3 = 0;
-    [self writeSide:0]; [self writeFloat:kFUIconSize value:40]; [self writeFloat:kFUIconGap value:56];
+    [self writeInt:kFUSnapMode value:0];
+    [self writeFloat:kFUIconSize value:40]; [self writeFloat:kFUIconGap value:56];
     [self writeFloat:kFUFanSpan value:180]; [self writeFloat:kFUFanScale value:100];
     [self writeInt:kFULayer1Count value:0]; [self writeInt:kFULayer2Count value:0]; [self writeInt:kFULayer3Count value:0];
     [_preview refresh];
@@ -889,6 +1097,8 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     notify_post("com.yzdmm.floatingurl/settingsChanged"); }
 - (void)manageUrls { FUUrlListController *list = [[FUUrlListController alloc] init];
     [self.navigationController pushViewController:list animated:YES]; }
+- (void)showBallEdit { FUBallEditController *b = [[FUBallEditController alloc] init];
+    [self.navigationController pushViewController:b animated:YES]; }
 - (void)showLayout { FULayoutController *lc = [[FULayoutController alloc] init];
     [self.navigationController pushViewController:lc animated:YES]; }
 - (void)showGuide { FUGuideController *g = [[FUGuideController alloc] init];

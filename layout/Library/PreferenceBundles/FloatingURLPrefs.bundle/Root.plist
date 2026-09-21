@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>title</key>
-	<string>悬浮URL 1.3.4</string>
+	<string>悬浮URL 1.3.5</string>
 	<key>items</key>
 	<array>
 		<dict>
@@ -74,9 +74,9 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
-			<string>快捷URI（扇形 · 数量自动分层）</string>
+			<string>快捷URI（扇形 · 数量自动分层 · 最多 24 个）</string>
 			<key>footerText</key>
-			<string>点开悬浮球会朝屏幕内侧展开扇形：URL 球固定不动，快捷图标**添加几个就排几个**——第一层排满自动溢到第二层、第三层（每层能放几个由图标大小/间隔和扇形角度自动算）。网页类入口（http/https）交给系统浏览器打开；非网页类（如 weixin://、tel:）直接拉起对应 app（触发方式可在下方「触发方式」里改）。每个入口可自定义图标（从相册选，自动压缩）、标签（2 个汉字或 3 个字母），以及网址/scheme。长按扇形图标可就地编辑。</string>
+			<string>点开悬浮球会朝屏幕内侧展开扇形：URL 球固定不动，快捷图标添加几个就排几个——第一层排满自动溢到第二层、第三层（每层能放几个由图标大小/间隔和扇形角度自动算）。扇形朝向按球的实际位置自动识别：球在屏幕左半边就朝右展开，在右半边就朝左展开（以屏幕中心线为界，即听筒到充电口那条线）。每个入口可自定义名称（最多 8 字）、图标（从相册选，自动压缩方形裁剪）、图标底色，以及网址/scheme。长按扇形图标可就地编辑。注意：把入口全删光后，点悬浮球不再弹出任何网页。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -90,17 +90,55 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
-			<string>布局调节（左/右 + 扇形两层）</string>
+			<string>布局调节（吸附模式 + 扇形）</string>
 			<key>footerText</key>
-			<string>停靠边：悬浮球固定在屏幕左侧或右侧边缘、竖直居中（只有左/右两种，没有横纵坐标）；图标大小、图标间隔：扇形上快捷图标的尺寸与圈层间距。进「布局实时预览」拖滑杆，预览立即变化，手机上的悬浮球同步生效（改动即存，无需另点保存）。</string>
+			<string>吸附模式（滑动选择）：自动吸附 = 松手后按屏幕中心线归位，球在左半屏吸左边、右半屏吸右边（只露一半，点击拉回）；全屏固定 = 松手停在哪就停在哪，不自动吸附。左右完全自动识别，不需要手动选边：球在左 → 扇形朝右侧展开，球在右 → 扇形朝左侧展开。图标大小、图标间隔、扇形角度、整体距离、每层数量都可单独调，改完立即生效并记住位置。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
 			<string>PSButtonCell</string>
 			<key>label</key>
-			<string>布局实时预览（左/右 + 角度/距离/大小/间隔）</string>
+			<string>布局实时预览（吸附模式 + 角度/距离/大小/间隔）</string>
 			<key>action</key>
 			<string>showLayout</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>悬浮球外观</string>
+			<key>footerText</key>
+			<string>自定义悬浮球本身的名称（默认 URL）、图标（从相册选取，方形裁剪）；不选图标时可选择球的底色，不设底色则为玻璃质感。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSButtonCell</string>
+			<key>label</key>
+			<string>自定义悬浮球（名称 / 图标 / 颜色）</string>
+			<key>action</key>
+			<string>showBallEdit</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>网页打开方式</string>
+			<key>footerText</key>
+			<string>默认「关闭」= 网页交给系统浏览器打开（最稳，推荐）。开启 = 用内置可拖拽/双指缩放面板打开（部分设备在桌面进程里加载不出内容，会白屏）。非网页类 scheme（weixin://、tel:、alipay:// 等）始终直接拉起对应 app。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.yzdmm.floatingurl</string>
+			<key>key</key>
+			<string>webMode</string>
+			<key>label</key>
+			<string>用内置浏览器打开网页（实验）</string>
+			<key>PostNotification</key>
+			<string>com.yzdmm.floatingurl/settingsChanged</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -192,7 +230,7 @@
 			<key>label</key>
 			<string>关于</string>
 			<key>footerText</key>
-			<string>系统级悬浮窗：可拖动小球常驻屏幕，点开两层扇形快捷环（URL+第一层4+第二层6），网页/scheme 一键直达；全 App 及主屏幕可用。松手靠近屏幕边才吸附（只露一半），点击拉回。</string>
+			<string>系统级悬浮窗：可拖动小球常驻屏幕，点开扇形快捷环（按入口数量自动分层），网页/scheme 一键直达；全 App 及主屏幕可用。吸附模式可选「自动吸附（按屏幕中心线吸左/右）」或「全屏固定（停在哪就在哪）」，球的位置会被记住。</string>
 		</dict>
 	</array>
 </dict>
