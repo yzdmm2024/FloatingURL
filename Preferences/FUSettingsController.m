@@ -839,7 +839,7 @@ static NSArray *FUColorPalette(void) {
     _empty.hidden = YES;
     [self.view addSubview:_empty];
 
-    id g = self.view.safeAreaLayoutGuide;
+    UILayoutGuide *g = self.view.safeAreaLayoutGuide;
     NSMutableArray *cs = [NSMutableArray array];
     [cs addObjectsFromArray:@[
         [_bar.topAnchor      constraintEqualToAnchor:g.topAnchor],
