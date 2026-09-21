@@ -9,6 +9,7 @@ static NSString * const kFUEntryURL    = @"url";
 static NSString * const kFUEntryChar   = @"char";
 static NSString * const kFUEntryLetter = @"letter";
 static NSString * const kFUEntryIcon   = @"icon";
+static NSString * const kFUEntryColor  = @"color";     // v1.3.3 入口图标底色 hex（无图标时生效）
 static NSString * const kFUURLs        = @"urls";
 static NSString * const kFUEnabledApps = @"enabledApps";
 static NSString * const kFUSide        = @"side";
