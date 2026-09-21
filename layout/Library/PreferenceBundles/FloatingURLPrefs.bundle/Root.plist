@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>title</key>
-	<string>悬浮URL 1.3.19</string>
+	<string>悬浮URL 1.3.20</string>
 	<key>items</key>
 	<array>
 		<dict>
@@ -25,6 +25,34 @@
 			<string>启用悬浮窗</string>
 			<key>PostNotification</key>
 			<string>com.yzdmm.floatingurl/settingsChanged</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSegmentedCell</string>
+			<key>default</key>
+			<integer>0</integer>
+			<key>defaults</key>
+			<string>com.yzdmm.floatingurl</string>
+			<key>detail</key>
+			<string>PSListItemsController</string>
+			<key>key</key>
+			<string>runMode</string>
+			<key>label</key>
+			<string>运行模式</string>
+			<key>validTitles</key>
+			<array>
+				<string>全局模式</string>
+				<string>单App模式</string>
+			</array>
+			<key>validValues</key>
+			<array>
+				<integer>0</integer>
+				<integer>1</integer>
+			</array>
+			<key>PostNotification</key>
+			<string>com.yzdmm.floatingurl/settingsChanged</string>
+			<key>footerText</key>
+			<string>全局模式：悬浮球只由桌面持有，兼容性最好（推荐）。单App模式：悬浮球注入到每个 App 进程里，网页由 App 自己渲染 —— 内置小窗可以正常打开网页（等同最早 1.2.1 的形态）；切换后不用注销，几秒内自动生效。</string>
 		</dict>
 		<dict>
 			<key>cell</key>

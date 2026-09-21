@@ -81,6 +81,16 @@ static NSString * const kFUBallIcon    = @"ballIcon";   // v1.3.5：球的图标
 static NSString * const kFUBallColor   = @"ballColor";  // v1.3.5：球的底色 hex（无图标时生效）
 static NSString * const kFUWebMode     = @"webMode";    // v1.3.5：YES=内置面板打开网页（v1.3.13 起桌面不再用它，见 triggerEntry）
 static NSString * const kFUSnapDelay   = @"snapDelay";  // v1.3.13：松手后「完整悬浮图标」停留几秒再自动吸附（默认 3，0=立即）
+// v1.3.20：运行模式。0=全局模式（默认，球只在桌面，网页由 App 内置浏览器/外部浏览器打开）
+//          1=单App模式（球注入到每个 App 进程里，网页由 App 渲染 → 内置小窗重新可用，即 1.2.1 的形态）
+static NSString * const kFUMode = @"runMode";
+// v1.3.20：桌面 → 各 App 进程的「模式心跳」。单App模式下桌面每 3 秒广播一次，App 收到才显示自己的球。
+// 为什么用达尔文通知而不是「读同一个配置文件」：真机实测沙盒 App 既读不到偏好、也读不到进程外的文件，
+// 唯独跨进程通知不受沙盒限制（现有黑名单心跳就是靠它工作的）。
+static NSString * const kFUSingleAppBeacon = @"com.yzdmm.floatingurl/singleAppBeacon";
+// v1.3.20：桌面把配置快照写到这里，App 端尽力读取（读不到也不致命：没有快捷入口时仍可手输网址开小窗）。
+static NSString * const kFUCfgSnapshot = @"/var/mobile/Media/FloatingURL_config.plist";
+static NSString * const kFUCfgFile     = @"FloatingURL_config.plist";
 
 static const NSInteger kFUMaxEntries = 48;   // v1.3.6：上限 48（三层 8 + 16 + 24）
 static const NSInteger kFULayer1Max  = 4;    // 第一层（内环）最多 4 个
@@ -651,6 +661,14 @@ static void fuStartAppHeartbeat(NSString *bid) {
 - (void)openWebURL:(NSString *)norm;
 - (void)scheduleWebWatchdog:(NSInteger)tok url:(NSString *)u;
 - (void)fallbackWebToExternal:(NSString *)u;
+// v1.3.20：单App模式（球注入每个 App 进程 → 网页由 App 渲染，内置小窗重新可用）
+- (void)fuAppModeStart;            // App 进程：监听桌面的模式心跳
+- (void)fuNoteBeacon;              // App 进程：收到心跳
+- (void)fuAppModeTick;             // App 进程：按心跳新鲜度开关本 App 里的球
+- (void)applyAppModeVisibility;    // App 进程：可见性判定（不依赖偏好，只看心跳 + 前台）
+- (void)fuBeaconUpdate;            // 桌面：按模式启停心跳广播
+- (void)fuWriteConfigSnapshot;     // 桌面：把配置写成快照文件（App 端尽力读取）
+- (BOOL)fuLoadConfigSnapshot;      // App：读取桌面写的配置快照
 @property (nonatomic, strong) UIView      *schemeBox;     // 非网页入口的简单输入框容器
 @property (nonatomic, strong) UITextField *schemeField;
 @property (nonatomic, strong) UIButton    *schemeOpenBtn;
@@ -705,6 +723,13 @@ static void fuFrontGoneCb(CFNotificationCenterRef center, void *observer,
     BOOL                  _webLoadedOK;      // 本次加载已成功完成
     BOOL                  _webStarted;       // 本次加载连"开始导航"回调都没收到（= 结构性失败的特征）
     BOOL                  _desktopWebBroken; // 本会话已确认桌面小窗渲染不了 → 之后直接外部浏览器
+    // ---- v1.3.20 单App模式 ----
+    NSInteger             _runMode;          // 0=全局模式（默认） 1=单App模式
+    NSTimer              *_beaconTimer;      // 桌面：广播「单App模式」心跳的定时器
+    CFTimeInterval        _lastBeacon;       // App：最近一次收到心跳的时刻
+    BOOL                  _appModeOn;        // App：本进程已按单App模式建过 UI
+    BOOL                  _appCfgLoaded;     // App：是否成功读到桌面的配置快照
+    NSString             *_lastCfgSig;       // 桌面：上次写出的快照签名（内容没变就不重复写盘）
 
     BOOL                  _expanded;
     BOOL                  _didSetup;
@@ -899,6 +924,11 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
         CFRelease(sdlyRef);
     } else if (sdlyRef) { CFRelease(sdlyRef); }
     if (_snapDelay < 0) _snapDelay = 0; if (_snapDelay > 15) _snapDelay = 15;
+    // v1.3.20：运行模式（0=全局 1=单App）。桌面进程读得到；App 进程读不到（沙盒），由心跳决定。
+    CFPropertyListRef mdRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUMode, (__bridge CFStringRef)kFUSuite);
+    if (mdRef && CFGetTypeID(mdRef) == CFNumberGetTypeID()) { _runMode = [(__bridge NSNumber *)mdRef integerValue]; CFRelease(mdRef); }
+    else if (mdRef) { CFRelease(mdRef); }
+    if (_runMode != 1) _runMode = 0;
     // v1.3.9 修 05（真机实测确认的根因）：键被删掉时 CFPreferencesCopyAppValue 返回 NULL，
     // 而旧代码两个分支都不走 → _ballIcon / _ballColor / _ballTitle **保持上一次的旧值**，
     // 于是「设置里删了照片，球上照片还在」。这里必须在读到 NULL 时明确清空。
@@ -914,11 +944,15 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     else { if (bcRef) CFRelease(bcRef); _ballColor = nil; }
     NSInteger oldEntryCount = (NSInteger)_entries.count;
     [self loadEntries];
+    // v1.3.20：App 进程读不到偏好 → 改读桌面写的配置快照（拿到就有完整快捷入口，拿不到也不致命）。
+    if (!fuIsSpringBoard()) _appCfgLoaded = [self fuLoadConfigSnapshot];
     if (_didSetup) {
         [self applyBallAppearance];   // 设置里改了外观 → 立即生效
         // v1.3.13：扇形正开着时新增/删除了入口 → 立刻重排，修「添加了快捷 URL 但扇形里不显示」
         if (_fanOpen && (NSInteger)_entries.count != oldEntryCount) [self fuRelayoutFanInstant];
     }
+    // v1.3.20：桌面负责产出快照（只在单App模式下写，内容没变不重复写盘）。
+    if (fuIsSpringBoard()) [self fuWriteConfigSnapshot];
 }
 #pragma mark - v1.3.2 黑名单（前台 App 心跳驱动）
 - (NSArray *)fuBlacklist {
@@ -1103,6 +1137,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
             [self applyVisibility]; return;
         }
         [self reloadPrefs];
+        [self fuBeaconUpdate];   // v1.3.20：单App模式下由桌面每 3 秒向各 App 广播一次模式心跳
         if (fuIsSpringBoard()) {
             // v1.3.3：用 SpringBoard 直读前台 App 作为权威来源（修复奥维地图等漏判）。
             NSString *fb = [self fuFrontmostBid];
@@ -1390,7 +1425,12 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     if (_fanOpen)  { [self closeFan]; return; }
     // v1.3.5 修 06：一个入口都没有（用户把快捷 URL 删光了）→ 什么都不做，
     // 不能再弹出一个默认网页（那既莫名又打不开）。
-    if (_entries.count == 0) return;
+    if (_entries.count == 0) {
+        // v1.3.20：单App模式下就算没有快捷入口，点球也打开内置小窗（可在里面粘贴/输入网址），
+        // 因为 App 进程里的网页是按最初版本那样能正常渲染的。
+        if (!fuIsSpringBoard()) { [self expand]; return; }
+        return;
+    }
     // v1.3.8 修 07：只有一个入口 → 展开扇形毫无意义（就一个图标还占满屏），直接触发它。
     if (_entries.count == 1) {
         [self triggerEntry:_entries[0]];
@@ -2136,10 +2176,156 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     }
 }
 
+#pragma mark - v1.3.20 单App模式（球注入每个 App 进程 → 网页由 App 渲染）
+// 桌面：单App模式 + 总开关开着 → 每 3 秒广播一次心跳；否则立刻停播（App 端 8 秒后自动收球）。
+- (void)fuBeaconUpdate {
+    if (!fuIsSpringBoard()) return;
+    @try {
+        BOOL on = (_runMode == 1 && _enabled &&
+                   ![[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"]);
+        if (on) {
+            if (!_beaconTimer) {
+                _beaconTimer = [NSTimer timerWithTimeInterval:3.0 repeats:YES block:^(NSTimer *t){
+                    notify_post(kFUSingleAppBeacon.UTF8String);
+                }];
+                [[NSRunLoop mainRunLoop] addTimer:_beaconTimer forMode:NSRunLoopCommonModes];
+            }
+            notify_post(kFUSingleAppBeacon.UTF8String);
+        } else if (_beaconTimer) {
+            [_beaconTimer invalidate]; _beaconTimer = nil;
+        }
+    } @catch (NSException *e) { NSLog(@"[FloatingURL] 模式心跳异常（已忽略）: %@", e); }
+}
+// 桌面：把配置写成快照，供 App 进程读取（App 沙盒读不到偏好，这是唯一可能的交接方式）。
+- (void)fuWriteConfigSnapshot {
+    if (!fuIsSpringBoard() || _runMode != 1) return;
+    @try {
+        NSMutableDictionary *d = [NSMutableDictionary dictionary];
+        d[@"urls"]      = _entries ?: @[];
+        d[@"side"]      = @(_side);
+        d[@"iconSize"]  = @(_iconSize);
+        d[@"iconGap"]   = @(_iconGap);
+        d[@"fanSpan"]   = @(_fanSpan);
+        d[@"fanScale"]  = @(_fanScale);
+        d[@"layer1"]    = @(_layer1);
+        d[@"layer2"]    = @(_layer2);
+        d[@"layer3"]    = @(_layer3);
+        d[@"snapMode"]  = @(_snapMode);
+        d[@"snapDelay"] = @(_snapDelay);
+        d[@"winW"]      = @(_winW);
+        d[@"winH"]      = @(_winH);
+        d[@"ballTitle"] = _ballTitle ?: @"";
+        d[@"ballColor"] = _ballColor ?: @"";
+        d[@"ballIcon"]  = _ballIcon ?: [NSData data];
+        NSString *sig = [NSString stringWithFormat:@"%@", d];
+        if (_lastCfgSig && [sig isEqualToString:_lastCfgSig]) return;
+        _lastCfgSig = sig;
+        NSData *pl = [NSPropertyListSerialization dataWithPropertyList:d
+                        format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
+        if (pl) [pl writeToFile:kFUCfgSnapshot atomically:YES];
+    } @catch (NSException *e) { NSLog(@"[FloatingURL] 写配置快照异常（已忽略）: %@", e); }
+}
+// App：尽力读取桌面的配置快照（读不到返回 NO，功能降级但不崩、不打扰 App）。
+- (BOOL)fuLoadConfigSnapshot {
+    if (fuIsSpringBoard()) return NO;
+    @try {
+        NSMutableArray *paths = [NSMutableArray array];
+        [paths addObject:kFUCfgSnapshot];
+        NSArray *dirs = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
+        if (dirs.count) [paths addObject:[dirs.firstObject stringByAppendingPathComponent:kFUCfgFile]];
+        for (NSString *p in paths) {
+            NSData *dat = [NSData dataWithContentsOfFile:p];
+            if (!dat.length) continue;
+            id obj = [NSPropertyListSerialization propertyListWithData:dat options:0 format:NULL error:NULL];
+            if (![obj isKindOfClass:[NSDictionary class]]) continue;
+            NSDictionary *d = (NSDictionary *)obj;
+            NSArray *u = d[@"urls"]; if ([u isKindOfClass:[NSArray class]]) _entries = u;
+            id v;
+            if ((v = d[@"side"]))      _side      = [v integerValue];
+            if ((v = d[@"iconSize"]))  _iconSize  = [v floatValue];
+            if ((v = d[@"iconGap"]))   _iconGap   = [v floatValue];
+            if ((v = d[@"fanSpan"]))   _fanSpan   = [v floatValue];
+            if ((v = d[@"fanScale"]))  _fanScale  = [v floatValue];
+            if ((v = d[@"layer1"]))    _layer1    = [v integerValue];
+            if ((v = d[@"layer2"]))    _layer2    = [v integerValue];
+            if ((v = d[@"layer3"]))    _layer3    = [v integerValue];
+            if ((v = d[@"snapMode"]))  _snapMode  = [v integerValue];
+            if ((v = d[@"snapDelay"])) _snapDelay = [v doubleValue];
+            if ((v = d[@"winW"]))      _winW      = [v floatValue];
+            if ((v = d[@"winH"]))      _winH      = [v floatValue];
+            NSString *t = d[@"ballTitle"]; if (t.length) _ballTitle = t;
+            NSString *c = d[@"ballColor"]; if (c.length) _ballColor = c;
+            NSData  *bi = d[@"ballIcon"];  if ([bi isKindOfClass:[NSData class]] && bi.length) _ballIcon = bi;
+            return YES;
+        }
+    } @catch (NSException *e) { NSLog(@"[FloatingURL] 读配置快照异常（已忽略）: %@", e); }
+    return NO;
+}
+// App：启动「模式心跳」监听（App 进程 %ctor 里调用）。
+- (void)fuAppModeStart {
+    if (fuIsSpringBoard()) return;
+    static BOOL started = NO; if (started) return; started = YES;
+    @try {
+        static int tok = 0;
+        notify_register_dispatch(kFUSingleAppBeacon.UTF8String, &tok, dispatch_get_main_queue(), ^(int t){
+            @try { [[FUFloatingManager shared] fuNoteBeacon]; } @catch (NSException *e) {}
+        });
+        NSTimer *chk = [NSTimer timerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *tt){
+            @try { [[FUFloatingManager shared] fuAppModeTick]; }
+            @catch (NSException *e) { NSLog(@"[FloatingURL] 单App 轮询异常（已忽略）: %@", e); }
+        }];
+        [[NSRunLoop mainRunLoop] addTimer:chk forMode:NSRunLoopCommonModes];
+    } @catch (NSException *e) { NSLog(@"[FloatingURL] 单App 监听启动异常（已忽略）: %@", e); }
+}
+- (void)fuNoteBeacon { _lastBeacon = CFAbsoluteTimeGetCurrent(); }
+- (void)fuAppModeTick {
+    if (fuIsSpringBoard()) return;
+    UIApplication *app = UIApplication.sharedApplication;
+    BOOL active = (!app || app.applicationState == UIApplicationStateActive);
+    BOOL fresh  = (_lastBeacon > 0) && (CFAbsoluteTimeGetCurrent() - _lastBeacon < 8.0);
+    BOOL silent = [[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"];
+    if (fresh && active && !silent) {
+        if (!_appModeOn) { _appModeOn = YES; [self setupWhenHostReady]; }
+        else [self applyAppModeVisibility];
+    } else if (_appModeOn) {
+        _appModeOn = NO;
+        [self applyAppModeVisibility];
+    }
+}
+// App 端可见性：完全不读偏好（沙盒读不到），只看「桌面心跳是否新鲜 + 自己是否在前台」。
+- (void)applyAppModeVisibility {
+    if (!_didSetup) return;
+    @try {
+        BOOL silent = [[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"];
+        UIApplication *app = UIApplication.sharedApplication;
+        BOOL active = (!app || app.applicationState == UIApplicationStateActive);
+        BOOL fresh  = (_lastBeacon > 0) && (CFAbsoluteTimeGetCurrent() - _lastBeacon < 8.0);
+        if (silent || !active || !fresh) {
+            _overlay.hidden = YES; _ball.hidden = YES; _panel.hidden = YES;
+            if (_fanOpen) [self closeFan];
+            if (_expanded) { _expanded = NO; [self setInteractive:NO]; }
+            return;
+        }
+        _overlay.hidden = NO;
+        if (!_expanded && !_fanOpen && !_draggingBall) { _ball.hidden = NO; [self setInteractive:NO]; }
+    } @catch (NSException *e) {
+        NSLog(@"[FloatingURL] App 端可见性异常（已忽略）: %@", e);
+    }
+}
+
 - (void)applyVisibility {
     if (!_didSetup) return;
+    // v1.3.20：非桌面进程（单App模式下的球）走另一套判定——只看心跳与前台，不走黑名单/偏好逻辑。
+    if (!fuIsSpringBoard()) { [self applyAppModeVisibility]; return; }
     // v1.3.3：静默模式 → 整窗彻底休眠（球/环/面板全藏），App 端也跳过心跳，最省电。
     if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"]) {
+        _overlay.hidden = YES; _ball.hidden = YES; _panel.hidden = YES;
+        if (_fanOpen) [self closeFan];
+        if (_expanded) { _expanded = NO; [self setInteractive:NO]; }
+        return;
+    }
+    // v1.3.20：单App模式 → 桌面不显示球（球由每个 App 进程各自持有），避免同一个屏幕上叠两个球。
+    if (_runMode == 1) {
         _overlay.hidden = YES; _ball.hidden = YES; _panel.hidden = YES;
         if (_fanOpen) [self closeFan];
         if (_expanded) { _expanded = NO; [self setInteractive:NO]; }
@@ -2292,7 +2478,11 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
         NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
         if ([bid isEqualToString:@"com.apple.Preferences"]) return;   // 设置里不挂球
         if (![bid isEqualToString:@"com.apple.springboard"]) {
-            fuStartAppHeartbeat(bid);   // 沙盒 App 读不到设置 → 只发心跳，不建球
+            fuStartAppHeartbeat(bid);   // 沙盒 App 读不到设置 → 只发心跳，暂不建球
+            // v1.3.20：单App模式的监听。平时零开销（只注册一个达尔文通知 + 一个 2 秒轮询），
+            // 只有真的收到桌面广播的「单App模式心跳」时，才会在本 App 里把球建起来。
+            @try { [[FUFloatingManager shared] fuAppModeStart]; }
+            @catch (NSException *e) { NSLog(@"[FloatingURL] 单App 监听启动失败（已忽略）: %@", e); }
             return;
         }
         if (!INCLUDE_SPRINGBOARD) return;
