@@ -34,9 +34,10 @@ static NSString * const kFUGonePrefix   = @"com.yzdmm.floatingurl/gone/";   // v
 
 static NSString * const kFUURLs        = @"urls";
 static NSString * const kFUEntryURL    = @"url";
-static NSString * const kFUEntryChar   = @"char";
+static NSString * const kFUEntryChar   = @"char";       // v1.3.3：名称/标签（自由文本，显示在图标上）
 static NSString * const kFUEntryLetter = @"letter";
 static NSString * const kFUEntryIcon   = @"icon";
+static NSString * const kFUEntryColor  = @"color";      // v1.3.3：自定义图标底色（hex，无图标时生效）
 static NSString * const kFUSync        = @"sync";
 static NSString * const kFUEnabledApps = @"enabledApps";
 static NSString * const kFUSide        = @"side";       // 球停靠边：0=右(默认) 1=左
@@ -44,6 +45,10 @@ static NSString * const kFUIconSize    = @"iconSize";   // 快捷图标尺寸 pt
 static NSString * const kFUIconGap     = @"iconGap";    // 图标/圈层间隔 pt
 static NSString * const kFUFanSpan     = @"fanSpan";    // v1.3.2 扇形角度（60~180°，默认 180）
 static NSString * const kFUFanScale    = @"fanScale";   // v1.3.2 整体距离（%，默认 100）
+static NSString * const kFULayer1Count = @"layer1";     // v1.3.3：第一层入口数（0=自动）
+static NSString * const kFULayer2Count = @"layer2";     // v1.3.3：第二层入口数（0=自动）
+static NSString * const kFULayer3Count = @"layer3";     // v1.3.3：第三层入口数（0=自动）
+static NSString * const kFUSilent      = @"silent";     // v1.3.3：静默模式（1=不注入 App 进程、零打扰）
 
 static const NSInteger kFUMaxEntries = 10;   // v1.3.1：扇形两层（第一层 4 + 第二层 6 = 10）
 static const NSInteger kFULayer1Max  = 4;    // 第一层（内环）最多 4 个
@@ -76,6 +81,9 @@ static NSString *fuGoneName(NSString *bid)  { return [kFUGonePrefix  stringByApp
 static void fuStartAppHeartbeat(NSString *bid) {
     static BOOL started = NO; if (started) return; started = YES;
     if (!bid.length) return;
+    // v1.3.3 静默模式：SpringBoard 写好标记文件后，App 进程完全不注入心跳（零打扰、最省电）。
+    // 读取失败（沙盒等）则回退到正常心跳，不影响黑名单功能。
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"]) return;
     NSString *alive = fuAliveName(bid), *gone = fuGoneName(bid);
     void (^beat)(void) = ^{
         // 关键：只有「真前台」才上报。后台 App 的定时器可能仍在校跑，
@@ -83,7 +91,8 @@ static void fuStartAppHeartbeat(NSString *bid) {
         UIApplication *a = UIApplication.sharedApplication;
         if (a && a.applicationState == UIApplicationStateActive) notify_post(alive.UTF8String);
     };
-    NSTimer *t = [NSTimer timerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *tt){ beat(); }];
+    // v1.3.3：低频保活（4s），仅在真前台才发通知；App 进后台即被系统挂起，定时器不再触发 → 低能耗。
+    NSTimer *t = [NSTimer timerWithTimeInterval:4.0 repeats:YES block:^(NSTimer *tt){ beat(); }];
     [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
     NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
     [nc addObserverForName:UIApplicationDidBecomeActiveNotification object:nil
@@ -218,6 +227,9 @@ static void fuStartAppHeartbeat(NSString *bid) {
 @property (nonatomic, strong) UITextField *urlField, *labelField;
 @property (nonatomic, strong) UIButton    *iconButton;
 @property (nonatomic, strong) NSData      *iconData;
+@property (nonatomic, copy)   NSString    *colorHex;     // v1.3.3 自定义图标底色（hex）
+@property (nonatomic, strong) NSMutableArray *colorButtons;
+@property (nonatomic, strong) NSArray     *colorPresets;
 @property (nonatomic, copy)   void (^onDismiss)(void);   // 关闭后把 key 还给 App
 @end
 @implementation FUEntryEditorViewController
@@ -253,7 +265,7 @@ static void fuStartAppHeartbeat(NSString *bid) {
 
     // 文字（汉字或字母，1 个字符）—— 合并为单框
     _labelField = [[UITextField alloc] initWithFrame:CGRectMake(pad, y, w, 40)];
-    _labelField.placeholder = @"汉字或字母（1 个字符，如 微 / W）";
+    _labelField.placeholder = @"名称（最多 8 字，如 百度 / 地图 / W）";
     _labelField.borderStyle = UITextBorderStyleRoundedRect;
     _labelField.font = [UIFont systemFontOfSize:14];
     _labelField.textAlignment = NSTextAlignmentCenter;
@@ -279,14 +291,39 @@ static void fuStartAppHeartbeat(NSString *bid) {
     // 提示
     UILabel *tip = [[UILabel alloc] initWithFrame:CGRectMake(pad, y, w, 44)];
     tip.numberOfLines = 0; tip.font = [UIFont systemFontOfSize:12]; tip.textColor = [UIColor tertiaryLabelColor];
-    tip.text = @"提示：图标会自动压缩成 120×120 正方形；图标与文字二选一，不填图标则显示上方文字。";
+    tip.text = @"提示：图标自动压缩成 120×120 正方形；名称最多 8 字（汉字/字母/数字均可）；还可选图标底色（不填图标时生效）。图标与文字二选一。";
     [scroll addSubview:tip]; y += 44 + 12;
 
     UIButton *clear = [UIButton buttonWithType:UIButtonTypeSystem];
     clear.frame = CGRectMake(pad, y, w, 40);
     [clear setTitle:@"清除图标（用文字显示）" forState:UIControlStateNormal];
     [clear addTarget:self action:@selector(clearIcon) forControlEvents:UIControlEventTouchUpInside];
-    [scroll addSubview:clear]; y += 40 + 24;
+    [scroll addSubview:clear]; y += 40 + 20;
+
+    // v1.3.3：图标底色选择（不填图标时生效）
+    UILabel *colLab = [[UILabel alloc] initWithFrame:CGRectMake(pad, y, w, 18)];
+    colLab.font = [UIFont systemFontOfSize:12]; colLab.textColor = [UIColor secondaryLabelColor];
+    colLab.text = @"图标底色（不填图标时生效，留空=默认蓝）";
+    [scroll addSubview:colLab]; y += 22;
+    _colorPresets = @[@"#3385E6",@"#E63946",@"#2EA44F",@"#F4801A",@"#8E44AD",@"#16A2B8",@"#E84393",@"#6C757D",@""];
+    _colorButtons = [NSMutableArray array];
+    CGFloat sw = 36, csp = 8; CGFloat cx = pad;
+    for (NSString *hex in _colorPresets) {
+        if (cx + sw > pad + w) { cx = pad; y += sw + csp; }
+        UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+        b.frame = CGRectMake(cx, y, sw, sw);
+        b.layer.cornerRadius = sw/2.0f; b.layer.borderWidth = 2.0f;
+        b.layer.borderColor = [UIColor separatorColor].CGColor; b.clipsToBounds = YES;
+        if (hex.length) b.backgroundColor = [self colorFromHex:hex];
+        else { b.backgroundColor = [UIColor secondarySystemBackgroundColor];
+               [b setTitle:@"无" forState:UIControlStateNormal]; b.titleLabel.font = [UIFont systemFontOfSize:11];
+               [b setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal]; }
+        b.tag = 900 + [_colorPresets indexOfObject:hex];
+        [b addTarget:self action:@selector(colorTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [scroll addSubview:b]; [_colorButtons addObject:b]; cx += sw + csp;
+    }
+    y += sw + 20;
+    [self refreshColor];
     scroll.contentSize = CGSizeMake(self.view.bounds.size.width, y);
 
     if (_index >= 0) [self prefill];
@@ -302,20 +339,16 @@ static void fuStartAppHeartbeat(NSString *bid) {
         NSString *ch = e[kFUEntryChar] ?: @""; NSString *lt = e[kFUEntryLetter] ?: @"";
         _labelField.text  = ch.length ? ch : lt;
         _iconData        = e[kFUEntryIcon];
+        _colorHex        = e[kFUEntryColor];
         [self refreshIcon:_iconData];
+        [self refreshColor];
     }
 }
 - (BOOL)textField:(UITextField *)tf shouldChangeCharactersInRange:(NSRange)r
                                               replacementString:(NSString *)s {
     if (tf == _labelField) {
         NSString *next = [tf.text stringByReplacingCharactersInRange:r withString:s];
-        NSInteger cjk = 0, lat = 0;
-        for (NSUInteger i = 0; i < next.length; i++) {
-            unichar c = [next characterAtIndex:i];
-            if (c >= 0x4E00 && c <= 0x9FFF) cjk++;
-            else if (![[NSCharacterSet whitespaceCharacterSet] characterIsMember:c]) lat++;
-        }
-        if (cjk > 2 || lat > 3) return NO;   // v1.3.1：最多 2 汉字 或 3 字母
+        if (next.length > 8) return NO;   // v1.3.3：名称最多 8 个字符（汉字/字母/数字均可）
     }
     return YES;
 }
@@ -364,12 +397,42 @@ static void fuStartAppHeartbeat(NSString *bid) {
     }];
 }
 - (void)clearIcon { _iconData = nil; [self refreshIcon:nil]; }
+- (void)colorTapped:(UIButton *)b {
+    NSInteger idx = b.tag - 900;
+    if (idx < 0 || idx >= (NSInteger)_colorPresets.count) return;
+    NSString *hex = _colorPresets[idx];
+    _colorHex = hex.length ? hex : nil;
+    [self refreshColor];
+}
+- (void)refreshColor {
+    NSString *cur = _colorHex ?: @"";
+    for (UIButton *b in _colorButtons) {
+        NSInteger idx = b.tag - 900; if (idx < 0) continue;
+        NSString *hex = _colorPresets[idx];
+        BOOL sel = (hex.length == 0 && cur.length == 0) ||
+                  (hex.length && [cur caseInsensitiveCompare:hex] == NSOrderedSame);
+        b.layer.borderColor = (sel ? [UIColor systemBlueColor] : [UIColor separatorColor]).CGColor;
+        b.layer.borderWidth = sel ? 3.0f : 2.0f;
+    }
+}
+- (UIColor *)colorFromHex:(NSString *)hex {
+    if (![hex isKindOfClass:[NSString class]] || hex.length < 6) return nil;
+    NSString *h = [hex stringByReplacingOccurrencesOfString:@"#" withString:@""];
+    if (h.length == 3) h = [NSString stringWithFormat:@"%c%c%c%c%c%c",
+        [h characterAtIndex:0],[h characterAtIndex:0],[h characterAtIndex:1],
+        [h characterAtIndex:1],[h characterAtIndex:2],[h characterAtIndex:2]];
+    if (h.length != 6) return nil;
+    unsigned int v = 0; NSScanner *s = [NSScanner scannerWithString:h]; [s scanHexInt:&v];
+    return [UIColor colorWithRed:((v>>16)&0xFF)/255.0f green:((v>>8)&0xFF)/255.0f
+                             blue:(v&0xFF)/255.0f alpha:1.0f];
+}
 - (void)save {
     NSMutableDictionary *e = [NSMutableDictionary dictionary];
     e[kFUEntryURL] = (_urlField.text.length ? _urlField.text : @"");
     NSString *lab = _labelField.text ?: @"";
     if (lab.length) e[kFUEntryChar] = lab;   // v1.3.1：存完整标签（2 汉字 / 3 字母）
     if (_iconData) e[kFUEntryIcon] = _iconData;
+    if (_colorHex.length) e[kFUEntryColor] = _colorHex;
 
     CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUURLs,
                                     (__bridge CFStringRef)kFUSuite);
@@ -478,6 +541,10 @@ static void fuFrontGoneCb(CFNotificationCenterRef center, void *observer,
     NSTimer               *_pollTimer;       // 每秒兜底重判黑名单/开关（修黑名单不生效）
     CGFloat               _fanSpan;          // v1.3.2 扇形角度 60~180°
     CGFloat               _fanScale;         // v1.3.2 整体距离 %
+    NSInteger             _layer1;           // v1.3.3 第一层入口数（0=自动）
+    NSInteger             _layer2;           // v1.3.3 第二层入口数（0=自动）
+    NSInteger             _layer3;           // v1.3.3 第三层入口数（0=自动）
+    BOOL                  _silent;           // v1.3.3 静默模式（旗标文件存在即为开）
     NSString             *_frontBid;         // v1.3.2 当前前台 App 的 bundle id（来自 Darwin 心跳）
     CFAbsoluteTime        _frontBidTs;       // 心跳时间戳（>3s 视为过期）
     NSMutableSet         *_frontWatched;     // 已注册通知监听的黑名单 bundle id
@@ -563,6 +630,18 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     if (fscRef && CFGetTypeID(fscRef) == CFNumberGetTypeID()) { _fanScale = [(__bridge NSNumber *)fscRef floatValue]; CFRelease(fscRef); }
     if (_fanSpan  < 60.0f) _fanSpan = 60.0f;  if (_fanSpan  > 180.0f) _fanSpan = 180.0f;
     if (_fanScale < 60.0f) _fanScale = 60.0f; if (_fanScale > 160.0f) _fanScale = 160.0f;
+    // v1.3.3：每层数量（0=自动）
+    CFPropertyListRef l1 = CFPreferencesCopyAppValue((__bridge CFStringRef)kFULayer1Count, (__bridge CFStringRef)kFUSuite);
+    if (l1 && CFGetTypeID(l1) == CFNumberGetTypeID()) { _layer1 = [(__bridge NSNumber *)l1 integerValue]; CFRelease(l1); }
+    CFPropertyListRef l2 = CFPreferencesCopyAppValue((__bridge CFStringRef)kFULayer2Count, (__bridge CFStringRef)kFUSuite);
+    if (l2 && CFGetTypeID(l2) == CFNumberGetTypeID()) { _layer2 = [(__bridge NSNumber *)l2 integerValue]; CFRelease(l2); }
+    CFPropertyListRef l3 = CFPreferencesCopyAppValue((__bridge CFStringRef)kFULayer3Count, (__bridge CFStringRef)kFUSuite);
+    if (l3 && CFGetTypeID(l3) == CFNumberGetTypeID()) { _layer3 = [(__bridge NSNumber *)l3 integerValue]; CFRelease(l3); }
+    if (_layer1 < 0) _layer1 = 0; if (_layer1 > 10) _layer1 = 10;
+    if (_layer2 < 0) _layer2 = 0; if (_layer2 > 10) _layer2 = 10;
+    if (_layer3 < 0) _layer3 = 0; if (_layer3 > 10) _layer3 = 10;
+    // v1.3.3：静默模式（旗标文件存在 = 开；App 心跳与桌面球都据此休眠）
+    _silent = [[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"];
     [self loadEntries];
 }
 #pragma mark - v1.3.2 黑名单（前台 App 心跳驱动）
@@ -600,6 +679,34 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     _frontBid = nil; _frontBidTs = 0;
     NSLog(@"[FloatingURL] frontApp left -> %@", bid);
     [self applyVisibility];
+}
+// v1.3.3：直接读取 SpringBoard 当前前台 App（最可靠，不依赖各 App 心跳上报）。
+// 之前只靠各 App 发 Darwin 心跳，部分 App（如奥维地图）因注入/时机问题不上报 → 黑名单漏判。
+- (NSString *)fuFrontmostBid {
+    NSString *bid = nil;
+    if (@available(iOS 13.0, *)) {
+        UIApplication *app = UIApplication.sharedApplication;
+        SEL sel = NSSelectorFromString(@"_frontmostApplication");
+        if ([app respondsToSelector:sel]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id front = [app performSelector:sel];
+#pragma clang diagnostic pop
+            if (front) bid = [front valueForKey:@"bundleIdentifier"];
+        }
+    }
+    if (!bid.length) {
+        Class ctrl = NSClassFromString(@"SBApplicationController");
+        if (ctrl) {
+            id shared = [ctrl performSelector:NSSelectorFromString(@"sharedInstance")];
+            if (shared) {
+                id front = [shared performSelector:NSSelectorFromString(@"frontmostApplication")];
+                if (front) bid = [front valueForKey:@"bundleIdentifier"];
+            }
+        }
+    }
+    if ([bid isEqualToString:@"com.apple.springboard"]) bid = nil;   // 桌面自身不算“前台 App”
+    return bid;
 }
 - (void)loadEntries {
     CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUURLs, (__bridge CFStringRef)kFUSuite);
@@ -694,10 +801,22 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 }
 - (void)onBecomeActive {
     if (!_didSetup) return;
+    // v1.3.3：静默模式 → 桌面球彻底休眠，跳过前台检测与偏好重读（最省电）
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"]) {
+        [self applyVisibility]; return;
+    }
     [self reloadPrefs];
-    [self fuSyncFrontWatches];   // 黑名单可能刚被改过 → 补注册监听
-    // 心跳超过 3 秒没刷新（App 被强杀、来不及发 gone）→ 视作已回桌面
-    if (_frontBid && (CFAbsoluteTimeGetCurrent() - _frontBidTs) > 3.0) { _frontBid = nil; _frontBidTs = 0; }
+    if (fuIsSpringBoard()) {
+        // v1.3.3：用 SpringBoard 直读前台 App 作为权威来源（修复奥维地图等漏判）。
+        NSString *fb = [self fuFrontmostBid];
+        if (fb.length) { _frontBid = fb; _frontBidTs = CFAbsoluteTimeGetCurrent(); }
+        else if (_frontBid && (CFAbsoluteTimeGetCurrent() - _frontBidTs) > 1.0) {
+            _frontBid = nil; _frontBidTs = 0;
+        }
+    } else {
+        [self fuSyncFrontWatches];   // 非桌面进程：保留心跳兜底
+        if (_frontBid && (CFAbsoluteTimeGetCurrent() - _frontBidTs) > 3.0) { _frontBid = nil; _frontBidTs = 0; }
+    }
     [self applyVisibility];
 }
 // 把 key 还给 App 的主窗口（level Normal）
@@ -1039,27 +1158,37 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     R[0] = (kFUButtonSize/2.0f + isz/2.0f + _iconGap) * scale;
     R[1] = R[0] + stepR * scale;
     R[2] = R[1] + stepR * scale;
-    // 2) 每层容量由弧长决定 → 数量决定层数与位置
+    // 2) 每层数量：用户可指定（0=自动）。先按指定值分配，剩余再自动填充到未指定层 / 兜底第三层。
     NSInteger n = (NSInteger)_entries.count;
-    NSInteger caps[3] = {0, 0, 0};
-    NSInteger left = n;
-    CGFloat spanMax = MAX(60.0f, MIN(180.0f, _fanSpan));
-    for (int i = 0; i < 3; i++) {
-        if (left <= 0) break;
-        if (i == 2) { caps[i] = left; break; }    // 最后一层兜底，全部装下
-        CGFloat arc = R[i] * spanMax * (CGFloat)M_PI / 180.0f;
-        NSInteger c2 = (NSInteger)floor(arc / (isz + gap));
-        caps[i] = MAX(1, MIN(c2, 8));
-        if (caps[i] > left) caps[i] = left;
-        left -= caps[i];
-    }
-    // 3) 贴边自动变形：收缩扇形角度，直到所有图标都留在屏内
-    CGFloat centerA = (_side != 1) ? 180.0f : 0.0f;   // 屏坐标：0°右 90°下 180°左 270°上
-    CGFloat span = [self fuFittingSpanForCenter:centerA radii:R caps:caps
-                                           icon:isz margin:6.0f maxSpan:spanMax];
-    // 4) 摆位
-    [_fanOffsets removeAllObjects];
+    NSInteger want[3] = { _layer1, _layer2, _layer3 };
+    NSInteger caps[3] = { 0, 0, 0 };
     NSInteger placed = 0;
+    for (int i = 0; i < 3; i++) {
+        if (want[i] > 0) {
+            NSInteger c2 = MIN(want[i], n - placed);
+            if (c2 > 0) { caps[i] = c2; placed += c2; }
+        }
+    }
+    CGFloat spanMax = MAX(60.0f, MIN(180.0f, _fanSpan));
+    NSInteger li = 0;
+    while (placed < n) {
+        NSInteger target = -1;
+        for (int i = li; i < 3; i++) { if (want[i] == 0) { target = i; break; } }
+        if (target < 0) target = 2;   // 全部指定仍不够 → 兜底第三层
+        CGFloat arc = R[target] * spanMax * (CGFloat)M_PI / 180.0f;
+        NSInteger autoCap = MAX(1, (NSInteger)floor(arc / (isz + gap)));
+        if (autoCap > 8) autoCap = 8;
+        NSInteger space = n - placed;
+        NSInteger add = MIN(autoCap, space);
+        caps[target] += add; placed += add;
+        li = target + 1;
+        if (li >= 3 && placed < n) { caps[2] += (n - placed); placed = n; }
+    }
+    CGFloat centerA = (_side != 1) ? 180.0f : 0.0f;   // 屏坐标：0°右 90°下 180°左 270°上
+    CGFloat span = spanMax;   // v1.3.3：不再靠“缩小角度”避免重叠，而是整体平移到屏内（见下方 fit）
+    // 3) 先按理想角度摆好（不裁剪），收集所有图标中心
+    NSMutableArray *pts = [NSMutableArray array];
+    placed = 0;
     for (NSInteger layer = 0; layer < 3; layer++) {
         NSInteger cnt = caps[layer];
         if (cnt <= 0) continue;
@@ -1067,27 +1196,57 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
         CGFloat sp2 = (cnt > 1) ? span / (CGFloat)(cnt - 1) : 0.0f;
         for (NSInteger k = 0; k < cnt; k++) {
             if (placed >= n) break;
-            NSInteger idx = placed; placed++;
+            placed++;
             CGFloat a = (cnt > 1) ? (a0 + sp2 * (CGFloat)k) : centerA;
             CGFloat rad = a * (CGFloat)M_PI / 180.0f;
-            CGFloat x = c.x + R[layer] * cosf(rad), y = c.y + R[layer] * sinf(rad);
-            UIButton *it = [self buildFanItem:_entries[idx] index:idx size:isz];
-            CGRect target = CGRectMake(x - isz/2.0f, y - isz/2.0f, isz, isz);
-            target.origin.x = MAX(6.0f, MIN(sc.size.width  - isz - 6.0f, target.origin.x));
-            target.origin.y = MAX(6.0f, MIN(sc.size.height - isz - 6.0f, target.origin.y));
-            // 先把最终 frame 定死，再只动画 transform(缩放) + alpha。
-            // 严禁在同一动画块里既设 frame 又设 transform（UIKit 未定义行为会放大 10 倍）。
-            it.frame = target;
-            [_fanOffsets addObject:[NSValue valueWithCGPoint:
-                CGPointMake(CGRectGetMidX(target) - c.x, CGRectGetMidY(target) - c.y)]];
-            it.alpha = 0.0f; it.transform = CGAffineTransformMakeScale(0.1f, 0.1f);
-            [_overlay addSubview:it]; [_fanItems addObject:it];
-            [UIView animateWithDuration:0.22 delay:0.02 * (CGFloat)idx
-                                usingSpringWithDamping:0.7 initialSpringVelocity:0.6
-                                              options:UIViewAnimationOptionCurveEaseOut
-                                           animations:^{ it.alpha = 1.0f; it.transform = CGAffineTransformIdentity; }
-                                           completion:nil];
+            CGPoint p = CGPointMake(c.x + R[layer] * cosf(rad), c.y + R[layer] * sinf(rad));
+            [pts addObject:[NSValue valueWithCGPoint:p]];
         }
+    }
+    // 4) v1.3.3 贴边自适应：若整体超出屏幕，则整体平移（保持间距，绝不重叠），直到刚好在屏内。
+    if (pts.count) {
+        CGFloat minX = CGFLOAT_MAX, minY = CGFLOAT_MAX, maxX = -CGFLOAT_MAX, maxY = -CGFLOAT_MAX;
+        for (NSValue *v in pts) {
+            CGPoint p = v.CGPointValue;
+            minX = MIN(minX, p.x - isz/2.0f); maxX = MAX(maxX, p.x + isz/2.0f);
+            minY = MIN(minY, p.y - isz/2.0f); maxY = MAX(maxY, p.y + isz/2.0f);
+        }
+        CGFloat m = 6.0f; CGFloat dx = 0, dy = 0;
+        if (minX < m) dx = m - minX;
+        if (minY < m) dy = m - minY;
+        if (maxX > sc.size.width  - m) dx = (sc.size.width  - m) - maxX;
+        if (maxY > sc.size.height - m) dy = (sc.size.height - m) - maxY;
+        if (dx != 0 || dy != 0) {
+            NSMutableArray *shifted = [NSMutableArray array];
+            for (NSValue *v in pts) {
+                CGPoint p = v.CGPointValue;
+                [shifted addObject:[NSValue valueWithCGPoint:CGPointMake(p.x + dx, p.y + dy)]];
+            }
+            pts = shifted;
+        }
+    }
+    // 5) 正式摆放（带轻微 clamp 兜底 + 缩放动画）
+    [_fanOffsets removeAllObjects];
+    placed = 0;
+    for (NSValue *v in pts) {
+        NSInteger idx = placed; placed++;
+        CGPoint p = v.CGPointValue;
+        UIButton *it = [self buildFanItem:_entries[idx] index:idx size:isz];
+        CGRect target = CGRectMake(p.x - isz/2.0f, p.y - isz/2.0f, isz, isz);
+        target.origin.x = MAX(2.0f, MIN(sc.size.width  - isz - 2.0f, target.origin.x));
+        target.origin.y = MAX(2.0f, MIN(sc.size.height - isz - 2.0f, target.origin.y));
+        // 先把最终 frame 定死，再只动画 transform(缩放) + alpha。
+        // 严禁在同一动画块里既设 frame 又设 transform（UIKit 未定义行为会放大 10 倍）。
+        it.frame = target;
+        [_fanOffsets addObject:[NSValue valueWithCGPoint:
+            CGPointMake(CGRectGetMidX(target) - c.x, CGRectGetMidY(target) - c.y)]];
+        it.alpha = 0.0f; it.transform = CGAffineTransformMakeScale(0.1f, 0.1f);
+        [_overlay addSubview:it]; [_fanItems addObject:it];
+        [UIView animateWithDuration:0.22 delay:0.02 * (CGFloat)idx
+                            usingSpringWithDamping:0.7 initialSpringVelocity:0.6
+                                          options:UIViewAnimationOptionCurveEaseOut
+                                       animations:^{ it.alpha = 1.0f; it.transform = CGAffineTransformIdentity; }
+                                       completion:nil];
     }
 }
 - (UIButton *)buildFanItem:(NSDictionary *)entry index:(NSInteger)idx size:(CGFloat)isz {
@@ -1103,8 +1262,9 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
         it.contentHorizontalAlignment = UIControlContentHorizontalAlignmentFill;
         it.contentVerticalAlignment   = UIControlContentVerticalAlignmentFill;
     } else {
-        // v1.3.1：无图标入口用「区分色」（蓝）实心圆，避免和 URL 玻璃球撞脸、看不出区别。
-        it.backgroundColor = [UIColor colorWithRed:0.20f green:0.52f blue:0.90f alpha:0.92f];
+        // v1.3.3：无图标入口优先用自定义底色（kFUEntryColor hex），否则默认蓝。
+        UIColor *bg = [self fuColorFromHex:entry[kFUEntryColor]];
+        it.backgroundColor = bg ?: [UIColor colorWithRed:0.20f green:0.52f blue:0.90f alpha:0.92f];
     }
     UILabel *lab = [[UILabel alloc] initWithFrame:it.bounds];
     lab.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -1123,6 +1283,22 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     [it addGestureRecognizer:lp];
     return it;
 }
+// v1.3.3：把 #RRGGBB / #RGB 解析成 UIColor（入口自定义图标底色用）。
+- (UIColor *)fuColorFromHex:(NSString *)hex {
+    if (![hex isKindOfClass:[NSString class]] || hex.length < 6) return nil;
+    NSString *h = [hex stringByReplacingOccurrencesOfString:@"#" withString:@""];
+    if (h.length == 3) {
+        h = [NSString stringWithFormat:@"%c%c%c%c%c%c",
+             [h characterAtIndex:0], [h characterAtIndex:0],
+             [h characterAtIndex:1], [h characterAtIndex:1],
+             [h characterAtIndex:2], [h characterAtIndex:2]];
+    }
+    if (h.length != 6) return nil;
+    unsigned int v = 0; NSScanner *s = [NSScanner scannerWithString:h]; [s scanHexInt:&v];
+    return [UIColor colorWithRed:((v >> 16) & 0xFF) / 255.0f
+                             green:((v >> 8)  & 0xFF) / 255.0f
+                              blue:(v & 0xFF)        / 255.0f alpha:1.0f];
+}
 - (void)fanItemTapped:(UIButton *)sender {
     NSInteger idx = sender.tag; if (idx < 0 || idx >= (NSInteger)_entries.count) { [self closeFan]; return; }
     NSDictionary *entry = _entries[idx]; [self closeFan];
@@ -1132,11 +1308,9 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     // 确认模式（设置里可开）：不直接触发，先弹输入框+打开按钮，用户点「打开」才执行。
     if (_tapConfirm) { [self showSchemeBox:norm]; return; }
     if (web) {
-        // v1.3.1：SpringBoard 兜底实例里的 WKWebView 渲染不出内容（白屏），桌面直接交给系统浏览器。
-        if (fuIsSpringBoard()) {
-            UIApplication *a = UIApplication.sharedApplication; NSURL *nu = [NSURL URLWithString:norm];
-            if (a && nu) [a openURL:nu options:@{} completionHandler:nil];
-        } else { _url = norm; [self expand]; }
+        // v1.3.3：统一用内置可拖拽 / 双指缩放的 WKWebView 面板打开（桌面也是），不再跳系统浏览器。
+        // 若面板实际加载失败（WKNavigation 回调）会显示错误提示，必要时可点地址栏重新加载。
+        _url = norm; [self expand];
     }
     else {   // 非网页：直接拉起对应 app，不再多一步确认
         UIApplication *app = UIApplication.sharedApplication; NSURL *nu = [NSURL URLWithString:norm];
@@ -1265,6 +1439,13 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 }
 - (void)applyVisibility {
     if (!_didSetup) return;
+    // v1.3.3：静默模式 → 整窗彻底休眠（球/环/面板全藏），App 端也跳过心跳，最省电。
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"]) {
+        _overlay.hidden = YES; _ball.hidden = YES; _panel.hidden = YES;
+        if (_fanOpen) [self closeFan];
+        if (_expanded) { _expanded = NO; [self setInteractive:NO]; }
+        return;
+    }
     // 防御：直接读之前也刷新一次进程内偏好缓存，确保拿到设置里最新改的值。
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
     // v1.3.2 黑名单语义（重写）：球只在 SpringBoard 里，所以判断对象是「当前前台 App」。

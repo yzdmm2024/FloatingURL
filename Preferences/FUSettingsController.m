@@ -16,6 +16,10 @@ static NSString * const kFUIconSize    = @"iconSize";
 static NSString * const kFUIconGap     = @"iconGap";
 static NSString * const kFUFanSpan     = @"fanSpan";    // v1.3.2 扇形角度 60~180°
 static NSString * const kFUFanScale    = @"fanScale";   // v1.3.2 整体距离 %
+static NSString * const kFULayer1Count = @"layer1";     // v1.3.3 第一层入口数（0=自动）
+static NSString * const kFULayer2Count = @"layer2";     // v1.3.3 第二层入口数（0=自动）
+static NSString * const kFULayer3Count = @"layer3";     // v1.3.3 第三层入口数（0=自动）
+static NSString * const kFUSilent      = @"silent";     // v1.3.3 静默模式
 static const NSInteger kFUMaxEntries   = 10;   // v1.3.1：扇形两层（第一层 4 + 第二层 6 = 10）
 static const NSInteger kFULayer1Max    = 4;    // 第一层（内环）最多 4 个
 static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 个
@@ -83,6 +87,9 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
 @property (nonatomic, strong) UITextField *urlField, *labelField;
 @property (nonatomic, strong) UIButton    *iconButton;
 @property (nonatomic, strong) NSData      *iconData;
+@property (nonatomic, copy)   NSString    *colorHex;     // v1.3.3 自定义图标底色（hex）
+@property (nonatomic, strong) NSMutableArray *colorButtons;
+@property (nonatomic, strong) NSArray     *colorPresets;
 @end
 @implementation FUUrlEditController
 - (void)viewDidLoad {
@@ -105,9 +112,9 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     };
     _urlField    = (UITextField *)mkField(@"网址 / scheme（如 https://a.com 或 weixin://）", nil, UIKeyboardTypeURL);
 
-    // 文字（汉字或字母，1 个字符）—— 合并为单框
+    // 文字（名称，最多 8 字）—— 合并为单框
     _labelField = [[UITextField alloc] initWithFrame:CGRectMake(pad, y, w, 40)];
-    _labelField.placeholder = @"汉字或字母（1 个字符，如 微 / W）";
+    _labelField.placeholder = @"名称（最多 8 字，如 百度 / 地图 / W）";
     _labelField.borderStyle = UITextBorderStyleRoundedRect;
     _labelField.font = [UIFont systemFontOfSize:14];
     _labelField.textAlignment = NSTextAlignmentCenter;
@@ -131,13 +138,37 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     // 提示
     UILabel *tip = [[UILabel alloc] initWithFrame:CGRectMake(pad, y, w, 44)];
     tip.numberOfLines = 0; tip.font = [UIFont systemFontOfSize:12]; tip.textColor = [UIColor tertiaryLabelColor];
-    tip.text = @"提示：图标会自动压缩成 120×120 正方形；图标与文字二选一，不填图标则显示上方文字。";
+    tip.text = @"提示：图标自动压缩成 120×120 正方形；名称最多 8 字（汉字/字母/数字均可）；还可选图标底色（不填图标时生效）。图标与文字二选一。";
     [scroll addSubview:tip]; y += 44 + 12;
 
     UIButton *clear = [UIButton buttonWithType:UIButtonTypeSystem]; clear.frame = CGRectMake(pad, y, w, 40);
     [clear setTitle:@"清除图标（用文字显示）" forState:UIControlStateNormal];
     [clear addTarget:self action:@selector(clearIcon) forControlEvents:UIControlEventTouchUpInside];
-    [scroll addSubview:clear]; y += 40 + 24; scroll.contentSize = CGSizeMake(self.view.bounds.size.width, y);
+    [scroll addSubview:clear]; y += 40 + 20;
+    // v1.3.3：图标底色选择（不填图标时生效）
+    UILabel *colLab = [[UILabel alloc] initWithFrame:CGRectMake(pad, y, w, 18)];
+    colLab.font = [UIFont systemFontOfSize:12]; colLab.textColor = [UIColor secondaryLabelColor];
+    colLab.text = @"图标底色（不填图标时生效，留空=默认蓝）";
+    [scroll addSubview:colLab]; y += 22;
+    _colorPresets = @[@"#3385E6",@"#E63946",@"#2EA44F",@"#F4801A",@"#8E44AD",@"#16A2B8",@"#E84393",@"#6C757D",@""];
+    _colorButtons = [NSMutableArray array];
+    CGFloat sw = 36, csp = 8; CGFloat cx = pad;
+    for (NSString *hex in _colorPresets) {
+        if (cx + sw > pad + w) { cx = pad; y += sw + csp; }
+        UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+        b.frame = CGRectMake(cx, y, sw, sw);
+        b.layer.cornerRadius = sw/2.0f; b.layer.borderWidth = 2.0f;
+        b.layer.borderColor = [UIColor separatorColor].CGColor; b.clipsToBounds = YES;
+        if (hex.length) b.backgroundColor = [self colorFromHex:hex];
+        else { b.backgroundColor = [UIColor secondarySystemBackgroundColor];
+               [b setTitle:@"无" forState:UIControlStateNormal]; b.titleLabel.font = [UIFont systemFontOfSize:11];
+               [b setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal]; }
+        b.tag = 900 + [_colorPresets indexOfObject:hex];
+        [b addTarget:self action:@selector(colorTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [scroll addSubview:b]; [_colorButtons addObject:b]; cx += sw + csp;
+    }
+    y += sw + 20; [self refreshColor];
+    scroll.contentSize = CGSizeMake(self.view.bounds.size.width, y);
     if (_index >= 0) [self prefill];
 }
 - (void)prefill {
@@ -147,19 +178,14 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
         NSDictionary *e = arr[_index];
         _urlField.text = e[kFUEntryURL] ?: @""; NSString *ch = e[kFUEntryChar] ?: @""; NSString *lt = e[kFUEntryLetter] ?: @"";
         _labelField.text = ch.length ? ch : lt;
-        _iconData = e[kFUEntryIcon]; [self refreshIcon:_iconData];
+        _iconData = e[kFUEntryIcon]; _colorHex = e[kFUEntryColor];
+        [self refreshIcon:_iconData]; [self refreshColor];
     }
 }
 - (BOOL)textField:(UITextField *)tf shouldChangeCharactersInRange:(NSRange)r replacementString:(NSString *)s {
     if (tf == _labelField) {
         NSString *next = [tf.text stringByReplacingCharactersInRange:r withString:s];
-        NSInteger cjk = 0, lat = 0;
-        for (NSUInteger i = 0; i < next.length; i++) {
-            unichar c = [next characterAtIndex:i];
-            if (c >= 0x4E00 && c <= 0x9FFF) cjk++;
-            else if (![[NSCharacterSet whitespaceCharacterSet] characterIsMember:c]) lat++;
-        }
-        if (cjk > 2 || lat > 3) return NO;   // v1.3.1：最多 2 汉字 或 3 字母
+        if (next.length > 8) return NO;   // v1.3.3：名称最多 8 个字符（汉字/字母/数字均可）
     } return YES;
 }
 - (void)refreshIcon:(NSData *)d {
@@ -188,12 +214,42 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     }];
 }
 - (void)clearIcon { _iconData = nil; [self refreshIcon:nil]; }
+- (void)colorTapped:(UIButton *)b {
+    NSInteger idx = b.tag - 900;
+    if (idx < 0 || idx >= (NSInteger)_colorPresets.count) return;
+    NSString *hex = _colorPresets[idx];
+    _colorHex = hex.length ? hex : nil;
+    [self refreshColor];
+}
+- (void)refreshColor {
+    NSString *cur = _colorHex ?: @"";
+    for (UIButton *b in _colorButtons) {
+        NSInteger idx = b.tag - 900; if (idx < 0) continue;
+        NSString *hex = _colorPresets[idx];
+        BOOL sel = (hex.length == 0 && cur.length == 0) ||
+                  (hex.length && [cur caseInsensitiveCompare:hex] == NSOrderedSame);
+        b.layer.borderColor = (sel ? [UIColor systemBlueColor] : [UIColor separatorColor]).CGColor;
+        b.layer.borderWidth = sel ? 3.0f : 2.0f;
+    }
+}
+- (UIColor *)colorFromHex:(NSString *)hex {
+    if (![hex isKindOfClass:[NSString class]] || hex.length < 6) return nil;
+    NSString *h = [hex stringByReplacingOccurrencesOfString:@"#" withString:@""];
+    if (h.length == 3) h = [NSString stringWithFormat:@"%c%c%c%c%c%c",
+        [h characterAtIndex:0],[h characterAtIndex:0],[h characterAtIndex:1],
+        [h characterAtIndex:1],[h characterAtIndex:2],[h characterAtIndex:2]];
+    if (h.length != 6) return nil;
+    unsigned int v = 0; NSScanner *s = [NSScanner scannerWithString:h]; [s scanHexInt:&v];
+    return [UIColor colorWithRed:((v>>16)&0xFF)/255.0f green:((v>>8)&0xFF)/255.0f
+                             blue:(v&0xFF)/255.0f alpha:1.0f];
+}
 - (void)save {
     NSMutableDictionary *e = [NSMutableDictionary dictionary];
     e[kFUEntryURL] = (_urlField.text.length ? _urlField.text : @"");
     NSString *lab = _labelField.text ?: @"";
-    if (lab.length) e[kFUEntryChar] = lab;   // v1.3.1：存完整标签（2 汉字 / 3 字母）
+    if (lab.length) e[kFUEntryChar] = lab;   // v1.3.3：存名称（最多 8 字）
     if (_iconData) e[kFUEntryIcon] = _iconData;
+    if (_colorHex.length) e[kFUEntryColor] = _colorHex;
     CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUURLs, (__bridge CFStringRef)kFUSuite);
     NSMutableArray *arr = nil; if (r) { NSArray *a = (__bridge_transfer NSArray *)r; arr = [a mutableCopy]; }
     if (!arr) arr = [NSMutableArray array];
@@ -341,6 +397,8 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
 @property (nonatomic, strong) NSMutableArray *allApps;     // {bid, name, icon}
 @property (nonatomic, strong) NSMutableArray *filtered;
 @property (nonatomic, strong) NSMutableArray *selected;    // bundle ids（黑名单：这些 App 内隐藏球）
+@property (nonatomic, assign) BOOL onlyHidden;             // v1.3.3：只看已隐藏
+@property (nonatomic, strong) UIButton *onlyBtn;           // v1.3.3：只看已隐藏 切换按钮
 @end
 @implementation FUAppListController
 - (UIImage *)scaledIcon:(UIImage *)src toSize:(CGFloat)s {
@@ -391,12 +449,19 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     [self applyFilter:@""];
 }
 - (void)applyFilter:(NSString *)q {
+    NSMutableArray *base = [_allApps mutableCopy];
+    if (_onlyHidden) {   // v1.3.3：只看已隐藏（勾选了黑名单的）
+        NSMutableArray *f = [NSMutableArray array];
+        for (NSDictionary *d in base) if ([_selected containsObject:d[@"bid"]]) [f addObject:d];
+        base = f;
+    }
     if (q.length) {
         NSString *l = [q lowercaseString];
-        _filtered = [NSMutableArray array];
-        for (NSDictionary *d in _allApps) if ([[d[@"name"] lowercaseString] containsString:l] ||
-                                             [[d[@"bid"] lowercaseString] containsString:l]) [_filtered addObject:d];
-    } else _filtered = [_allApps mutableCopy];
+        NSMutableArray *f = [NSMutableArray array];
+        for (NSDictionary *d in base) if ([[d[@"name"] lowercaseString] containsString:l] ||
+                                         [[d[@"bid"] lowercaseString] containsString:l]) [f addObject:d];
+        _filtered = f;
+    } else _filtered = base;
     [self updateCount]; [_tv reloadData];
 }
 - (void)updateCount {
@@ -422,6 +487,13 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     [all setTitle:@"全选" forState:UIControlStateNormal]; all.titleLabel.font = [UIFont boldSystemFontOfSize:15];
     [all addTarget:self action:@selector(toggleAll) forControlEvents:UIControlEventTouchUpInside];
     [bar addSubview:all];
+    // v1.3.3：只看已隐藏（只看勾选了黑名单的 App）
+    _onlyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    _onlyBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    [_onlyBtn setTitle:@"只看已隐藏" forState:UIControlStateNormal];
+    _onlyBtn.titleLabel.font = [UIFont systemFontOfSize:13];
+    [_onlyBtn addTarget:self action:@selector(toggleOnlyHidden) forControlEvents:UIControlEventTouchUpInside];
+    [bar addSubview:_onlyBtn];
     [NSLayoutConstraint activateConstraints:@[
         [_countLabel.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
         [_countLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
@@ -433,10 +505,13 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
         [bar.heightAnchor constraintEqualToConstant:56],
         [_search.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor constant:8],
         [_search.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
-        [_search.trailingAnchor constraintEqualToAnchor:all.leadingAnchor constant:-8],
+        [_search.trailingAnchor constraintEqualToAnchor:_onlyBtn.leadingAnchor constant:-8],
+        [_onlyBtn.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
+        [_onlyBtn.widthAnchor constraintEqualToConstant:92],
+        [_onlyBtn.trailingAnchor constraintEqualToAnchor:all.leadingAnchor constant:-8],
         [all.trailingAnchor constraintEqualToAnchor:bar.trailingAnchor constant:-8],
         [all.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
-        [all.widthAnchor constraintEqualToConstant:72],
+        [all.widthAnchor constraintEqualToConstant:56],
     ]];
     _tv = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
     _tv.translatesAutoresizingMaskIntoConstraints = NO; _tv.delegate = self; _tv.dataSource = self;
@@ -448,6 +523,11 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
         [_tv.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
     ]];
     [self loadApps];
+}
+- (void)toggleOnlyHidden {
+    _onlyHidden = !_onlyHidden;   // v1.3.3：切换“只看已隐藏”
+    [_onlyBtn setTitle:(_onlyHidden ? @"显示全部" : @"只看已隐藏") forState:UIControlStateNormal];
+    [self applyFilter:_search.text ?: @""];
 }
 - (void)toggleAll {
     // 若当前可见项已全部在黑名单 → 取消全部（显示）；否则把可见项全部加入黑名单（隐藏）。
@@ -498,6 +578,7 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
 @property (nonatomic, assign) NSInteger side;        // 0=右 1=左
 @property (nonatomic, assign) CGFloat iconSize, iconGap;
 @property (nonatomic, assign) CGFloat span, scale;   // v1.3.2 扇形角度 / 整体距离%
+@property (nonatomic, assign) NSInteger layer1, layer2, layer3;   // v1.3.3 每层数量（0=自动）
 @property (nonatomic, strong) NSArray *entries;
 - (void)refresh;
 @end
@@ -522,36 +603,33 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     R[1] = R[0] + stepR * kscale;
     R[2] = R[1] + stepR * kscale;
     NSInteger n = (NSInteger)_entries.count;
-    NSInteger caps[3] = {0, 0, 0};
-    NSInteger left = n;
-    CGFloat spanMax = MAX(60.0f, MIN(180.0f, (_span > 0 ? _span : 180.0f)));
+    // v1.3.3：每层数量可指定（0=自动），与 tweak 内 openFan 同套逻辑
+    NSInteger want[3] = { _layer1, _layer2, _layer3 };
+    NSInteger caps[3] = { 0, 0, 0 };
+    NSInteger placed = 0;
     for (int i = 0; i < 3; i++) {
-        if (left <= 0) break;
-        if (i == 2) { caps[i] = left; break; }        // 最后一层兜底全装下
-        CGFloat arc = R[i] * spanMax * (CGFloat)M_PI / 180.0f;
-        NSInteger cap2 = (NSInteger)floor(arc / (isz + gap));
-        caps[i] = MAX(1, MIN(cap2, 8));
-        if (caps[i] > left) caps[i] = left;
-        left -= caps[i];
+        if (want[i] > 0) {
+            NSInteger c2 = MIN(want[i], n - placed);
+            if (c2 > 0) { caps[i] = c2; placed += c2; }
+        }
+    }
+    CGFloat spanMax = MAX(60.0f, MIN(180.0f, (_span > 0 ? _span : 180.0f)));
+    NSInteger li = 0;
+    while (placed < n) {
+        NSInteger target = -1;
+        for (int i = li; i < 3; i++) { if (want[i] == 0) { target = i; break; } }
+        if (target < 0) target = 2;
+        CGFloat arc = R[target] * spanMax * (CGFloat)M_PI / 180.0f;
+        NSInteger autoCap = MAX(1, (NSInteger)floor(arc / (isz + gap)));
+        if (autoCap > 8) autoCap = 8;
+        NSInteger space = n - placed;
+        NSInteger add = MIN(autoCap, space);
+        caps[target] += add; placed += add;
+        li = target + 1;
+        if (li >= 3 && placed < n) { caps[2] += (n - placed); placed = n; }
     }
     CGFloat centerA = (_side != 1) ? 180.0f : 0.0f;    // 屏坐标：0°右 90°下 180°左 270°上
-    // 贴边自动变形：收缩扇形角度，直到所有图标都落在画布内
-    CGFloat span = 60.0f;
-    for (CGFloat sp = spanMax; sp >= 60.0f; sp -= 5.0f) {
-        BOOL ok = YES;
-        for (int layer = 0; layer < 3 && ok; layer++) {
-            NSInteger cnt = caps[layer]; if (cnt <= 0) continue;
-            CGFloat a0 = centerA - sp/2.0f, sp2 = (cnt > 1) ? sp/(CGFloat)(cnt-1) : 0.0f;
-            for (NSInteger i2 = 0; i2 < cnt; i2++) {
-                CGFloat a = (cnt > 1) ? (a0 + sp2*(CGFloat)i2) : centerA;
-                CGFloat rad = a * M_PI / 180.0;
-                CGFloat x = c.x + R[layer]*cos(rad), y = c.y + R[layer]*sin(rad);
-                if (x - isz/2.0f < 4.0f || x + isz/2.0f > s.size.width  - 4.0f ||
-                    y - isz/2.0f < 4.0f || y + isz/2.0f > s.size.height - 4.0f) { ok = NO; break; }
-            }
-        }
-        if (ok) { span = sp; break; }
-    }
+    CGFloat span = spanMax;                             // v1.3.3：预览用满角度（贴边平移在真机处理）
     // 圈层参考弧
     CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:1.0 alpha:0.13].CGColor);
     CGContextSetLineWidth(ctx, 1.0f);
@@ -563,7 +641,7 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     // 中心球（URL 玻璃球）
     [self fuCircleAt:c size:bs img:nil ch:@"URL" fs:bs*0.24f glass:YES];
     // 快捷图标：有几个排几个，第 1 层排满溢到第 2、3 层
-    NSInteger placed = 0;
+    placed = 0;   // 复用上方的 placed（cap 分配已完成，这里重置为绘制起点）
     for (NSInteger layer = 0; layer < 3; layer++) {
         NSInteger cnt = caps[layer]; if (cnt <= 0) continue;
         CGFloat a0 = centerA - span/2.0f, sp2 = (cnt > 1) ? span/(CGFloat)(cnt-1) : 0.0f;
@@ -625,6 +703,8 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
 @property (nonatomic, strong) UISegmentedControl *sideSeg;
 @property (nonatomic, strong) UISlider *ss, *sg, *span, *sc;
 @property (nonatomic, strong) UILabel *ls, *lg, *lspan, *lsc;
+@property (nonatomic, strong) UISlider *l1s, *l2s, *l3s;   // v1.3.3 每层数量
+@property (nonatomic, strong) UILabel *ll1, *ll2, *ll3;
 @end
 @implementation FULayoutController
 - (CGFloat)prefFloat:(NSString *)key dft:(CGFloat)d {
@@ -642,6 +722,19 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
 }
 - (void)writeSide:(NSInteger)v {
     CFPreferencesSetAppValue((__bridge CFStringRef)kFUSide, (__bridge CFPropertyListRef)[NSNumber numberWithInteger:v],
+        (__bridge CFStringRef)kFUSuite);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
+    notify_post("com.yzdmm.floatingurl/settingsChanged");
+}
+- (NSInteger)prefInt:(NSString *)key dft:(NSInteger)d {
+    CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kFUSuite);
+    if (!r) return d;
+    NSInteger v = d;
+    if (CFGetTypeID(r) == CFNumberGetTypeID()) v = [(__bridge NSNumber *)r integerValue];
+    CFRelease(r); return v;
+}
+- (void)writeInt:(NSString *)key value:(NSInteger)v {
+    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)[NSNumber numberWithInteger:v],
         (__bridge CFStringRef)kFUSuite);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
     notify_post("com.yzdmm.floatingurl/settingsChanged");
@@ -671,12 +764,15 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     _preview.iconGap  = [self prefFloat:kFUIconGap dft:56];
     _preview.span     = [self prefFloat:kFUFanSpan dft:180];
     _preview.scale    = [self prefFloat:kFUFanScale dft:100];
+    _preview.layer1   = [self prefInt:kFULayer1Count dft:0];
+    _preview.layer2   = [self prefInt:kFULayer2Count dft:0];
+    _preview.layer3   = [self prefInt:kFULayer3Count dft:0];
     [self loadEntriesForPreview];
     [_scroll addSubview:_preview]; y += _preview.frame.size.height + 6;
     UILabel *pvTip = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 30)];
     pvTip.numberOfLines = 0; pvTip.font = [UIFont systemFontOfSize:11];
     pvTip.textColor = [UIColor tertiaryLabelColor];
-    pvTip.text = @"▲ 实时预览：URL 球在左/右边，点开按扇形展开（第一层 4 + 第二层 6）。改下方选项，预览与手机上的球同步变化。";
+    pvTip.text = @"▲ 实时预览：URL 球在左/右边，点开按扇形展开（三层）。每层数量可单独设定（0=自动）。改下方选项，预览与手机上的球同步变化。";
     [pvTip sizeToFit]; [_scroll addSubview:pvTip]; y += pvTip.frame.size.height + 16;
     // ---- 停靠位置（左 / 右）----
     UILabel *sideLab = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 20)];
@@ -697,6 +793,19 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     _sc = [self mkSlider:CGRectMake(16, y, w-32, 52) min:60 max:160 val:psc label:@"整体距离%" out:&y lout:&_lsc];
     _ss.tag = 2; _sg.tag = 3; _span.tag = 4; _sc.tag = 5;
     for (UISlider *sl in @[_ss, _sg, _span, _sc])
+        [sl addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+    y += 8;
+    // ---- v1.3.3：每层数量（0=自动）----
+    UILabel *lLab = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 20)];
+    lLab.font = [UIFont systemFontOfSize:12]; lLab.textColor = [UIColor secondaryLabelColor];
+    lLab.text = @"每层数量（0 = 自动，按添加的 URL 自动分层）";
+    [_scroll addSubview:lLab]; y += 24;
+    NSInteger pl1 = [self prefInt:kFULayer1Count dft:0], pl2 = [self prefInt:kFULayer2Count dft:0], pl3 = [self prefInt:kFULayer3Count dft:0];
+    _l1s = [self mkSlider:CGRectMake(16, y, w-32, 52) min:0 max:8 val:pl1 label:@"第一层数量" out:&y lout:&_ll1];
+    _l2s = [self mkSlider:CGRectMake(16, y, w-32, 52) min:0 max:8 val:pl2 label:@"第二层数量" out:&y lout:&_ll2];
+    _l3s = [self mkSlider:CGRectMake(16, y, w-32, 52) min:0 max:8 val:pl3 label:@"第三层数量" out:&y lout:&_ll3];
+    _l1s.tag = 6; _l2s.tag = 7; _l3s.tag = 8;
+    for (UISlider *sl in @[_l1s, _l2s, _l3s])
         [sl addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
     y += 12; _scroll.contentSize = CGSizeMake(w, y);
 }
@@ -724,20 +833,28 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
         case 3: key = kFUIconGap;  l = _lg; name = @"图标间隔"; _preview.iconGap = v; break;
         case 4: key = kFUFanSpan;  l = _lspan; name = @"扇形角度°"; _preview.span = v; break;
         case 5: key = kFUFanScale; l = _lsc; name = @"整体距离%"; _preview.scale = v; break;
+        case 6: key = kFULayer1Count; l = _ll1; name = @"第一层数量"; _preview.layer1 = (NSInteger)v; break;
+        case 7: key = kFULayer2Count; l = _ll2; name = @"第二层数量"; _preview.layer2 = (NSInteger)v; break;
+        case 8: key = kFULayer3Count; l = _ll3; name = @"第三层数量"; _preview.layer3 = (NSInteger)v; break;
     }
     if (!key) return;
     l.text = [NSString stringWithFormat:@"%@（当前 %.0f）", name, v];
-    [self writeFloat:key value:v];
+    if (sl.tag >= 6) [self writeInt:key value:(NSInteger)v];
+    else [self writeFloat:key value:v];
     [_preview refresh];
 }
 - (void)reset {
     _sideSeg.selectedSegmentIndex = 0; _ss.value = 40; _sg.value = 56; _span.value = 180; _sc.value = 100;
+    _l1s.value = 0; _l2s.value = 0; _l3s.value = 0;
     _ls.text = @"图标大小（当前 40）"; _lg.text = @"图标间隔（当前 56）";
     _lspan.text = @"扇形角度°（当前 180）"; _lsc.text = @"整体距离%（当前 100）";
+    _ll1.text = @"第一层数量（当前 0）"; _ll2.text = @"第二层数量（当前 0）"; _ll3.text = @"第三层数量（当前 0）";
     _preview.side = 0; _preview.iconSize = 40; _preview.iconGap = 56;
     _preview.span = 180; _preview.scale = 100;
+    _preview.layer1 = 0; _preview.layer2 = 0; _preview.layer3 = 0;
     [self writeSide:0]; [self writeFloat:kFUIconSize value:40]; [self writeFloat:kFUIconGap value:56];
     [self writeFloat:kFUFanSpan value:180]; [self writeFloat:kFUFanScale value:100];
+    [self writeInt:kFULayer1Count value:0]; [self writeInt:kFULayer2Count value:0]; [self writeInt:kFULayer3Count value:0];
     [_preview refresh];
 }
 @end
@@ -749,6 +866,23 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
 - (id)specifiers {
     if (!_specifiers) _specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
     return _specifiers;
+}
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    // v1.3.3：让“静默模式”开关显示与实际旗标文件一致（旗标文件才是运行时权威来源）
+    BOOL on = [[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"];
+    CFPreferencesSetAppValue((__bridge CFStringRef)kFUSilent, (__bridge CFPropertyListRef)@(on), (__bridge CFStringRef)kFUSuite);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
+}
+// v1.3.3：静默模式开关回调。旗标文件存在=开（App 跳过心跳、桌面球休眠）。
+// 不依赖偏好位时序：直接翻转旗标文件当前状态，保证开关与实际一致。
+- (void)setSilent:(id)sender {
+    BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"];
+    if (exists) [[NSFileManager defaultManager] removeItemAtPath:@"/var/mobile/Media/FloatingURL_silent" error:nil];
+    else        [@"" writeToFile:@"/var/mobile/Media/FloatingURL_silent" atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    CFPreferencesSetAppValue((__bridge CFStringRef)kFUSilent, (__bridge CFPropertyListRef)@(!exists), (__bridge CFStringRef)kFUSuite);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
+    notify_post("com.yzdmm.floatingurl/settingsChanged");
 }
 - (void)viewDidDisappear:(BOOL)animated { [super viewDidDisappear:animated];
     notify_post("com.yzdmm.floatingurl/settingsChanged"); }
