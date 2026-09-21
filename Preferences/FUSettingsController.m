@@ -14,7 +14,9 @@ static NSString * const kFUEnabledApps = @"enabledApps";
 static NSString * const kFUSide        = @"side";
 static NSString * const kFUIconSize    = @"iconSize";
 static NSString * const kFUIconGap     = @"iconGap";
-static const NSInteger kFUMaxEntries   = 10;   // v1.3.1：第一层 4 + 第二层 6
+static const NSInteger kFUMaxEntries   = 10;   // v1.3.1：扇形两层（第一层 4 + 第二层 6 = 10）
+static const NSInteger kFULayer1Max    = 4;    // 第一层（内环）最多 4 个
+static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 个
 
 #pragma mark - 方形裁剪控制器
 @interface FUCropVC : UIViewController <UIScrollViewDelegate>
