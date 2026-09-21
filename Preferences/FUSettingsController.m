@@ -27,6 +27,7 @@ static NSString * const kFUBallX       = @"ballX";      // v1.3.5 球中心 X（
 static NSString * const kFUBallTitle   = @"ballTitle";  // v1.3.5 球的文字（默认 URL）
 static NSString * const kFUBallIcon    = @"ballIcon";   // v1.3.5 球的图标（PNG data）
 static NSString * const kFUBallColor   = @"ballColor";  // v1.3.5 球的底色 hex
+static NSString * const kFUSnapDelay   = @"snapDelay";  // v1.3.13 吸附延时秒（松手后完整图标停留时长，默认 3）
 static const NSInteger kFUMaxEntries   = 48;   // v1.3.6：上限 48（三层默认 8/16/24）
 // v1.3.8：删掉 1.3.2 / 1.3.3 遗留的 kFULayer1Max / kFULayer2Max（早已不再使用，
 //           各层上限统一由「布局调节」页的 8 / 16 / 24 控制）。
@@ -699,6 +700,11 @@ static NSArray *FUColorPalette(void) {
 @property (nonatomic, strong) UIButton       *bSearch, *bFilter, *bAll, *bBulk;
 @property (nonatomic, assign) BOOL           searchVisible, multiSelect;
 @property (nonatomic, assign) NSInteger      filterMode; // 0全部 1没设图标 2没填名称 3网址重复
+// v1.3.13：按钮条改 Auto Layout（约束布局），不再手算 frame —— 手算在部分机型/进程里会出现
+// 「跑到屏幕外 / 被导航栏压住 / 看得见却按不了」；并补一个空状态提示。
+@property (nonatomic, strong) UILabel        *empty;
+@property (nonatomic, strong) NSLayoutConstraint *searchH;
+@property (nonatomic, assign) BOOL             pendingScrollEnd;   // v1.3.13：返回列表后滚到最新一条
 @end
 @implementation FUUrlListController
 - (void)loadEntries {
@@ -723,6 +729,19 @@ static NSArray *FUColorPalette(void) {
         initWithTitle:[NSString stringWithFormat:@"添加(%lu/%ld)", (unsigned long)cnt, (long)kFUMaxEntries]
                 style:UIBarButtonItemStylePlain target:self action:@selector(addEntry)];
     self.navigationItem.rightBarButtonItem.enabled = (cnt < (NSUInteger)kFUMaxEntries);
+}
+// v1.3.13：加完 / 批量导入后滚到最新一条 —— 新条目原来会落在列表最下面看不见，
+// 用户会误判成「添加了但快捷 URL 不显示」。
+- (void)scrollToLastRow {
+    if (_shown.count == 0) return;
+    NSInteger row = (NSInteger)_shown.count - 1;
+    __weak FUUrlListController *ws = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        FUUrlListController *ss = ws; if (!ss) return;
+        if (row < (NSInteger)[ss->_tv numberOfRowsInSection:0])
+            [ss->_tv scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:row inSection:0]
+                           atScrollPosition:UITableViewScrollPositionMiddle animated:YES];
+    });
 }
 - (void)applyFilter {
     NSString *q = [_search.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -757,55 +776,112 @@ static NSArray *FUColorPalette(void) {
     _shown = out;
     [_tv reloadData];
     [self updateButtons];
+    // v1.3.13：列表为空时给明确提示（避免「添加了却没显示」的错觉）
+    if (_empty) _empty.hidden = (_shown.count > 0);
 }
 - (void)viewDidLoad {
     [super viewDidLoad];
     [self loadEntries];
     self.view.backgroundColor = [UIColor systemBackgroundColor];
-    CGFloat W = self.view.bounds.size.width;
-    // ---- 一排功能按钮（v1.3.8 修 04）----
-    _bar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, W, 46)];
-    _bar.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    // ---- v1.3.13 修「搜索/筛选/全选/批量 按不了」----
+    //  1.3.9 之前写死 y=0 → 被导航栏盖住（看着像在屏幕外）；
+    //  1.3.10 改成 safeAreaInsets 手算 frame → 看着出来了，但层叠/坐标仍可能在部分机型上
+    //  被 tableView 或导航栏吃掉触摸。现在彻底改成 Auto Layout 约束 + 显式置顶，从结构上避免。
+    _bar = [[UIView alloc] initWithFrame:CGRectZero];
+    _bar.translatesAutoresizingMaskIntoConstraints = NO;
     _bar.backgroundColor = [UIColor secondarySystemBackgroundColor];
     [self.view addSubview:_bar];
+
+    UIStackView *stack = [[UIStackView alloc] initWithFrame:CGRectZero];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    stack.axis = UILayoutConstraintAxisHorizontal;
+    stack.distribution = UIStackViewDistributionFillEqually;
+    stack.spacing = 0.5;
+    [_bar addSubview:stack];
+
     NSArray *titles = @[@"🔍 搜索", @"⛃ 筛选", @"☑ 全选", @"＋ 批量"];
     NSArray *sels   = @[@"toggleSearch", @"showFilter", @"toggleAll", @"bulkAdd"];
-    CGFloat bw = W / 4.0f;
+    NSMutableArray *btns = [NSMutableArray array];
     for (NSInteger i = 0; i < 4; i++) {
         UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-        b.frame = CGRectMake(bw * i, 0, bw, 46);
-        b.titleLabel.font = [UIFont systemFontOfSize:13];
+        b.titleLabel.font = [UIFont systemFontOfSize:14];
+        b.titleLabel.adjustsFontSizeToFitWidth = YES;
+        b.titleLabel.minimumScaleFactor = 0.75;
         [b setTitle:titles[i] forState:UIControlStateNormal];
         [b addTarget:self action:NSSelectorFromString(sels[i]) forControlEvents:UIControlEventTouchUpInside];
-        [_bar addSubview:b];
-        if (i == 0) _bSearch = b; else if (i == 1) _bFilter = b;
-        else if (i == 2) _bAll = b; else _bBulk = b;
+        [stack addArrangedSubview:b];
+        [btns addObject:b];
     }
-    UIView *line = [[UIView alloc] initWithFrame:CGRectMake(0, 45.5f, W, 0.5f)];
-    line.backgroundColor = [UIColor separatorColor]; line.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    _bSearch = btns[0]; _bFilter = btns[1]; _bAll = btns[2]; _bBulk = btns[3];
+
+    UIView *line = [[UIView alloc] initWithFrame:CGRectZero];
+    line.translatesAutoresizingMaskIntoConstraints = NO;
+    line.backgroundColor = [UIColor separatorColor];
     [_bar addSubview:line];
-    _search = [[UISearchBar alloc] initWithFrame:CGRectMake(0, 46, W, 0)];
+
+    _search = [[UISearchBar alloc] initWithFrame:CGRectZero];
+    _search.translatesAutoresizingMaskIntoConstraints = NO;
     _search.delegate = self; _search.placeholder = @"搜索网址 / 名称";
-    _search.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     _search.hidden = YES; [self.view addSubview:_search];
-    _tv = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStylePlain];
-    _tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+
+    _tv = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    _tv.translatesAutoresizingMaskIntoConstraints = NO;
     _tv.delegate = self; _tv.dataSource = self;
+    _tv.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
     [self.view addSubview:_tv];
-    [self layoutParts];
+
+    // 空状态提示：以前列表空就是一片白，用户会以为「加了没保存 / 不显示」
+    _empty = [[UILabel alloc] initWithFrame:CGRectZero];
+    _empty.translatesAutoresizingMaskIntoConstraints = NO;
+    _empty.numberOfLines = 0; _empty.textAlignment = NSTextAlignmentCenter;
+    _empty.font = [UIFont systemFontOfSize:14]; _empty.textColor = [UIColor secondaryLabelColor];
+    _empty.text = @"还没有快捷 URL\n点右上角「添加」，或用上面的「＋ 批量」多行粘贴";
+    _empty.hidden = YES;
+    [self.view addSubview:_empty];
+
+    id g = self.view.safeAreaLayoutGuide;
+    NSMutableArray *cs = [NSMutableArray array];
+    [cs addObjectsFromArray:@[
+        [_bar.topAnchor      constraintEqualToAnchor:g.topAnchor],
+        [_bar.leadingAnchor  constraintEqualToAnchor:self.view.leadingAnchor],
+        [_bar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [_bar.heightAnchor   constraintEqualToConstant:46],
+        [stack.topAnchor      constraintEqualToAnchor:_bar.topAnchor],
+        [stack.leadingAnchor  constraintEqualToAnchor:_bar.leadingAnchor],
+        [stack.trailingAnchor constraintEqualToAnchor:_bar.trailingAnchor],
+        [stack.bottomAnchor   constraintEqualToAnchor:_bar.bottomAnchor],
+        [line.leadingAnchor   constraintEqualToAnchor:_bar.leadingAnchor],
+        [line.trailingAnchor  constraintEqualToAnchor:_bar.trailingAnchor],
+        [line.bottomAnchor    constraintEqualToAnchor:_bar.bottomAnchor],
+        [line.heightAnchor    constraintEqualToConstant:0.5],
+        [_search.topAnchor      constraintEqualToAnchor:_bar.bottomAnchor],
+        [_search.leadingAnchor  constraintEqualToAnchor:self.view.leadingAnchor],
+        [_search.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [_tv.topAnchor      constraintEqualToAnchor:_search.bottomAnchor],
+        [_tv.leadingAnchor  constraintEqualToAnchor:self.view.leadingAnchor],
+        [_tv.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [_tv.bottomAnchor   constraintEqualToAnchor:self.view.bottomAnchor],
+        [_empty.centerXAnchor   constraintEqualToAnchor:self.view.centerXAnchor],
+        [_empty.centerYAnchor   constraintEqualToAnchor:self.view.centerYAnchor],
+        [_empty.leadingAnchor   constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor constant:24],
+        [_empty.trailingAnchor  constraintLessThanOrEqualToAnchor:self.view.trailingAnchor constant:-24],
+    ]];
+    _searchH = [_search.heightAnchor constraintEqualToConstant:0];
+    [cs addObject:_searchH];
+    [NSLayoutConstraint activateConstraints:cs];
+
     [self refreshCount];
     [self applyFilter];
+    [self layoutParts];
 }
 - (void)layoutParts {
-    CGFloat W = self.view.bounds.size.width, H = self.view.bounds.size.height;
-    // v1.3.10：整体下移「安全区顶部」（导航栏+状态栏）—— 之前按钮条写死 y=0 被导航栏盖住，
-    // 看起来就是「搜索/筛选/全选/批量 全在屏幕外面」。
-    CGFloat top = self.view.safeAreaInsets.top;
-    _bar.frame = CGRectMake(0, top, W, 46);
-    CGFloat y = top + 46;
-    if (_searchVisible) { _search.hidden = NO; _search.frame = CGRectMake(0, y, W, 44); y += 44; }
-    else { _search.hidden = YES; _search.frame = CGRectMake(0, y, W, 0); }
-    _tv.frame = CGRectMake(0, y, W, MAX(0.0f, H - y));
+    // v1.3.13：坐标全部交给约束，这里只切「搜索框显隐」+ 层叠顺序（按钮条永远最上层）。
+    _searchH.constant = _searchVisible ? 44.0f : 0.0f;
+    _search.hidden = !_searchVisible;
+    [self.view bringSubviewToFront:_bar];
+    if (_searchVisible) [self.view bringSubviewToFront:_search];
+    [self.view bringSubviewToFront:_empty];
+    [self.view setNeedsLayout];
 }
 - (void)viewDidLayoutSubviews { [super viewDidLayoutSubviews]; [self layoutParts]; }
 - (void)viewWillAppear:(BOOL)animated {
@@ -813,13 +889,29 @@ static NSArray *FUColorPalette(void) {
     [self loadEntries];
     [self refreshCount];
     [self applyFilter];
+    [self layoutParts];   // v1.3.13：每次进入都重算（安全区/横竖屏变化也不会错位）
+    if (_pendingScrollEnd) { _pendingScrollEnd = NO; [self scrollToLastRow]; }   // 新增的那条滚进视野
 }
 // ---- 一排按钮的动作 ----
 - (void)toggleSearch {
     _searchVisible = !_searchVisible;
-    if (_searchVisible) [_search becomeFirstResponder];
-    else { _search.text = @""; [_search resignFirstResponder]; [self applyFilter]; }
-    [self layoutParts];
+    if (_searchVisible) {
+        // v1.3.13 修「搜索按不了」：以前是**先** becomeFirstResponder、后 layoutParts，
+        // 那一刻搜索框还是 hidden —— 隐藏视图不可能拿到焦点，键盘永远不弹，看着就是「按了没反应」。
+        // 现在先显示 + 布局，下一拍再抢焦点。
+        [self layoutParts];
+        [_search layoutIfNeeded];
+        __weak FUUrlListController *ws = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            FUUrlListController *ss = ws; if (!ss || !ss->_searchVisible) return;
+            [ss->_search becomeFirstResponder];
+        });
+    } else {
+        _search.text = @"";
+        [_search resignFirstResponder];
+        [self layoutParts];
+        [self applyFilter];
+    }
 }
 - (void)showFilter {
     UIAlertController *a = [UIAlertController alertControllerWithTitle:@"筛选" message:nil
@@ -867,6 +959,7 @@ static NSArray *FUColorPalette(void) {
         [ws saveEntries];
         [ws refreshCount];
         [ws applyFilter];
+        [ws scrollToLastRow];   // v1.3.13：批量加完滚到最新一条
     };
     UINavigationController *nc = [[UINavigationController alloc] initWithRootViewController:b];
     [self presentViewController:nc animated:YES completion:nil];
@@ -911,6 +1004,7 @@ static NSArray *FUColorPalette(void) {
 }
 - (void)addEntry {
     if (_multiSelect) return;
+    _pendingScrollEnd = YES;   // v1.3.13：保存返回后把新加的那条滚进视野
     FUUrlEditController *ed = [[FUUrlEditController alloc] init]; ed.entries = _entries; ed.index = -1;
     [self.navigationController pushViewController:ed animated:YES];
 }
@@ -1401,6 +1495,8 @@ static NSArray *FUColorPalette(void) {
 @property (nonatomic, strong) UILabel *ll1, *ll2, *ll3;
 @property (nonatomic, strong) UISegmentedControl *modeSeg;   // v1.3.8 吸附模式（0=自动吸附 1=全屏固定）
 @property (nonatomic, strong) UILabel *lmode;                  // 模式说明
+@property (nonatomic, strong) UISlider *delayS;                // v1.3.13 吸附延时秒
+@property (nonatomic, strong) UILabel *ldelay;
 @end
 @implementation FULayoutController
 - (CGFloat)prefFloat:(NSString *)key dft:(CGFloat)d {
@@ -1515,12 +1611,19 @@ static NSArray *FUColorPalette(void) {
     _l1s.tag = 6; _l2s.tag = 7; y += 46;
     _l3s  = [self mkSliderAt:x0 width:colW y:y min:0 max:24 val:pl3 label:@"第三层" lout:&_ll3];
     _l3s.tag = 8; y += 48;
-    for (UISlider *sl in @[_ss, _sg, _span, _sc, _l1s, _l2s, _l3s])
+    // ---- v1.3.13：吸附延时（用户要求）----
+    //  松手后球先以「完整悬浮图标」停在落点，过了这个时间才自动吸附（只露一半）。
+    //  默认 3 秒，可调 0~10 秒；拖到 0 = 松手立即吸附（老行为）。
+    CGFloat pdelay = [self prefFloat:kFUSnapDelay dft:3];
+    _delayS = [self mkSliderAt:16 width:w - 32 y:y min:0 max:10 val:pdelay
+                         label:@"吸附延时 秒（松手后完整图标停留，0=立即吸附）" lout:&_ldelay];
+    _delayS.tag = 10; y += 46;
+    for (UISlider *sl in @[_ss, _sg, _span, _sc, _l1s, _l2s, _l3s, _delayS])
         [sl addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
     UILabel *foot = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 28)];
     foot.numberOfLines = 0; foot.font = [UIFont systemFontOfSize:10];
     foot.textColor = [UIColor tertiaryLabelColor];
-    foot.text = @"每层数量 0 = 该层按弧长自动排。改动立即生效，球的位置也会被记住。";
+    foot.text = @"每层数量 0 = 该层按弧长自动排。吸附延时 = 松手后球先保持完整体，过这么多秒才自动吸附。改动立即生效，球的位置也会被记住。";
     [_scroll addSubview:foot]; y += 30;
     _scroll.contentSize = CGSizeMake(w, y);
 }
@@ -1546,7 +1649,7 @@ static NSArray *FUColorPalette(void) {
     BOOL fix = (_modeSeg && _modeSeg.selectedSegmentIndex == 1);
     if (_lmode) _lmode.text = fix
         ? @"全屏固定：松手停在哪就停在哪，不自动吸附（扇形仍按球的位置朝屏幕内侧展开）。"
-        : @"自动吸附：按屏幕中心线归位 —— 球在左半屏吸左边、右半屏吸右边（只露一半，点击拉回）。";
+        : @"自动吸附：按屏幕中心线归位 —— 球在左半屏吸左边、右半屏吸右边（只露一半，点击拉回）。松手后先保持完整图标，过「吸附延时」秒再吸附（默认 3 秒）。";
 }
 // v1.3.8 修 03：分段选择器回调
 - (void)modeChanged:(UISegmentedControl *)seg {
@@ -1564,10 +1667,11 @@ static NSArray *FUColorPalette(void) {
         case 6: key = kFULayer1Count; l = _ll1; name = @"第一层"; _preview.layer1 = (NSInteger)v; break;
         case 7: key = kFULayer2Count; l = _ll2; name = @"第二层"; _preview.layer2 = (NSInteger)v; break;
         case 8: key = kFULayer3Count; l = _ll3; name = @"第三层"; _preview.layer3 = (NSInteger)v; break;
+        case 10: key = kFUSnapDelay; l = _ldelay; name = @"吸附延时 秒（完整图标停留）"; break;   // v1.3.13
     }
     if (!key) return;
     l.text = [NSString stringWithFormat:@"%@ %.0f", name, v];
-    if (sl.tag >= 6) [self writeInt:key value:(NSInteger)v];
+    if (sl.tag >= 6 && sl.tag <= 8) [self writeInt:key value:(NSInteger)v];
     else [self writeFloat:key value:v];
     [_preview refresh];
 }
@@ -1578,6 +1682,7 @@ static NSArray *FUColorPalette(void) {
     _ls.text = @"图标大小 40"; _lg.text = @"图标间隔 56";
     _lspan.text = @"扇形角度° 180"; _lsc.text = @"整体距离% 100";
     _ll1.text = @"第一层 8"; _ll2.text = @"第二层 16"; _ll3.text = @"第三层 24";
+    _delayS.value = 3; _ldelay.text = @"吸附延时 秒（完整图标停留） 3";   // v1.3.13
     _preview.side = 0; _preview.iconSize = 40; _preview.iconGap = 56;
     _preview.span = 180; _preview.scale = 100;
     _preview.layer1 = 8; _preview.layer2 = 16; _preview.layer3 = 24;
@@ -1585,6 +1690,7 @@ static NSArray *FUColorPalette(void) {
     [self writeFloat:kFUIconSize value:40]; [self writeFloat:kFUIconGap value:56];
     [self writeFloat:kFUFanSpan value:180]; [self writeFloat:kFUFanScale value:100];
     [self writeInt:kFULayer1Count value:8]; [self writeInt:kFULayer2Count value:16]; [self writeInt:kFULayer3Count value:24];
+    [self writeFloat:kFUSnapDelay value:3];   // v1.3.13：吸附延时恢复默认 3 秒
     [_preview refresh];
 }
 @end
