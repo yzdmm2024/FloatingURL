@@ -855,16 +855,25 @@ static NSArray *FUColorPalette(void) {
     CGFloat H = self.view.bounds.size.height;
     CGFloat top = 0, bottom = 0;
     if (@available(iOS 11.0, *)) { top = self.view.safeAreaInsets.top; bottom = self.view.safeAreaInsets.bottom; }
-    // v1.3.17：本 PreferenceLoader 宿主里 safeAreaInsets 实测不可靠（返回 0）→ 按钮栏被
-    // 半透明导航栏整个盖住：看得见（透过毛玻璃）、摸不着（触摸全被导航栏吃掉）。
-    // 直接量导航栏在本视图坐标系里的真实覆盖范围，取二者较大者，保证按钮栏一定在导航栏之下。
+    // v1.3.18：本 PreferenceLoader 宿主里 safeAreaInsets 实测返回 0（不可靠）。之前用
+    // `convertRect:fromView:nil` 把导航栏 frame 当窗口坐标换算，在刘海屏上只得到导航条自身高度(44)，
+    // 漏掉了状态栏高度，导致按钮栏被半透明导航栏整条压住——看得见、摸不着。
+    // 正确做法：用 `convertRect:toView:` 把导航栏自身的 bounds 映射到本视图坐标系（自动含状态栏偏移），
+    // 取「安全区 / 导航栏真实下沿」二者较大值，保证按钮栏一定落在导航栏之下、可点。
     if (self.navigationController && self.navigationController.navigationBar &&
         !self.navigationController.navigationBarHidden) {
-        CGRect nbf = [self.view convertRect:self.navigationController.navigationBar.frame fromView:nil];
-        CGFloat nb = CGRectGetMaxY(nbf);
-        if (nb > top) top = nb;
+        UIView *nb = self.navigationController.navigationBar;
+        CGRect nbInSelf = [nb convertRect:nb.bounds toView:self.view];
+        CGFloat nbBottom = CGRectGetMaxY(nbInSelf);
+        if (nbBottom > top) top = nbBottom;
     }
-    if (top < 1) top = 44;   // 兜底：无安全区时给一个导航条高度
+    // 兜底：若上面都没拿到（理论上不会），按 状态栏 + 导航条 估算。
+    if (top < 1) {
+        CGFloat sbh = 20;
+        if (@available(iOS 11.0, *)) { sbh = UIApplication.sharedApplication.statusBarFrame.size.height; }
+        if (sbh < 1) sbh = 20;
+        top = sbh + 44;
+    }
     CGFloat sh = _searchVisible ? 44.0f : 0.0f;
     _bar.frame = CGRectMake(0, top, w, 46);
     _search.hidden = !_searchVisible;

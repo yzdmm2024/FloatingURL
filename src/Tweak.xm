@@ -647,6 +647,10 @@ static void fuStartAppHeartbeat(NSString *bid) {
 - (void)scheduleSnapAfterDrop;                          // v1.3.13：松手后按「吸附延时」归位
 - (void)triggerEntry:(NSDictionary *)entry;          // v1.3.8：触发一条入口（扇形点击 / 单入口点球共用）
 - (CGFloat)fuAngleToScreenCenter:(CGPoint)c;         // v1.3.8：球心 -> 屏幕中心 的方向角
+// v1.3.18：网页打开「先小窗、失败兜底」三件套（前向声明，供 triggerEntry / urlGo / 导航代理调用）
+- (void)openWebURL:(NSString *)norm;
+- (void)scheduleWebWatchdog:(NSInteger)tok url:(NSString *)u;
+- (void)fallbackWebToExternal:(NSString *)u;
 @property (nonatomic, strong) UIView      *schemeBox;     // 非网页入口的简单输入框容器
 @property (nonatomic, strong) UITextField *schemeField;
 @property (nonatomic, strong) UIButton    *schemeOpenBtn;
@@ -692,6 +696,15 @@ static void fuFrontGoneCb(CFNotificationCenterRef center, void *observer,
     WKWebView             *_webView;
     UIActivityIndicatorView *_spinner;
     UILabel               *_webErrorLabel;   // 网页加载失败时显示原因（否则白屏无提示）
+    // v1.3.18：桌面小窗网页「尽力开放 + 绝不卡白屏」三件套。
+    //  桌面（SpringBoard）里 WKWebView 能不能真渲染网页，在不同越狱/环境上结论不一（用户反馈过
+    //  「以前能打开」，也实测过「WebContent 起不来白屏」）。与其二选一赌一边，这里做成：
+    //  先按用户想要的方式开内置小窗 → 加载失败或超时未完成就自动兜底外部浏览器 →
+    //  并且本会话内记下「这台机器渲染不了」，之后不再白等，直接走浏览器（秒开）。
+    NSInteger             _webLoadToken;     // 每次网页加载自增，防止旧看门狗误判成新加载失败
+    BOOL                  _webLoadedOK;      // 本次加载已成功完成
+    BOOL                  _webStarted;       // 本次加载连"开始导航"回调都没收到（= 结构性失败的特征）
+    BOOL                  _desktopWebBroken; // 本会话已确认桌面小窗渲染不了 → 之后直接外部浏览器
 
     BOOL                  _expanded;
     BOOL                  _didSetup;
@@ -1775,18 +1788,55 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     NSString *norm = [self normalizeURL:u]; if (!norm.length) return;
     // 确认模式（设置里可开）：不直接触发，先弹输入框+打开按钮，用户点「打开」才执行。
     if (_tapConfirm) { [self showSchemeBox:norm]; return; }
-    // v1.3.17：网页一律走外部链路（前台有 App → 该 App 内置浏览器；没有 → 系统浏览器）。
-    // 1.3.16 曾想恢复桌面内置小窗，但真机 frida 实测推翻了它：SpringBoard 进程里
-    // loadRequest 后 WebContent 进程根本起不来（Networking 能起），12 秒后 url=nil、
-    // isLoading=NO、无任何导航回调 —— 白屏；SFSafariViewController 远程视图在桌面也
-    // 弹不出来（presentedViewController 挂着但不渲染）。1.2.1 时代「小窗能开网页」
-    // 是因为那时球在每个 App 进程里；1.3.2 起球只在桌面，桌面小窗网页技术上不可行。
+    // v1.3.18：网页不再一律外跳，改成「先试内置小窗，失败自动兜底浏览器」。
+    //  用户反馈"以前能在小窗口打开"，而 1.3.17 的实测又显示 SpringBoard 里 WebContent 可能起不来。
+    //  两种结论都可能成立（取决于越狱/环境），所以不赌一边：先给小窗，加载失败或超时就自动转浏览器，
+    //  并在本会话记住结果，避免每次都白等 —— 详见 openWebURL:。
     if ([self isWebScheme:norm]) {
         [self pushHistory:norm];
-        [self fuOpenExternally:norm];
+        [self openWebURL:norm];
         return;
     }
     [self fuOpenExternally:norm];
+}
+// v1.3.18：网页打开策略 —— 先按用户想要的方式开内置小窗加载；
+//  加载失败 / 超时未完成 ⇒ 自动兜底转外部浏览器，绝不把人留在白屏里。
+- (void)openWebURL:(NSString *)norm {
+    if (!norm.length) return;
+    // 本会话已经确认过「这台机器桌面小窗渲染不了」→ 不再让用户白等，直接秒开浏览器。
+    if (_desktopWebBroken) { [self fuOpenExternally:norm]; return; }
+    @try {
+        _url = norm;
+        if (_urlField && !_urlField.isEditing) _urlField.text = norm;
+        NSInteger tok = ++_webLoadToken;
+        _webLoadedOK = NO; _webStarted = NO;
+        [self expand];                       // 先出小窗
+        [self loadURL];                      // 再往面板里加载
+        [self scheduleWebWatchdog:tok url:norm];
+    } @catch (NSException *e) {
+        NSLog(@"[FloatingURL] openWebURL 异常，转外部浏览器: %@", e);
+        [self fallbackWebToExternal:norm];
+    }
+}
+// 看门狗：加载既不成功也不报错（= WebContent 起不来的白屏）时兜底。
+- (void)scheduleWebWatchdog:(NSInteger)tok url:(NSString *)u {
+    __weak FUFloatingManager *ws = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        FUFloatingManager *ss = ws; if (!ss) return;
+        if (ss->_webLoadToken != tok) return;   // 期间换过别的加载 → 本次判定作废
+        if (ss->_webLoadedOK) return;           // 已成功加载 → 放行
+        if (!ss->_expanded) return;             // 用户已手动关掉面板 → 绝不事后再弹出浏览器
+        NSLog(@"[FloatingURL] 桌面小窗网页超时未完成 -> 兜底外部浏览器: %@", u);
+        // 连「开始导航」回调都没收到 = 结构性失败（渲染进程根本没起来）；
+        // 收到过但没完成 = 更可能是网络慢，本次兜底但不永久禁用小窗。
+        if (!ss->_webStarted) ss->_desktopWebBroken = YES;
+        [ss fallbackWebToExternal:u];
+    });
+}
+- (void)fallbackWebToExternal:(NSString *)u {
+    @try { [self collapse]; } @catch (NSException *e) {}
+    if (_webErrorLabel) _webErrorLabel.hidden = YES;
+    [self fuOpenExternally:u];
 }
 - (void)fanItemLongPressed:(UILongPressGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan) return;
@@ -2036,7 +2086,8 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 - (void)urlGo {
     NSString *raw = _urlField.text; NSString *u = [self normalizeURL:raw];
     if (!u.length) { _urlField.text = _url; return; }
-    _url = u; [self pushHistory:u]; [self loadURL]; [_urlField resignFirstResponder];
+    // v1.3.18：改用 openWebURL:（内含看门狗兜底），手输网址也不会卡白屏。
+    _url = u; [self pushHistory:u]; [self openWebURL:u]; [_urlField resignFirstResponder];
     [self setHistoryVisible:NO]; [self writeSync];
 }
 - (void)urlEditingBegan { [self setHistoryVisible:YES]; }
@@ -2047,12 +2098,9 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     if (scheme.length && ![webSchemes containsObject:scheme]) {
         [self fuOpenExternally:u.absoluteString]; return;   // v1.3.5：统一走跨进程打开
     }
-    // v1.3.17：桌面进程里 WKWebView 必白屏（WebContent 进程起不来，frida 真机实测）→ 外部打开并收起面板。
-    if (fuIsSpringBoard()) {
-        [self fuOpenExternally:u.absoluteString];
-        [self collapse];
-        return;
-    }
+    // v1.3.18：去掉 1.3.17 的「桌面一律外跳」。桌面网页照样往内置面板加载，由
+    //  openURLInPanel: 起的看门狗负责：加载成功 → 正常小窗；失败/超时 → 自动转外部浏览器。
+    //  （这样既能保住用户想要的小窗，又绝不会再卡在白屏。）
     [_webView loadRequest:[NSURLRequest requestWithURL:u]];
 }
 // v1.3.17：升级后「立即注销 / 稍后」选择弹窗（postinst 发 needsRespring 通知后走到这里）
@@ -2194,17 +2242,24 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 #pragma mark - WKNavigationDelegate
 - (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)nav {
     [_spinner startAnimating]; if (_webErrorLabel) _webErrorLabel.hidden = YES;   // 开始新加载 → 清掉旧错误
+    _webStarted = YES;   // v1.3.18：收到过回调 → 说明 WebContent 起来了，不是结构性白屏
 }
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)nav {
     [_spinner stopAnimating]; NSString *cur = webView.URL.absoluteString;
+    _webLoadedOK = YES;   // v1.3.18：加载成功 → 看门狗放行，小窗保持打开
     if (cur.length && _expanded) { _url = cur; _urlField.text = cur; [self pushHistory:cur]; }
     [self applyWebZoom];
 }
 - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)nav withError:(NSError *)error {
     [_spinner stopAnimating]; [self showWebError:[error localizedDescription]];
+    // v1.3.18：连最初导航都失败 = 这台机器确实渲染不了 → 记住，并立刻兜底浏览器（不停在错误页）
+    _webStarted = YES;
+    if (!_webLoadedOK && _expanded) { _desktopWebBroken = YES; [self fallbackWebToExternal:_url ?: webView.URL.absoluteString]; }
 }
 - (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)nav withError:(NSError *)error {
     [_spinner stopAnimating]; [self showWebError:[error localizedDescription]];
+    _webStarted = YES;
+    if (!_webLoadedOK && _expanded) { _desktopWebBroken = YES; [self fallbackWebToExternal:_url ?: webView.URL.absoluteString]; }
 }
 - (void)showWebError:(NSString *)msg {
     if (!_webErrorLabel) return;
