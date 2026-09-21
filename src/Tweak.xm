@@ -3,6 +3,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <math.h>
+#import <stdlib.h>
 #import <notify.h>
 #import <dlfcn.h>
 
@@ -50,6 +51,10 @@ static NSString * const kFUInAppWebAck  = @"com.yzdmm.floatingurl/inAppWebAck";
 // v1.3.13：备用信箱。桌面写目标 App 容器常被沙盒拒绝，写不进去就改投这里；
 // App 端两处都看，读不到就静默跳过（无副作用）。
 static NSString * const kFUWebMailboxMedia = @"/var/mobile/Media/FloatingURL_incoming.txt";
+// v1.3.17：deb 升级后不再自动注销——postinst 写旗标 + 发本通知，由运行中的 tweak
+// 弹「立即注销 / 稍后」让用户自己选。旗标留着 = 尚未注销生效，下次手动注销时 %ctor 清掉。
+static NSString * const kFUNeedsRespring  = @"com.yzdmm.floatingurl/needsRespring";
+static NSString * const kFURespringFlagPath = @"/var/mobile/Media/FloatingURL_respring";
 
 static NSString * const kFUURLs        = @"urls";
 static NSString * const kFUEntryURL    = @"url";
@@ -87,6 +92,10 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
                            CFStringRef name, const void *object, CFDictionaryRef userInfo);
 static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
                           CFStringRef name, const void *object, CFDictionaryRef userInfo);
+static void fuInAppWebAckCb(CFNotificationCenterRef center, void *observer,
+                            CFStringRef name, const void *object, CFDictionaryRef userInfo);
+static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
+                              CFStringRef name, const void *object, CFDictionaryRef userInfo);
 
 // ---- v1.3.2 核心修复：球只由 SpringBoard 持有 ----
 // 真机 frida 实测（Notes / 闲鱼 等沙盒 App 进程内）：
@@ -279,11 +288,15 @@ static void fuStartAppHeartbeat(NSString *bid) {
     frame.layer.borderColor = [UIColor whiteColor].CGColor; frame.layer.borderWidth = 2.0;
     frame.userInteractionEnabled = NO;
     [self.view addSubview:frame];
-    // 初始缩放：让图片至少覆盖裁剪框
-    CGFloat z = side / MIN(_image.size.width, _image.size.height);
-    _scroll.minimumZoomScale = z * 0.5;
-    _scroll.maximumZoomScale = z * 4.0;
-    _scroll.zoomScale = z;
+    // v1.3.17：初始缩放改为「整图适配」——整张照片居中完整可见，不再放大铺满裁剪框
+    // （旧逻辑 z = side/MIN(w,h) 会把长方形照片放得巨大，用户看着就是「莫名放大、还不居中」）。
+    // 想裁局部就用双指放大。想填满裁剪框也只需放大到覆盖即可。
+    CGFloat iw = _image.size.width > 1 ? _image.size.width : 1;
+    CGFloat ih = _image.size.height > 1 ? _image.size.height : 1;
+    CGFloat fit = MIN(side / iw, side / ih);
+    _scroll.minimumZoomScale = fit * 0.5;
+    _scroll.maximumZoomScale = fit * 8.0;
+    _scroll.zoomScale = fit;
     [self layoutContent];
     [self centerContent];
 }
@@ -293,35 +306,60 @@ static void fuStartAppHeartbeat(NSString *bid) {
     _imgView.frame = CGRectMake(0, 0, s.width, s.height);
     _scroll.contentSize = s;
 }
+// v1.3.17：居中改用 contentInset（内容比可视区小也能居中）。旧实现拿 side 当可视区宽高算
+// contentOffset，而滚动条实际占满整个视图 → 偏移全错（图片顶到左上角、和居中的裁剪框对不上）。
 - (void)centerContent {
-    CGFloat side = MIN(self.view.bounds.size.width, self.view.bounds.size.height) - 40;
-    CGFloat ox = MAX(0, (_scroll.contentSize.width  - side) / 2.0);
-    CGFloat oy = MAX(0, (_scroll.contentSize.height - side) / 2.0);
-    _scroll.contentOffset = CGPointMake(ox, oy);
+    CGRect b = _scroll.bounds;
+    CGSize cs = _scroll.contentSize;
+    CGFloat ix = MAX(0, (b.size.width  - cs.width ) / 2.0);
+    CGFloat iy = MAX(0, (b.size.height - cs.height) / 2.0);
+    _scroll.contentInset = UIEdgeInsetsMake(iy, ix, iy, ix);
+}
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    [self layoutContent]; [self centerContent];   // 转屏/首次布局后兜底重算
 }
 - (UIView *)viewForZoomingInScrollView:(UIScrollView *)sv { return _imgView; }
 - (void)scrollViewDidZoom:(UIScrollView *)sv { [self centerContent]; }
 
 - (void)done {
     CGFloat side = MIN(self.view.bounds.size.width, self.view.bounds.size.height) - 40;
+    CGRect vb = self.view.bounds;
+    CGRect sq = CGRectMake((vb.size.width - side)/2.0, (vb.size.height - side)/2.0, side, side);
     CGFloat z = _scroll.zoomScale;
-    // 取可视区域正中央的 side×side 正方形（与界面上的正方形框线对齐）。
-    CGRect visible = CGRectMake(_scroll.contentOffset.x + (_scroll.bounds.size.width  - side)/2.0,
-                                _scroll.contentOffset.y + (_scroll.bounds.size.height - side)/2.0,
-                                side, side);
-    CGRect imgRect = CGRectMake(visible.origin.x / z, visible.origin.y / z,
-                                visible.size.width / z, visible.size.height / z);
+    // v1.3.17：坐标换算重做。屏幕坐标 s 与内容坐标 p 的关系是 p = s + contentOffset
+    // （contentInset 只是扩大偏移范围，不改变这个换算）。
+    CGPoint off = _scroll.contentOffset;
+    CGRect sqContent = CGRectMake(sq.origin.x + off.x, sq.origin.y + off.y, side, side);
+    CGRect vis = CGRectMake(off.x, off.y, _scroll.bounds.size.width, _scroll.bounds.size.height);
+    CGRect crop = CGRectIntersection(sqContent, vis);          // 裁剪框 ∩ 屏幕上可见区域
+    CGPoint imgOrigin = _imgView.frame.origin;                 // 缩放锚点会让图片原点在内容坐标里漂移
+    CGSize  cs = _scroll.contentSize;
+    crop = CGRectIntersection(crop, CGRectMake(imgOrigin.x, imgOrigin.y, cs.width, cs.height)); // ∩ 图片实际区域
+    CGRect imgRect;
+    if (CGRectIsNull(crop) || crop.size.width < 4 || crop.size.height < 4) {
+        // 兜底：取图片正中最大正方形
+        CGFloat s2 = MIN(_image.size.width, _image.size.height);
+        imgRect = CGRectMake((_image.size.width - s2)/2.0, (_image.size.height - s2)/2.0, s2, s2);
+    } else {
+        // 裁剪区不是正方形（图片小于框时）→ 取其正中最大正方形
+        CGFloat s2 = MIN(crop.size.width, crop.size.height);
+        crop = CGRectMake(crop.origin.x + (crop.size.width - s2)/2.0,
+                          crop.origin.y + (crop.size.height - s2)/2.0, s2, s2);
+        imgRect = CGRectMake((crop.origin.x - imgOrigin.x) / z, (crop.origin.y - imgOrigin.y) / z,
+                             crop.size.width / z, crop.size.height / z);
+    }
     CGImageRef cg = CGImageCreateWithImageInRect(_image.CGImage, imgRect);
-    UIImage *sq = cg ? [UIImage imageWithCGImage:cg] : nil;
+    UIImage *sqImg = cg ? [UIImage imageWithCGImage:cg] : nil;
     if (cg) CGImageRelease(cg);
     NSData *out = nil;
-    if (sq) {
+    if (sqImg) {
         CGFloat max = 120.0;
-        CGFloat s = MIN(1.0, max / MAX(sq.size.width, sq.size.height));
-        CGSize ts = CGSizeMake(sq.size.width * s, sq.size.height * s);
+        CGFloat s = MIN(1.0, max / MAX(sqImg.size.width, sqImg.size.height));
+        CGSize ts = CGSizeMake(sqImg.size.width * s, sqImg.size.height * s);
         UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:ts];
         UIImage *small = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx){
-            [sq drawInRect:CGRectMake(0, 0, ts.width, ts.height)];
+            [sqImg drawInRect:CGRectMake(0, 0, ts.width, ts.height)];
         }];
         out = UIImagePNGRepresentation(small);
     }
@@ -599,6 +637,7 @@ static void fuStartAppHeartbeat(NSString *bid) {
 - (void)fuOpenExternally:(NSString *)s;
 - (BOOL)fuHandoffWebToFrontApp:(NSURL *)u;   // v1.3.12：把网页交给前台 App 的内置浏览器
 - (void)fuOpenViaSystem:(NSURL *)u;          // v1.3.13：系统打开链路（openURL → FBSSystemService → workspace）
+- (void)showRespringPrompt;                  // v1.3.17：升级后「立即注销 / 稍后」选择框
 - (void)fuOpenViaFBS:(NSURL *)u;             // v1.3.13：FrontBoard 异步接口（失败回调里继续往下兜底）
 - (void)fuOpenViaWorkspace:(NSURL *)u;       // v1.3.13：LSApplicationWorkspace 最后兜底
 - (NSArray *)fuWebMailboxPathsForBid:(NSString *)bid;   // v1.3.13：可写的投递信箱列表
@@ -702,6 +741,7 @@ static void fuFrontGoneCb(CFNotificationCenterRef center, void *observer,
     BOOL                  _snapPending;      // 有待吸附（扇形/面板开着时先挂起）
     NSTimeInterval        _snapDelay;        // 松手后「完整悬浮图标」停留秒数（默认 3，0=立即吸附）
     BOOL                  _webAckPending;    // 正在等 App 的内置浏览器回执（没有就兜底系统浏览器）
+    BOOL                  _respringPromptShowing;   // v1.3.17：注销选择框防重复弹
     NSData               *_ballIconShown;    // 球外观缓存（避免每秒轮询重复解码图片）
     NSString             *_ballShownTitle;
     NSString             *_ballShownColor;
@@ -735,6 +775,10 @@ static void fuFrontGoneCb(CFNotificationCenterRef center, void *observer,
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
             (__bridge const void *)(self), &fuInAppWebAckCb,
             (__bridge CFStringRef)kFUInAppWebAck, NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+        // v1.3.17：deb 升级完成（postinst 发出）→ 弹「立即注销 / 稍后」
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+            (__bridge const void *)(self), &fuNeedsRespringCb,
+            (__bridge CFStringRef)kFUNeedsRespring, NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
     }
     return self;
 }
@@ -769,6 +813,17 @@ static void fuInAppWebAckCb(CFNotificationCenterRef center, void *observer,
     }
     mgr->_webAckPending = NO;
     NSLog(@"[FloatingURL] App 已弹出内置浏览器（回执收到）");
+}
+
+// ---- v1.3.17：升级后「立即注销 / 稍后」选择弹窗 ----
+static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
+                              CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    FUFloatingManager *mgr = (__bridge FUFloatingManager *)observer; if (!mgr) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ fuNeedsRespringCb(center, observer, name, object, userInfo); });
+        return;
+    }
+    [mgr showRespringPrompt];
 }
 
 - (void)reloadPrefs {
@@ -1720,12 +1775,15 @@ static void fuInAppWebAckCb(CFNotificationCenterRef center, void *observer,
     NSString *norm = [self normalizeURL:u]; if (!norm.length) return;
     // 确认模式（设置里可开）：不直接触发，先弹输入框+打开按钮，用户点「打开」才执行。
     if (_tapConfirm) { [self showSchemeBox:norm]; return; }
-    // v1.3.16：网页类恢复「内置小窗打开」（与最初版本一致）。SpringBoard 里的 WKWebView 面板在
-    // 正确 makeKey + 延时加载下可正常渲染（中央球用的就是同一套面板），不再强制跳系统浏览器。
+    // v1.3.17：网页一律走外部链路（前台有 App → 该 App 内置浏览器；没有 → 系统浏览器）。
+    // 1.3.16 曾想恢复桌面内置小窗，但真机 frida 实测推翻了它：SpringBoard 进程里
+    // loadRequest 后 WebContent 进程根本起不来（Networking 能起），12 秒后 url=nil、
+    // isLoading=NO、无任何导航回调 —— 白屏；SFSafariViewController 远程视图在桌面也
+    // 弹不出来（presentedViewController 挂着但不渲染）。1.2.1 时代「小窗能开网页」
+    // 是因为那时球在每个 App 进程里；1.3.2 起球只在桌面，桌面小窗网页技术上不可行。
     if ([self isWebScheme:norm]) {
         [self pushHistory:norm];
-        _url = norm;
-        [self expand];
+        [self fuOpenExternally:norm];
         return;
     }
     [self fuOpenExternally:norm];
@@ -1989,8 +2047,47 @@ static void fuInAppWebAckCb(CFNotificationCenterRef center, void *observer,
     if (scheme.length && ![webSchemes containsObject:scheme]) {
         [self fuOpenExternally:u.absoluteString]; return;   // v1.3.5：统一走跨进程打开
     }
+    // v1.3.17：桌面进程里 WKWebView 必白屏（WebContent 进程起不来，frida 真机实测）→ 外部打开并收起面板。
+    if (fuIsSpringBoard()) {
+        [self fuOpenExternally:u.absoluteString];
+        [self collapse];
+        return;
+    }
     [_webView loadRequest:[NSURLRequest requestWithURL:u]];
 }
+// v1.3.17：升级后「立即注销 / 稍后」选择弹窗（postinst 发 needsRespring 通知后走到这里）
+- (void)showRespringPrompt {
+    @try {
+        if (_respringPromptShowing) return;
+        _respringPromptShowing = YES;
+        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"悬浮URL 已更新"
+            message:@"新版本需要注销（Respring）后才会加载。\n点「立即注销」马上重启桌面；点「稍后」继续用当前版本，之后手动注销也行。"
+            preferredStyle:UIAlertControllerStyleAlert];
+        __weak FUFloatingManager *ws = self;
+        [a addAction:[UIAlertAction actionWithTitle:@"稍后" style:UIAlertActionStyleCancel handler:^(UIAlertAction *act){
+            FUFloatingManager *ss = ws; if (ss) ss->_respringPromptShowing = NO;
+            [ss setInteractive:NO];   // 把 key 还给原窗口
+        }]];
+        [a addAction:[UIAlertAction actionWithTitle:@"立即注销" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *act){
+            FUFloatingManager *ss = ws; if (ss) ss->_respringPromptShowing = NO;
+            [ss setInteractive:NO];
+            // 马上要注销了，清掉旗标（重启后新版本生效，不必再提示）
+            [[NSFileManager defaultManager] removeItemAtPath:kFURespringFlagPath error:NULL];
+            // 等弹窗动画收尾再重启桌面（exit(0) 后 launchd 会自动拉起 SpringBoard）
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ exit(0); });
+        }]];
+        UIViewController *host = fuTopViewController();
+        if (!host && _overlayRoot) host = _overlayRoot;
+        if (!host) { _respringPromptShowing = NO; return; }
+        [host presentViewController:a animated:YES completion:nil];
+        NSLog(@"[FloatingURL] 已弹出升级注销选择框");
+    } @catch (NSException *e) {
+        NSLog(@"[FloatingURL] showRespringPrompt 异常（已忽略）: %@", e);
+        _respringPromptShowing = NO;
+    }
+}
+
 - (void)applyVisibility {
     if (!_didSetup) return;
     // v1.3.3：静默模式 → 整窗彻底休眠（球/环/面板全藏），App 端也跳过心跳，最省电。
@@ -2144,6 +2241,8 @@ static void fuInAppWebAckCb(CFNotificationCenterRef center, void *observer,
             return;
         }
         if (!INCLUDE_SPRINGBOARD) return;
+        // v1.3.17：能走到这里说明刚注销完 → 升级旗标已失效（新版本已在跑），清掉。
+        [[NSFileManager defaultManager] removeItemAtPath:kFURespringFlagPath error:NULL];
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
             object:nil queue:[NSOperationQueue mainQueue]
             usingBlock:^(NSNotification *note){ [[FUFloatingManager shared] setupWhenHostReady]; }];

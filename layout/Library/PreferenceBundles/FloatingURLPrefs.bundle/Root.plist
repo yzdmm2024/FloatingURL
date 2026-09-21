@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>title</key>
-	<string>悬浮URL 1.3.16</string>
+	<string>悬浮URL 1.3.17</string>
 	<key>items</key>
 	<array>
 		<dict>
@@ -104,7 +104,7 @@
 			<key>label</key>
 			<string>网页怎么打开（全自动，无需选择）</string>
 			<key>footerText</key>
-			<string>网页类快捷 URL：在桌面（主屏幕）点 → 直接在悬浮球内置小窗（可拖拽、双指缩放的 WKWebView 面板）打开；在某个 App 里点 → 在该 App 内弹出内置浏览器（Safari 视图，带刷新/分享/完成，不离开当前 App）。非网页类 scheme（weixin://、tel:、alipay:// 等）始终直接拉起对应 App。</string>
+			<string>网页类快捷 URL 的打开链路（全自动）：在某个 App 里点 → 在该 App 内弹出内置浏览器（Safari 视图，带刷新/分享/完成，不离开当前 App）；在桌面（主屏幕）点 → 交给系统浏览器（Safari）打开。桌面进程无法渲染网页内容（iOS 的 WebKit 网页进程在 SpringBoard 里被系统限制无法启动，真机实测确认），所以桌面不提供内置小窗。非网页类 scheme（weixin://、tel:、alipay:// 等）始终直接拉起对应 App。</string>
 		</dict>
 		<dict>
 			<key>cell</key>

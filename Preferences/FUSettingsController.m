@@ -855,6 +855,15 @@ static NSArray *FUColorPalette(void) {
     CGFloat H = self.view.bounds.size.height;
     CGFloat top = 0, bottom = 0;
     if (@available(iOS 11.0, *)) { top = self.view.safeAreaInsets.top; bottom = self.view.safeAreaInsets.bottom; }
+    // v1.3.17：本 PreferenceLoader 宿主里 safeAreaInsets 实测不可靠（返回 0）→ 按钮栏被
+    // 半透明导航栏整个盖住：看得见（透过毛玻璃）、摸不着（触摸全被导航栏吃掉）。
+    // 直接量导航栏在本视图坐标系里的真实覆盖范围，取二者较大者，保证按钮栏一定在导航栏之下。
+    if (self.navigationController && self.navigationController.navigationBar &&
+        !self.navigationController.navigationBarHidden) {
+        CGRect nbf = [self.view convertRect:self.navigationController.navigationBar.frame fromView:nil];
+        CGFloat nb = CGRectGetMaxY(nbf);
+        if (nb > top) top = nb;
+    }
     if (top < 1) top = 44;   // 兜底：无安全区时给一个导航条高度
     CGFloat sh = _searchVisible ? 44.0f : 0.0f;
     _bar.frame = CGRectMake(0, top, w, 46);
@@ -862,6 +871,7 @@ static NSArray *FUColorPalette(void) {
     _search.frame = CGRectMake(0, top + 46, w, 44);
     _tv.frame = CGRectMake(0, top + 46 + sh, w, H - top - 46 - sh - bottom);
     _empty.frame = CGRectMake(24, top + (H - top)/2.0 - 30, w - 48, 60);
+    [self.view bringSubviewToFront:_bar];   // v1.3.17：保险，确保按钮栏在列表之上不被遮挡
 }
 - (void)viewDidLayoutSubviews { [super viewDidLayoutSubviews]; [self layoutParts]; }
 - (void)viewWillAppear:(BOOL)animated {
