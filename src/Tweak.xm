@@ -478,6 +478,7 @@ static void fuStartAppHeartbeat(NSString *bid) {
 - (void)pickIcon {
     // v1.3.16：恢复桌面长按直接选照片。PHPickerViewController 是系统独立进程、且不需要相册权限
     // （与 UIImagePickerController 不同），从 overlay 这个 key 窗口/scene 弹出不会崩 SpringBoard。
+    // 全是运行时调用（NSClassFromString + performSelector + setValue:forKey:），避免 import PhotosUI 触发模块构建失败；
     // 任何异常都 @try 兜住并退回「去设置里选」提示，绝不带崩 SpringBoard。
     @try {
         if (@available(iOS 14.0, *)) {
@@ -485,11 +486,14 @@ static void fuStartAppHeartbeat(NSString *bid) {
             Class cfgClass = NSClassFromString(@"PHPickerConfiguration");
             Class fltClass = NSClassFromString(@"PHPickerFilter");
             if (pvClass && cfgClass && fltClass) {
-                PHPickerConfiguration *cfg = [[cfgClass alloc] init];
-                if ([cfg respondsToSelector:@selector(setSelectionLimit:)]) cfg.selectionLimit = 1;
-                if ([cfg respondsToSelector:@selector(setFilter:)]) cfg.filter = [fltClass imagesFilter];
-                PHPickerViewController *pv = [[pvClass alloc] initWithConfiguration:cfg];
-                pv.delegate = (id)self;
+                id cfg = [cfgClass performSelector:@selector(alloc)];
+                cfg = [cfg performSelector:@selector(init)];
+                id flt = [fltClass performSelector:@selector(imagesFilter)];
+                [cfg setValue:@(1) forKey:@"selectionLimit"];
+                [cfg setValue:flt forKey:@"filter"];
+                id pv = [pvClass performSelector:@selector(alloc)];
+                pv = [pv performSelector:@selector(initWithConfiguration:) withObject:cfg];
+                [pv setValue:self forKey:@"delegate"];   // self 已声明遵循 PHPickerViewControllerDelegate
                 [self presentViewController:pv animated:YES completion:nil];
                 return;
             }
