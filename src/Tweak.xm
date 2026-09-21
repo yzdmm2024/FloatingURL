@@ -64,6 +64,8 @@ static NSString * const kFUIconSize    = @"iconSize";   // 快捷图标尺寸 pt
 static NSString * const kFUIconGap     = @"iconGap";    // 图标/圈层间隔 pt
 static NSString * const kFUFanSpan     = @"fanSpan";    // v1.3.2 扇形角度（60~180°，默认 180）
 static NSString * const kFUFanAutoHide = @"fanAutoHide"; // v1.3.21：扇形展开后闲置多少秒自动收回（0=不自动收，默认 5）
+static NSString * const kFUCaptureHide = @"captureHide"; // v1.3.25：截图/录屏时自动收拢扇形并临时隐藏悬浮球（默认开）
+static const NSInteger kFUKeepForever  = 999;            // v1.3.25：秒数滑杆最右一档「常驻」哨兵（永不吸附）
 static NSString * const kFUFanScale    = @"fanScale";   // v1.3.2 整体距离（%，默认 100）
 static NSString * const kFULayer1Count = @"layer1";     // v1.3.3：第一层入口数（0=自动）
 static NSString * const kFULayer2Count = @"layer2";     // v1.3.3：第二层入口数（0=自动）
@@ -658,6 +660,9 @@ static void fuFrontGoneCb(CFNotificationCenterRef center, void *observer,
     // v1.3.21：扇形闲置自动收回（设置里可调秒数，0=永不自动收）
     NSTimer              *_fanHideTimer;
     BOOL                  _edgeGuard;     // v1.3.24：悬浮球是否在「会撞车的边」上压住系统手势（默认开）
+    BOOL                  _captureHide;   // v1.3.25：截图/录屏时自动收拢扇形 + 临时隐藏悬浮球（默认开）
+    BOOL                  _captureHiding; // v1.3.25：当前正处于「截图/录屏隐藏」中
+    NSInteger             _captureToken;  // v1.3.25：隐藏→恢复的代次，防止画面还没拍完就提前把球显示回来
     BOOL                  _screenWasOn;   // v1.3.24：上次轮询时的亮屏状态（亮屏瞬间补一次完整刷新）
     CGFloat               _fanAutoHide;
     BOOL                  _applyingRemote;
@@ -717,6 +722,7 @@ static void fuFrontGoneCb(CFNotificationCenterRef center, void *observer,
         _snapDelay = 3.0;                                  // v1.3.13：默认吸附延时 3 秒（松手后先给完整图标）
         _layer1 = 8; _layer2 = 16; _layer3 = 24;           // v1.3.6：三层默认数量 8/16/24（合计 48）
         _edgeGuard = YES; _screenWasOn = YES;              // v1.3.24：默认压住冲突边 + 起始按亮屏算
+        _captureHide = YES; _captureHiding = NO; _captureToken = 0;   // v1.3.25
         _frontWatched = [NSMutableSet set];
         _fanItems = [NSMutableArray array]; _fanOffsets = [NSMutableArray array];
         [self reloadPrefs];
@@ -767,6 +773,10 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     Boolean egValid;
     BOOL eg = CFPreferencesGetAppBooleanValue(CFSTR("edgeGuard"), (__bridge CFStringRef)kFUSuite, &egValid);
     _edgeGuard = egValid ? eg : YES;
+    // v1.3.25：截图/录屏时是否自动收拢 + 隐藏悬浮球（默认开）
+    Boolean chValid;
+    BOOL ch = CFPreferencesGetAppBooleanValue((__bridge CFStringRef)kFUCaptureHide, (__bridge CFStringRef)kFUSuite, &chValid);
+    _captureHide = chValid ? ch : YES;
     // v1.3.1 布局：停靠边(side) + 图标大小 + 图标间隔（位置不再用 X/Y 滑杆，球固定在左/右边）
     CFPropertyListRef sdRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUSide, (__bridge CFStringRef)kFUSuite);
     if (sdRef && CFGetTypeID(sdRef) == CFNumberGetTypeID()) { _side = [(__bridge NSNumber *)sdRef integerValue]; CFRelease(sdRef); }
@@ -818,7 +828,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
         _snapDelay = [(__bridge NSNumber *)sdlyRef doubleValue];
         CFRelease(sdlyRef);
     } else if (sdlyRef) { CFRelease(sdlyRef); }
-    if (_snapDelay < 0) _snapDelay = 0; if (_snapDelay > 15) _snapDelay = 15;    // v1.3.9 修 05（真机实测确认的根因）：键被删掉时 CFPreferencesCopyAppValue 返回 NULL，
+    if (_snapDelay < 0) _snapDelay = 0; if (_snapDelay > 15.0 && _snapDelay < kFUKeepForever) _snapDelay = 15.0;   // v1.3.25：999 = 常驻    // v1.3.9 修 05（真机实测确认的根因）：键被删掉时 CFPreferencesCopyAppValue 返回 NULL，
     // 而旧代码两个分支都不走 → _ballIcon / _ballColor / _ballTitle **保持上一次的旧值**，
     // 于是「设置里删了照片，球上照片还在」。这里必须在读到 NULL 时明确清空。
     CFPropertyListRef btRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallTitle, (__bridge CFStringRef)kFUSuite);
@@ -987,6 +997,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     // 进入前台时实时重判「作用 App」网关，免去重启 App 才生效。
     [[NSNotificationCenter defaultCenter] addObserver:self
         selector:@selector(onBecomeActive) name:UIApplicationDidBecomeActiveNotification object:nil];
+    [self fuSetupCaptureObservers];   // v1.3.25：截图 / 录屏 / 第三方局部截图 → 自动收拢 + 临时隐藏
     // v1.3.0 兜底：每秒重读偏好并重判黑名单/开关。Darwin 通知在某些 App（如 QQ）里会被
     // 延迟或吞掉，导致「设置里加了黑名单、球还在」——轮询保证 1 秒内必生效。
     if (!_pollTimer) {
@@ -1239,6 +1250,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 }
 - (void)scheduleSnapAfterDrop {
     if (!_ball || !_overlay) return;
+    if (_captureHiding) return;   // v1.3.25：截图/录屏隐藏期间不要把球重新点亮
     _snapGen++; NSInteger myGen = _snapGen;
     [self clampBallFullyIntoView];
     [self persistBallPos];       // 先把「完整可见」的落点记下来（重启后原位恢复）
@@ -1248,6 +1260,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     _ball.alpha = 1.0f;          // ★ 延时期间 = 完整的悬浮图标（用户明确要的效果）
     if (_fanOpen) { _snapPending = YES; return; }   // 扇形还开着 → 等关掉再排（见 closeFan）
     _snapPending = NO;
+    if (_snapDelay >= (NSTimeInterval)kFUKeepForever) { _ball.alpha = 1.0f; return; }   // v1.3.25：常驻 = 永不吸附，一直完整显示
     NSTimeInterval d = MAX(0.0, _snapDelay);
     if (d <= 0.05) { [self doSnapToEdgeWithGen:myGen]; return; }   // 设成 0 = 立即吸附（老行为）
     __weak FUFloatingManager *ws = self;
@@ -1280,6 +1293,59 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     }];
 }
 // 球处于「半隐吸附态」时，点击先把它完整拉回屏幕内（再弹环/面板）。
+
+#pragma mark - v1.3.25：截图 / 录屏时自动收拢并隐藏（不把悬浮球和扇形拍进画面）
+// 触发源（全部靠系统通知，不轮询、不额外耗电）：
+//   ① UIApplicationUserDidTakeScreenshotNotification —— 系统截图，瞬时事件，隐藏 1.6 秒
+//   ② UIScreenCapturedDidChangeNotification —— 录屏 / 第三方局部截图会置位 isCaptured，
+//      整个期间持续隐藏，停止后再自动恢复并把悬浮按钮显示出来
+- (void)fuSetupCaptureObservers {
+    [[NSNotificationCenter defaultCenter] addObserver:self
+        selector:@selector(fuCapturedStateChanged)
+        name:UIScreenCapturedDidChangeNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+        selector:@selector(fuScreenshotTaken)
+        name:UIApplicationUserDidTakeScreenshotNotification object:nil];
+}
+- (void)fuScreenshotTaken {
+    if (!_captureHide) return;
+    [self fuBeginCaptureHide];
+    NSInteger tk = ++_captureToken;
+    __weak FUFloatingManager *ws = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        FUFloatingManager *ss = ws; if (!ss) return;
+        if (ss->_captureToken != tk) return;
+        if ([UIScreen mainScreen].captured) return;   // 还在录屏/截取中 → 交给状态回调收尾
+        [ss fuEndCaptureHide];
+    });
+}
+- (void)fuCapturedStateChanged {
+    BOOL cap = [UIScreen mainScreen].captured;
+    if (cap && _captureHide) { _captureToken++; [self fuBeginCaptureHide]; }
+    else if (!cap && _captureHiding) { _captureToken++; [self fuEndCaptureHide]; }
+}
+// 收拢扇形 + 临时藏球（悬浮球与扇形都不会出现在截图/录像里）
+- (void)fuBeginCaptureHide {
+    if (!_ball || !_overlay) return;
+    if (_fanOpen) [self closeFan];
+    if (_captureHiding) return;
+    _captureHiding = YES;
+    for (UIButton *it in _fanItems) it.alpha = 0.0f;
+    _ball.userInteractionEnabled = NO;
+    _ball.alpha = 0.0f;
+}
+// 恢复：重新显示悬浮按钮，并按「吸附延时」重新排队归位
+- (void)fuEndCaptureHide {
+    if (!_captureHiding) return;
+    _captureHiding = NO;
+    if (!_ball) return;
+    _ball.userInteractionEnabled = YES;
+    _ball.alpha = 1.0f;
+    [self restoreBallFromSnap];
+    [self scheduleSnapAfterDrop];
+}
+
 - (void)restoreBallFromSnap {
     if (!_ball) return;
     CGRect s = _overlay.bounds; CGRect f = _ball.frame;

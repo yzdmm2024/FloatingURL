@@ -28,6 +28,10 @@ static NSString * const kFUBallTitle   = @"ballTitle";  // v1.3.5 球的文字�
 static NSString * const kFUBallIcon    = @"ballIcon";   // v1.3.5 球的图标（PNG data）
 static NSString * const kFUBallColor   = @"ballColor";  // v1.3.5 球的底色 hex
 static NSString * const kFUSnapDelay   = @"snapDelay";  // v1.3.13 吸附延时秒（松手后完整图标停留时长，默认 3）
+static NSString * const kFUFanAutoHide = @"fanAutoHide"; // v1.3.21 扇形闲置多少秒自动收回（0=不自动收，默认 5）
+
+// v1.3.25：秒数滑杆档位 —— 1~kFUSecMax 秒按 1 秒步进，最右一档 = 「常驻」（永不）
+static const NSInteger kFUSecMax = 10;
 static const NSInteger kFUMaxEntries   = 48;   // v1.3.6：上限 48（三层默认 8/16/24）
 // v1.3.8：删掉 1.3.2 / 1.3.3 遗留的 kFULayer1Max / kFULayer2Max（早已不再使用，
 //           各层上限统一由「布局调节」页的 8 / 16 / 24 控制）。
@@ -1196,6 +1200,8 @@ static NSArray *FUColorPalette(void) {
 @property (nonatomic, strong) UILabel *lmode;                  // 模式说明
 @property (nonatomic, strong) UISlider *delayS;                // v1.3.13 吸附延时秒
 @property (nonatomic, strong) UILabel *ldelay;
+@property (nonatomic, strong) UISlider *fanHideS;              // v1.3.25 扇形闲置收回秒（整秒步进，最右=常驻）
+@property (nonatomic, strong) UILabel *lfanHide;
 @end
 @implementation FULayoutController
 - (CGFloat)prefFloat:(NSString *)key dft:(CGFloat)d {
@@ -1310,22 +1316,44 @@ static NSArray *FUColorPalette(void) {
     _l1s.tag = 6; _l2s.tag = 7; y += 46;
     _l3s  = [self mkSliderAt:x0 width:colW y:y min:0 max:24 val:pl3 label:@"第三层" lout:&_ll3];
     _l3s.tag = 8; y += 48;
-    // ---- v1.3.13：吸附延时（用户要求）----
-    //  松手后球先以「完整悬浮图标」停在落点，过了这个时间才自动吸附（只露一半）。
-    //  默认 3 秒，可调 0~10 秒；拖到 0 = 松手立即吸附（老行为）。
-    CGFloat pdelay = [self prefFloat:kFUSnapDelay dft:3];
-    _delayS = [self mkSliderAt:16 width:w - 32 y:y min:0 max:10 val:pdelay
-                         label:@"吸附延时 秒（松手后完整图标停留，0=立即吸附）" lout:&_ldelay];
-    _delayS.tag = 10; y += 46;
-    for (UISlider *sl in @[_ss, _sg, _span, _sc, _l1s, _l2s, _l3s, _delayS])
+    // ---- v1.3.25：两个「秒数」滑杆统一改成整秒步进，最低 1 秒，最右一档 = 常驻（永不）----
+    NSInteger dSlot = [self fuSecSlot:[self prefFloat:kFUSnapDelay dft:3] keep:999];
+    _delayS = [self mkSliderAt:16 width:w - 32 y:y min:1 max:(kFUSecMax + 1) val:dSlot
+                         label:@"吸附延时（松手后完整图标停留）" lout:&_ldelay];
+    _delayS.tag = 10; _ldelay.text = [self fuSecText:@"吸附延时（松手后完整图标停留）" slot:dSlot keepTitle:@"常驻（永不吸附）"]; y += 46;
+    NSInteger fSlot = [self fuSecSlot:[self prefFloat:kFUFanAutoHide dft:5] keep:0];
+    _fanHideS = [self mkSliderAt:16 width:w - 32 y:y min:1 max:(kFUSecMax + 1) val:fSlot
+                           label:@"扇形闲置自动收回" lout:&_lfanHide];
+    _fanHideS.tag = 11; _lfanHide.text = [self fuSecText:@"扇形闲置自动收回" slot:fSlot keepTitle:@"常驻（不自动收回）"]; y += 46;
+    for (UISlider *sl in @[_ss, _sg, _span, _sc, _l1s, _l2s, _l3s, _delayS, _fanHideS])
         [sl addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
     UILabel *foot = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 28)];
     foot.numberOfLines = 0; foot.font = [UIFont systemFontOfSize:10];
     foot.textColor = [UIColor tertiaryLabelColor];
-    foot.text = @"每层数量 0 = 该层按弧长自动排。吸附延时 = 松手后球先保持完整体，过这么多秒才自动吸附。改动立即生效，球的位置也会被记住。";
+    foot.text = @"每层数量 0 = 该层按弧长自动排。下面两根滑杆都按 1 秒步进，最低 1 秒，拖到最右显示「常驻」：吸附延时常驻 = 球永远保持完整图标不吸附；扇形闲置收回常驻 = 扇形展开后不会自动收回来。改动立即生效，球的位置也会被记住。";
     [_scroll addSubview:foot]; y += 30;
     _scroll.contentSize = CGSizeMake(w, y);
 }
+// v1.3.25：存储值 → 滑块档位（1..kFUSecMax 秒，kFUSecMax+1 = 常驻）
+- (NSInteger)fuSecSlot:(CGFloat)stored keep:(CGFloat)keepValue {
+    if (stored >= keepValue && keepValue > 0) return kFUSecMax + 1;
+    if (keepValue <= 0 && stored <= 0.5f) return kFUSecMax + 1;   // 扇形收回：0 = 不自动收回
+    NSInteger v = (NSInteger)lroundf(stored);
+    if (v < 1) v = 1;
+    if (v > kFUSecMax) v = kFUSecMax;
+    return v;
+}
+// v1.3.25：滑块档位 → 存储值（最右一档写回「常驻」哨兵）
+- (CGFloat)fuSecStored:(NSInteger)slot keep:(CGFloat)keepValue {
+    if (slot >= kFUSecMax + 1) return keepValue;
+    return (CGFloat)MAX(1, slot);
+}
+// v1.3.25：显示文案（常驻档不显示数字）
+- (NSString *)fuSecText:(NSString *)name slot:(NSInteger)slot keepTitle:(NSString *)keepTitle {
+    if (slot >= kFUSecMax + 1) return [NSString stringWithFormat:@"%@ %@", name, keepTitle];
+    return [NSString stringWithFormat:@"%@ %ld 秒", name, (long)MAX(1, slot)];
+}
+
 // v1.3.8：两列紧凑版滑杆（标签 15pt + 滑杆 30pt）
 - (UISlider *)mkSliderAt:(CGFloat)x width:(CGFloat)cw y:(CGFloat)fy min:(CGFloat)mn max:(CGFloat)mx
                      val:(CGFloat)v label:(NSString *)lab lout:(UILabel * __strong *)lout {
@@ -1366,7 +1394,22 @@ static NSArray *FUColorPalette(void) {
         case 6: key = kFULayer1Count; l = _ll1; name = @"第一层"; _preview.layer1 = (NSInteger)v; break;
         case 7: key = kFULayer2Count; l = _ll2; name = @"第二层"; _preview.layer2 = (NSInteger)v; break;
         case 8: key = kFULayer3Count; l = _ll3; name = @"第三层"; _preview.layer3 = (NSInteger)v; break;
-        case 10: key = kFUSnapDelay; l = _ldelay; name = @"吸附延时 秒（完整图标停留）"; break;   // v1.3.13
+        case 10: {   // v1.3.25：整秒步进 + 常驻
+            NSInteger slot = [self fuSecSlot:v keep:999];
+            if (v >= kFUSecMax + 1) slot = kFUSecMax + 1;
+            sl.value = slot; v = slot;
+            [self writeFloat:kFUSnapDelay value:[self fuSecStored:slot keep:999]];
+            _ldelay.text = [self fuSecText:@"吸附延时（松手后完整图标停留）" slot:slot keepTitle:@"常驻（永不吸附）"];
+            return;
+        }
+        case 11: {   // v1.3.25：扇形闲置收回，整秒步进 + 常驻
+            NSInteger slot = [self fuSecSlot:v keep:0];
+            if (v >= kFUSecMax + 1) slot = kFUSecMax + 1;
+            sl.value = slot;
+            [self writeFloat:kFUFanAutoHide value:[self fuSecStored:slot keep:0]];
+            _lfanHide.text = [self fuSecText:@"扇形闲置自动收回" slot:slot keepTitle:@"常驻（不自动收回）"];
+            return;
+        }
     }
     if (!key) return;
     l.text = [NSString stringWithFormat:@"%@ %.0f", name, v];
@@ -1381,7 +1424,8 @@ static NSArray *FUColorPalette(void) {
     _ls.text = @"图标大小 40"; _lg.text = @"图标间隔 56";
     _lspan.text = @"扇形角度° 180"; _lsc.text = @"整体距离% 100";
     _ll1.text = @"第一层 8"; _ll2.text = @"第二层 16"; _ll3.text = @"第三层 24";
-    _delayS.value = 3; _ldelay.text = @"吸附延时 秒（完整图标停留） 3";   // v1.3.13
+    _delayS.value = 3; _ldelay.text = @"吸附延时（松手后完整图标停留） 3 秒";    // v1.3.25
+    _fanHideS.value = 5; _lfanHide.text = @"扇形闲置自动收回 5 秒";
     _preview.side = 0; _preview.iconSize = 40; _preview.iconGap = 56;
     _preview.span = 180; _preview.scale = 100;
     _preview.layer1 = 8; _preview.layer2 = 16; _preview.layer3 = 24;
@@ -1390,6 +1434,7 @@ static NSArray *FUColorPalette(void) {
     [self writeFloat:kFUFanSpan value:180]; [self writeFloat:kFUFanScale value:100];
     [self writeInt:kFULayer1Count value:8]; [self writeInt:kFULayer2Count value:16]; [self writeInt:kFULayer3Count value:24];
     [self writeFloat:kFUSnapDelay value:3];   // v1.3.13：吸附延时恢复默认 3 秒
+    [self writeFloat:kFUFanAutoHide value:5]; // v1.3.25：扇形闲置收回恢复默认 5 秒
     [_preview refresh];
 }
 @end
