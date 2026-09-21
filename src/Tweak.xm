@@ -683,30 +683,40 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 // v1.3.3：直接读取 SpringBoard 当前前台 App（最可靠，不依赖各 App 心跳上报）。
 // 之前只靠各 App 发 Darwin 心跳，部分 App（如奥维地图）因注入/时机问题不上报 → 黑名单漏判。
 - (NSString *)fuFrontmostBid {
-    NSString *bid = nil;
-    if (@available(iOS 13.0, *)) {
-        UIApplication *app = UIApplication.sharedApplication;
-        SEL sel = NSSelectorFromString(@"_frontmostApplication");
-        if ([app respondsToSelector:sel]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            id front = [app performSelector:sel];
-#pragma clang diagnostic pop
-            if (front) bid = [front valueForKey:@"bundleIdentifier"];
-        }
-    }
-    if (!bid.length) {
+    // v1.3.4 热修：全程 respondsToSelector 守卫 + @try/@catch 兜底。
+    // 任何私有 API 缺失 / KVC 异常都只返回 nil，绝不抛异常——否则会带崩 SpringBoard → 安全模式。
+    @try {
+        NSString *bid = nil;
+        // 首选：SBApplicationController（iOS 13+ 稳定存在），取前台 App 的 bundle id。
         Class ctrl = NSClassFromString(@"SBApplicationController");
-        if (ctrl) {
-            id shared = [ctrl performSelector:NSSelectorFromString(@"sharedInstance")];
-            if (shared) {
-                id front = [shared performSelector:NSSelectorFromString(@"frontmostApplication")];
-                if (front) bid = [front valueForKey:@"bundleIdentifier"];
+        SEL sharedSel = NSSelectorFromString(@"sharedInstance");
+        if (ctrl && [ctrl respondsToSelector:sharedSel]) {
+            id shared = [ctrl performSelector:sharedSel];
+            SEL fsel = NSSelectorFromString(@"frontmostApplication");
+            if (shared && [shared respondsToSelector:fsel]) {
+                id front = [shared performSelector:fsel];
+                if (front && [front respondsToSelector:@selector(bundleIdentifier)]) {
+                    bid = [front bundleIdentifier];
+                }
             }
         }
+        // 兜底：UIApplication 私有 API（部分环境 SBApplicationController 取不到时再试它）。
+        if (!bid.length) {
+            UIApplication *app = UIApplication.sharedApplication;
+            SEL sel = NSSelectorFromString(@"_frontmostApplication");
+            if (app && [app respondsToSelector:sel]) {
+                id front = [app performSelector:sel];
+                if (front && [front respondsToSelector:@selector(bundleIdentifier)]) {
+                    bid = [front bundleIdentifier];
+                }
+            }
+        }
+        if (bid && [bid isEqualToString:@"com.apple.springboard"]) bid = nil;   // 桌面自身不算“前台 App”
+        return bid;
+    } @catch (NSException *e) {
+        NSLog(@"[FloatingURL] fuFrontmostBid 异常（已忽略，避免崩溃）: %@", e);
+        return nil;
     }
-    if ([bid isEqualToString:@"com.apple.springboard"]) bid = nil;   // 桌面自身不算“前台 App”
-    return bid;
 }
 - (void)loadEntries {
     CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUURLs, (__bridge CFStringRef)kFUSuite);
@@ -801,23 +811,28 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 }
 - (void)onBecomeActive {
     if (!_didSetup) return;
-    // v1.3.3：静默模式 → 桌面球彻底休眠，跳过前台检测与偏好重读（最省电）
-    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"]) {
-        [self applyVisibility]; return;
-    }
-    [self reloadPrefs];
-    if (fuIsSpringBoard()) {
-        // v1.3.3：用 SpringBoard 直读前台 App 作为权威来源（修复奥维地图等漏判）。
-        NSString *fb = [self fuFrontmostBid];
-        if (fb.length) { _frontBid = fb; _frontBidTs = CFAbsoluteTimeGetCurrent(); }
-        else if (_frontBid && (CFAbsoluteTimeGetCurrent() - _frontBidTs) > 1.0) {
-            _frontBid = nil; _frontBidTs = 0;
+    @try {
+        // v1.3.3：静默模式 → 桌面球彻底休眠，跳过前台检测与偏好重读（最省电）
+        if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"]) {
+            [self applyVisibility]; return;
         }
-    } else {
-        [self fuSyncFrontWatches];   // 非桌面进程：保留心跳兜底
-        if (_frontBid && (CFAbsoluteTimeGetCurrent() - _frontBidTs) > 3.0) { _frontBid = nil; _frontBidTs = 0; }
+        [self reloadPrefs];
+        if (fuIsSpringBoard()) {
+            // v1.3.3：用 SpringBoard 直读前台 App 作为权威来源（修复奥维地图等漏判）。
+            NSString *fb = [self fuFrontmostBid];
+            if (fb.length) { _frontBid = fb; _frontBidTs = CFAbsoluteTimeGetCurrent(); }
+            else if (_frontBid && (CFAbsoluteTimeGetCurrent() - _frontBidTs) > 1.0) {
+                _frontBid = nil; _frontBidTs = 0;
+            }
+        } else {
+            [self fuSyncFrontWatches];   // 非桌面进程：保留心跳兜底
+            if (_frontBid && (CFAbsoluteTimeGetCurrent() - _frontBidTs) > 3.0) { _frontBid = nil; _frontBidTs = 0; }
+        }
+        [self applyVisibility];
+    } @catch (NSException *e) {
+        // v1.3.4：任何意外都不该带崩 SpringBoard（否则循环进安全模式）。记日志后静默退出本次重判。
+        NSLog(@"[FloatingURL] onBecomeActive 异常（已忽略）: %@", e);
     }
-    [self applyVisibility];
 }
 // 把 key 还给 App 的主窗口（level Normal）
 - (void)rekeyApp {
