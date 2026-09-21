@@ -788,6 +788,7 @@ static NSArray *FUColorPalette(void) {
         @{@"t":@"㉔ 直播监控", @"c":@"监控摄像头/直播流的 http 网页地址", @"d":@"点开直接在 Safari 里打开监控画面，不用再挂着浮窗"},
         @{@"t":@"㉕ 查快递", @"c":@"快递查询网页 + 运单号参数", @"d":@"常用查件页设成快捷入口，收件高峰一键查"},
         @{@"t":@"㉖ 直达设置某一页", @"c":@"prefs:root=WIFI", @"d":@"填 prefs:root=页面ID 直接跳到「设置」里某一页（例：WIFI / Bluetooth / Battery / General）。第三方插件也走这个：ID 就是它设置面板的标识 —— PreferenceBundle 的 .bundle 目录名、或 PreferenceLoader 的 .plist 文件名，去掉后缀。ID 写错或该页不存在时，只会停在设置首页，不会报错。"},
+        @{@"t":@"㉘ 图标自动分左右", @"c":@"上传的自定义图标会自动「跟边」", @"d":@"球在屏幕左半边，图标主体就显示在左边；球在右半边，主体显示在右边（主体偏一侧的图会自动水平镜像）。判不出来居中的图不翻。开关在「悬浮球外观」里，默认开。"},
         @{@"t":@"㉗ 直达本插件设置", @"c":@"prefs:root=FloatingURLPrefs", @"d":@"本插件设置页 ID 就是 FloatingURLPrefs，填这个可一键跳到「悬浮URL」设置页。同理 prefs:root=snapper4_Freeze 这类写法要生效，前提是设备上真装了那个插件、且它的设置面板名字与冒号后的 ID 完全一致。"},
     ];
     _tv = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleGrouped];
