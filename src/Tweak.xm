@@ -68,6 +68,7 @@ static NSString * const kFUSide        = @"side";       // 球停靠边：0=右(
 static NSString * const kFUIconSize    = @"iconSize";   // 快捷图标尺寸 pt
 static NSString * const kFUIconGap     = @"iconGap";    // 图标/圈层间隔 pt
 static NSString * const kFUFanSpan     = @"fanSpan";    // v1.3.2 扇形角度（60~180°，默认 180）
+static NSString * const kFUFanAutoHide = @"fanAutoHide"; // v1.3.21：扇形展开后闲置多少秒自动收回（0=不自动收，默认 5）
 static NSString * const kFUFanScale    = @"fanScale";   // v1.3.2 整体距离（%，默认 100）
 static NSString * const kFULayer1Count = @"layer1";     // v1.3.3：第一层入口数（0=自动）
 static NSString * const kFULayer2Count = @"layer2";     // v1.3.3：第二层入口数（0=自动）
@@ -81,16 +82,6 @@ static NSString * const kFUBallIcon    = @"ballIcon";   // v1.3.5：球的图标
 static NSString * const kFUBallColor   = @"ballColor";  // v1.3.5：球的底色 hex（无图标时生效）
 static NSString * const kFUWebMode     = @"webMode";    // v1.3.5：YES=内置面板打开网页（v1.3.13 起桌面不再用它，见 triggerEntry）
 static NSString * const kFUSnapDelay   = @"snapDelay";  // v1.3.13：松手后「完整悬浮图标」停留几秒再自动吸附（默认 3，0=立即）
-// v1.3.20：运行模式。0=全局模式（默认，球只在桌面，网页由 App 内置浏览器/外部浏览器打开）
-//          1=单App模式（球注入到每个 App 进程里，网页由 App 渲染 → 内置小窗重新可用，即 1.2.1 的形态）
-static NSString * const kFUMode = @"runMode";
-// v1.3.20：桌面 → 各 App 进程的「模式心跳」。单App模式下桌面每 3 秒广播一次，App 收到才显示自己的球。
-// 为什么用达尔文通知而不是「读同一个配置文件」：真机实测沙盒 App 既读不到偏好、也读不到进程外的文件，
-// 唯独跨进程通知不受沙盒限制（现有黑名单心跳就是靠它工作的）。
-static NSString * const kFUSingleAppBeacon = @"com.yzdmm.floatingurl/singleAppBeacon";
-// v1.3.20：桌面把配置快照写到这里，App 端尽力读取（读不到也不致命：没有快捷入口时仍可手输网址开小窗）。
-static NSString * const kFUCfgSnapshot = @"/var/mobile/Media/FloatingURL_config.plist";
-static NSString * const kFUCfgFile     = @"FloatingURL_config.plist";
 
 static const NSInteger kFUMaxEntries = 48;   // v1.3.6：上限 48（三层 8 + 16 + 24）
 static const NSInteger kFULayer1Max  = 4;    // 第一层（内环）最多 4 个
@@ -364,7 +355,7 @@ static void fuStartAppHeartbeat(NSString *bid) {
     if (cg) CGImageRelease(cg);
     NSData *out = nil;
     if (sqImg) {
-        CGFloat max = 120.0;
+        CGFloat max = 256.0;   // v1.3.21：120 → 256，Retina 屏上图标不再发糊
         CGFloat s = MIN(1.0, max / MAX(sqImg.size.width, sqImg.size.height));
         CGSize ts = CGSizeMake(sqImg.size.width * s, sqImg.size.height * s);
         UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:ts];
@@ -652,6 +643,8 @@ static void fuStartAppHeartbeat(NSString *bid) {
 - (void)fuOpenViaWorkspace:(NSURL *)u;       // v1.3.13：LSApplicationWorkspace 最后兜底
 - (NSArray *)fuWebMailboxPathsForBid:(NSString *)bid;   // v1.3.13：可写的投递信箱列表
 - (NSArray *)fuFanPointArray;                           // v1.3.13：扇形点位（openFan 与拖动重排共用同一套算法）
+- (void)fuScheduleFanAutoHide;                          // v1.3.21：重排「闲置自动收回」倒计时
+- (void)fuCancelFanAutoHide;                            // v1.3.21：取消空闲收回倒计时
 - (void)fuRelayoutFanInstant;                           // v1.3.13：拖动球时围绕球实时重排扇形
 - (void)cancelPendingSnap;                              // v1.3.13：取消「待吸附」
 - (void)scheduleSnapAfterDrop;                          // v1.3.13：松手后按「吸附延时」归位
@@ -660,16 +653,7 @@ static void fuStartAppHeartbeat(NSString *bid) {
 // v1.3.18：网页打开「先小窗、失败兜底」三件套（前向声明，供 triggerEntry / urlGo / 导航代理调用）
 - (void)openWebURL:(NSString *)norm;
 - (void)scheduleWebWatchdog:(NSInteger)tok url:(NSString *)u;
-- (void)fallbackWebToExternal:(NSString *)u;
-// v1.3.20：单App模式（球注入每个 App 进程 → 网页由 App 渲染，内置小窗重新可用）
-- (void)fuAppModeStart;            // App 进程：监听桌面的模式心跳
-- (void)fuNoteBeacon;              // App 进程：收到心跳
-- (void)fuAppModeTick;             // App 进程：按心跳新鲜度开关本 App 里的球
-- (void)applyAppModeVisibility;    // App 进程：可见性判定（不依赖偏好，只看心跳 + 前台）
-- (void)fuBeaconUpdate;            // 桌面：按模式启停心跳广播
-- (void)fuWriteConfigSnapshot;     // 桌面：把配置写成快照文件（App 端尽力读取）
-- (BOOL)fuLoadConfigSnapshot;      // App：读取桌面写的配置快照
-@property (nonatomic, strong) UIView      *schemeBox;     // 非网页入口的简单输入框容器
+- (void)fallbackWebToExternal:(NSString *)u;@property (nonatomic, strong) UIView      *schemeBox;     // 非网页入口的简单输入框容器
 @property (nonatomic, strong) UITextField *schemeField;
 @property (nonatomic, strong) UIButton    *schemeOpenBtn;
 @end
@@ -723,19 +707,14 @@ static void fuFrontGoneCb(CFNotificationCenterRef center, void *observer,
     BOOL                  _webLoadedOK;      // 本次加载已成功完成
     BOOL                  _webStarted;       // 本次加载连"开始导航"回调都没收到（= 结构性失败的特征）
     BOOL                  _desktopWebBroken; // 本会话已确认桌面小窗渲染不了 → 之后直接外部浏览器
-    // ---- v1.3.20 单App模式 ----
-    NSInteger             _runMode;          // 0=全局模式（默认） 1=单App模式
-    NSTimer              *_beaconTimer;      // 桌面：广播「单App模式」心跳的定时器
-    CFTimeInterval        _lastBeacon;       // App：最近一次收到心跳的时刻
-    BOOL                  _appModeOn;        // App：本进程已按单App模式建过 UI
-    BOOL                  _appCfgLoaded;     // App：是否成功读到桌面的配置快照
-    NSString             *_lastCfgSig;       // 桌面：上次写出的快照签名（内容没变就不重复写盘）
-
     BOOL                  _expanded;
     BOOL                  _didSetup;
     BOOL                  _enabled;
     BOOL                  _barAtBottom;
     BOOL                  _fanOpen;
+    // v1.3.21：扇形闲置自动收回（设置里可调秒数，0=永不自动收）
+    NSTimer              *_fanHideTimer;
+    CGFloat               _fanAutoHide;
     BOOL                  _tapConfirm;  // YES=点扇形图标先弹确认框(输入框+打开按钮)，NO=一点就直接触发
     BOOL                  _applyingRemote;
 
@@ -797,6 +776,7 @@ static void fuFrontGoneCb(CFNotificationCenterRef center, void *observer,
         _winW = 340; _winH = 480; _expanded = NO; _didSetup = NO; _fanOpen = NO;
         _side = 0; _iconSize = 40.0f; _iconGap = 56.0f;   // v1.3.1：球默认停靠右侧
         _fanSpan = 180.0f; _fanScale = 100.0f;            // v1.3.2 扇形角度 / 整体距离
+        _fanAutoHide = 5.0f;                              // v1.3.21：默认闲置 5 秒自动收回扇形
         _snapMode = 0; _webMode = 0; _ballTitle = @"URL";  // v1.3.5 默认：自动吸附 + 系统浏览器
         _snapDelay = 3.0;                                  // v1.3.13：默认吸附延时 3 秒（松手后先给完整图标）
         _layer1 = 8; _layer2 = 16; _layer3 = 24;           // v1.3.6：三层默认数量 8/16/24（合计 48）
@@ -897,6 +877,15 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     CFPropertyListRef fscRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUFanScale, (__bridge CFStringRef)kFUSuite);
     if (fscRef && CFGetTypeID(fscRef) == CFNumberGetTypeID()) { _fanScale = [(__bridge NSNumber *)fscRef floatValue]; CFRelease(fscRef); }
     if (_fanSpan  < 60.0f) _fanSpan = 60.0f;  if (_fanSpan  > 180.0f) _fanSpan = 180.0f;
+    // v1.3.21：扇形闲置多久自动收回（秒）。0 = 永不自动收回。
+    {
+        CFPropertyListRef ahRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUFanAutoHide, (__bridge CFStringRef)kFUSuite);
+        if (ahRef && (CFGetTypeID(ahRef) == CFNumberGetTypeID())) _fanAutoHide = [(__bridge NSNumber *)ahRef doubleValue];
+        else _fanAutoHide = 5.0;
+        if (ahRef) CFRelease(ahRef);
+        if (_fanAutoHide < 0) _fanAutoHide = 0;
+        if (_fanAutoHide > 60.0) _fanAutoHide = 60.0;
+    }
     if (_fanScale < 60.0f) _fanScale = 60.0f; if (_fanScale > 160.0f) _fanScale = 160.0f;
     // v1.3.3：每层数量（0=自动）
     CFPropertyListRef l1 = CFPreferencesCopyAppValue((__bridge CFStringRef)kFULayer1Count, (__bridge CFStringRef)kFUSuite);
@@ -923,13 +912,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
         _snapDelay = [(__bridge NSNumber *)sdlyRef doubleValue];
         CFRelease(sdlyRef);
     } else if (sdlyRef) { CFRelease(sdlyRef); }
-    if (_snapDelay < 0) _snapDelay = 0; if (_snapDelay > 15) _snapDelay = 15;
-    // v1.3.20：运行模式（0=全局 1=单App）。桌面进程读得到；App 进程读不到（沙盒），由心跳决定。
-    CFPropertyListRef mdRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUMode, (__bridge CFStringRef)kFUSuite);
-    if (mdRef && CFGetTypeID(mdRef) == CFNumberGetTypeID()) { _runMode = [(__bridge NSNumber *)mdRef integerValue]; CFRelease(mdRef); }
-    else if (mdRef) { CFRelease(mdRef); }
-    if (_runMode != 1) _runMode = 0;
-    // v1.3.9 修 05（真机实测确认的根因）：键被删掉时 CFPreferencesCopyAppValue 返回 NULL，
+    if (_snapDelay < 0) _snapDelay = 0; if (_snapDelay > 15) _snapDelay = 15;    // v1.3.9 修 05（真机实测确认的根因）：键被删掉时 CFPreferencesCopyAppValue 返回 NULL，
     // 而旧代码两个分支都不走 → _ballIcon / _ballColor / _ballTitle **保持上一次的旧值**，
     // 于是「设置里删了照片，球上照片还在」。这里必须在读到 NULL 时明确清空。
     CFPropertyListRef btRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallTitle, (__bridge CFStringRef)kFUSuite);
@@ -943,17 +926,11 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     if (bcRef && CFGetTypeID(bcRef) == CFStringGetTypeID()) { _ballColor = (__bridge_transfer NSString *)bcRef; }
     else { if (bcRef) CFRelease(bcRef); _ballColor = nil; }
     NSInteger oldEntryCount = (NSInteger)_entries.count;
-    [self loadEntries];
-    // v1.3.20：App 进程读不到偏好 → 改读桌面写的配置快照（拿到就有完整快捷入口，拿不到也不致命）。
-    if (!fuIsSpringBoard()) _appCfgLoaded = [self fuLoadConfigSnapshot];
-    if (_didSetup) {
+    [self loadEntries];    if (_didSetup) {
         [self applyBallAppearance];   // 设置里改了外观 → 立即生效
         // v1.3.13：扇形正开着时新增/删除了入口 → 立刻重排，修「添加了快捷 URL 但扇形里不显示」
         if (_fanOpen && (NSInteger)_entries.count != oldEntryCount) [self fuRelayoutFanInstant];
-    }
-    // v1.3.20：桌面负责产出快照（只在单App模式下写，内容没变不重复写盘）。
-    if (fuIsSpringBoard()) [self fuWriteConfigSnapshot];
-}
+    }}
 #pragma mark - v1.3.2 黑名单（前台 App 心跳驱动）
 - (NSArray *)fuBlacklist {
     CFPropertyListRef arr = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUEnabledApps, (__bridge CFStringRef)kFUSuite);
@@ -1137,7 +1114,6 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
             [self applyVisibility]; return;
         }
         [self reloadPrefs];
-        [self fuBeaconUpdate];   // v1.3.20：单App模式下由桌面每 3 秒向各 App 广播一次模式心跳
         if (fuIsSpringBoard()) {
             // v1.3.3：用 SpringBoard 直读前台 App 作为权威来源（修复奥维地图等漏判）。
             NSString *fb = [self fuFrontmostBid];
@@ -1425,12 +1401,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     if (_fanOpen)  { [self closeFan]; return; }
     // v1.3.5 修 06：一个入口都没有（用户把快捷 URL 删光了）→ 什么都不做，
     // 不能再弹出一个默认网页（那既莫名又打不开）。
-    if (_entries.count == 0) {
-        // v1.3.20：单App模式下就算没有快捷入口，点球也打开内置小窗（可在里面粘贴/输入网址），
-        // 因为 App 进程里的网页是按最初版本那样能正常渲染的。
-        if (!fuIsSpringBoard()) { [self expand]; return; }
-        return;
-    }
+    if (_entries.count == 0) return;
     // v1.3.8 修 07：只有一个入口 → 展开扇形毫无意义（就一个图标还占满屏），直接触发它。
     if (_entries.count == 1) {
         [self triggerEntry:_entries[0]];
@@ -1658,7 +1629,21 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     }
     // v1.3.10：朝向回归「按屏幕中心线分左右」—— 球在左→扇形朝右、在右→朝左，始终围绕悬浮球。
     // （1.3.8 的「球心指向屏幕中心」让球在四角/上下边时扇形乱指，真机反馈：除角落外都应围绕球。）
-    CGFloat centerA = [self fuBallSide] ? 0.0f : 180.0f;
+    // v1.3.21：朝向改为「按球所在的区域」决定——除了左/右边这首尾两种情况，四个角落也单独处理：
+    //   贴左边（非角落）→ 朝右(0°)；贴右边（非角落）→ 朝左(180°)【保留 1.3.10 的行为】
+    //   左上角 → 沿对角线朝右下(45°)；右上角 → 朝左下(135°)
+    //   左下角 → 沿对角线朝右上(-45°)；右下角 → 朝左上(-135°)
+    //   这样球在角落时扇形是「从角落向屏幕里散开」，不会被两条边各切掉一大半。
+    CGFloat csx = (sc.size.width  > 0) ? (c.x / sc.size.width)  : 0.5f;
+    CGFloat csy = (sc.size.height > 0) ? (c.y / sc.size.height) : 0.5f;
+    BOOL leftZone  = (csx < 0.34f), rightZone = (csx > 0.66f);
+    BOOL topZone   = (csy < 0.34f), botZone   = (csy > 0.66f);
+    CGFloat centerA;
+    if      (topZone && leftZone)  centerA =  45.0f;    // 左上 → 右下
+    else if (topZone && rightZone) centerA = 135.0f;    // 右上 → 左下
+    else if (botZone && leftZone)  centerA = -45.0f;    // 左下 → 右上
+    else if (botZone && rightZone) centerA = -135.0f;   // 右下 → 左上
+    else                           centerA = [self fuBallSide] ? 0.0f : 180.0f;   // 只在左/右边 → 水平朝内
     // v1.3.8 修 02：角度自适应——从用户设定角度起逐档收缩，直到所有图标都在屏内；
     // （收缩会让同层弧距变小 → 一旦会挤到一起就停止收缩，改由下方「整体平移」兜底。）
     CGFloat span = [self fuFittingSpanForCenter:centerA radii:R caps:caps icon:isz margin:6.0f maxSpan:spanMax];
@@ -1711,6 +1696,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 - (void)fuRelayoutFanInstant {
     if (!_fanOpen || !_ball || !_overlay) return;
     [self restoreBallFromSnap];
+    [self fuScheduleFanAutoHide];   // v1.3.21：拖球 = 还在操作，重新计时
     NSArray *pts = [self fuFanPointArray];
     if (pts.count != _fanItems.count) {     // 条目数变了（刚加/删了入口）→ 整组重开
         [self closeFanItemsAnimated:NO];
@@ -1765,6 +1751,22 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
                                        animations:^{ it.alpha = 1.0f; it.transform = CGAffineTransformIdentity; }
                                        completion:nil];
     }
+    [self fuScheduleFanAutoHide];   // v1.3.21：开始「闲置自动收回」倒计时
+}
+// v1.3.21：扇形展开后闲置 N 秒自动收回；拖动/点到入口/再点球收拢都会重排或取消倒计时。
+- (void)fuCancelFanAutoHide {
+    if (_fanHideTimer) { [_fanHideTimer invalidate]; _fanHideTimer = nil; }
+}
+- (void)fuScheduleFanAutoHide {
+    [self fuCancelFanAutoHide];
+    if (!_fanOpen || _expanded || _fanAutoHide < 0.5) return;   // 0 秒 = 永不自动收
+    __weak FUFloatingManager *ws = self;
+    _fanHideTimer = [NSTimer scheduledTimerWithTimeInterval:_fanAutoHide repeats:NO block:^(NSTimer *t){
+        FUFloatingManager *ss = ws; if (!ss) return;
+        if (!ss->_fanOpen) return;
+        if (ss->_expanded || ss->_draggingBall) { [ss fuScheduleFanAutoHide]; return; }  // 正在用 → 再给一轮
+        [ss closeFan];   // 收拢 → 球按「吸附延时」归位到半透明待机，恢复原状
+    }];
 }
 - (UIButton *)buildFanItem:(NSDictionary *)entry index:(NSInteger)idx size:(CGFloat)isz {
     UIButton *it = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -1783,17 +1785,37 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
         UIColor *bg = [self fuColorFromHex:entry[kFUEntryColor]];
         it.backgroundColor = bg ?: [UIColor colorWithRed:0.20f green:0.52f blue:0.90f alpha:0.92f];
     }
-    UILabel *lab = [[UILabel alloc] initWithFrame:it.bounds];
-    lab.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    lab.textAlignment = NSTextAlignmentCenter; lab.textColor = [UIColor whiteColor];
     NSString *ch = entry[kFUEntryChar] ?: @"";   // 现可存 2 汉字 / 3 字母
-    lab.numberOfLines = 0;
-    CGFloat fs = isz * 0.42f;
-    if (ch.length >= 3) fs = isz * 0.26f; else if (ch.length == 2) fs = isz * 0.32f;
-    lab.font = [UIFont boldSystemFontOfSize:fs];
-    lab.text = ch;
-    if (img) lab.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
-    [it addSubview:lab];
+    // v1.3.21 修「上传的照片灰蒙蒙」：以前不管是照片还是纯色图标，都盖一层占满整个圆形的
+    // 半透明黑底（alpha 0.45）用来衬名称 —— 没填名称时也照盖，于是每张自定义照片都被蒙成灰色。
+    // 现在改成：① 没名称就不加任何蒙层（照片原样显示）；
+    //           ② 有名称时只在底部留一条窄标题带，不再糊住整张图；
+    //           ③ 只有无照片的纯色图标才保留整块居中文字（那种情况本来就需要衬底）。
+    UILabel *lab = [[UILabel alloc] initWithFrame:it.bounds];
+    if (img) {
+        if (!ch.length) {
+            // 纯照片、无名称 → 一点都不遮
+        } else {
+            CGFloat h = MAX(12.0f, isz * 0.34f);
+            lab.frame = CGRectMake(0, it.bounds.size.height - h, it.bounds.size.width, h);
+            lab.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
+            lab.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
+            lab.textAlignment = NSTextAlignmentCenter; lab.textColor = [UIColor whiteColor];
+            lab.numberOfLines = 1;
+            lab.font = [UIFont boldSystemFontOfSize:MAX(8.0f, h * 0.62f)];
+            lab.text = ch;
+            [it addSubview:lab];
+        }
+    } else {
+        lab.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        lab.textAlignment = NSTextAlignmentCenter; lab.textColor = [UIColor whiteColor];
+        lab.numberOfLines = 0;
+        CGFloat fs = isz * 0.42f;
+        if (ch.length >= 3) fs = isz * 0.26f; else if (ch.length == 2) fs = isz * 0.32f;
+        lab.font = [UIFont boldSystemFontOfSize:fs];
+        lab.text = ch;
+        [it addSubview:lab];
+    }
     [it addTarget:self action:@selector(fanItemTapped:) forControlEvents:UIControlEventTouchUpInside];
     UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
         initWithTarget:self action:@selector(fanItemLongPressed:)];
@@ -1891,6 +1913,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     [_overlayRoot presentViewController:nc animated:YES completion:nil];
 }
 - (void)closeFan {
+    [self fuCancelFanAutoHide];   // v1.3.21：手动/触发性收拢时取消倒计时
     _fanOpen = NO; [self closeFanItemsAnimated:YES];
     [self setInteractive:NO];   // 关闭扇形 → 还给 App
     // v1.3.13：关掉扇形后按「吸附延时」归位 —— 先完整可见地停 N 秒（默认 3），再到点吸附/固定。
@@ -2176,156 +2199,13 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     }
 }
 
-#pragma mark - v1.3.20 单App模式（球注入每个 App 进程 → 网页由 App 渲染）
-// 桌面：单App模式 + 总开关开着 → 每 3 秒广播一次心跳；否则立刻停播（App 端 8 秒后自动收球）。
-- (void)fuBeaconUpdate {
-    if (!fuIsSpringBoard()) return;
-    @try {
-        BOOL on = (_runMode == 1 && _enabled &&
-                   ![[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"]);
-        if (on) {
-            if (!_beaconTimer) {
-                _beaconTimer = [NSTimer timerWithTimeInterval:3.0 repeats:YES block:^(NSTimer *t){
-                    notify_post(kFUSingleAppBeacon.UTF8String);
-                }];
-                [[NSRunLoop mainRunLoop] addTimer:_beaconTimer forMode:NSRunLoopCommonModes];
-            }
-            notify_post(kFUSingleAppBeacon.UTF8String);
-        } else if (_beaconTimer) {
-            [_beaconTimer invalidate]; _beaconTimer = nil;
-        }
-    } @catch (NSException *e) { NSLog(@"[FloatingURL] 模式心跳异常（已忽略）: %@", e); }
-}
-// 桌面：把配置写成快照，供 App 进程读取（App 沙盒读不到偏好，这是唯一可能的交接方式）。
-- (void)fuWriteConfigSnapshot {
-    if (!fuIsSpringBoard() || _runMode != 1) return;
-    @try {
-        NSMutableDictionary *d = [NSMutableDictionary dictionary];
-        d[@"urls"]      = _entries ?: @[];
-        d[@"side"]      = @(_side);
-        d[@"iconSize"]  = @(_iconSize);
-        d[@"iconGap"]   = @(_iconGap);
-        d[@"fanSpan"]   = @(_fanSpan);
-        d[@"fanScale"]  = @(_fanScale);
-        d[@"layer1"]    = @(_layer1);
-        d[@"layer2"]    = @(_layer2);
-        d[@"layer3"]    = @(_layer3);
-        d[@"snapMode"]  = @(_snapMode);
-        d[@"snapDelay"] = @(_snapDelay);
-        d[@"winW"]      = @(_winW);
-        d[@"winH"]      = @(_winH);
-        d[@"ballTitle"] = _ballTitle ?: @"";
-        d[@"ballColor"] = _ballColor ?: @"";
-        d[@"ballIcon"]  = _ballIcon ?: [NSData data];
-        NSString *sig = [NSString stringWithFormat:@"%@", d];
-        if (_lastCfgSig && [sig isEqualToString:_lastCfgSig]) return;
-        _lastCfgSig = sig;
-        NSData *pl = [NSPropertyListSerialization dataWithPropertyList:d
-                        format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
-        if (pl) [pl writeToFile:kFUCfgSnapshot atomically:YES];
-    } @catch (NSException *e) { NSLog(@"[FloatingURL] 写配置快照异常（已忽略）: %@", e); }
-}
-// App：尽力读取桌面的配置快照（读不到返回 NO，功能降级但不崩、不打扰 App）。
-- (BOOL)fuLoadConfigSnapshot {
-    if (fuIsSpringBoard()) return NO;
-    @try {
-        NSMutableArray *paths = [NSMutableArray array];
-        [paths addObject:kFUCfgSnapshot];
-        NSArray *dirs = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
-        if (dirs.count) [paths addObject:[dirs.firstObject stringByAppendingPathComponent:kFUCfgFile]];
-        for (NSString *p in paths) {
-            NSData *dat = [NSData dataWithContentsOfFile:p];
-            if (!dat.length) continue;
-            id obj = [NSPropertyListSerialization propertyListWithData:dat options:0 format:NULL error:NULL];
-            if (![obj isKindOfClass:[NSDictionary class]]) continue;
-            NSDictionary *d = (NSDictionary *)obj;
-            NSArray *u = d[@"urls"]; if ([u isKindOfClass:[NSArray class]]) _entries = u;
-            id v;
-            if ((v = d[@"side"]))      _side      = [v integerValue];
-            if ((v = d[@"iconSize"]))  _iconSize  = [v floatValue];
-            if ((v = d[@"iconGap"]))   _iconGap   = [v floatValue];
-            if ((v = d[@"fanSpan"]))   _fanSpan   = [v floatValue];
-            if ((v = d[@"fanScale"]))  _fanScale  = [v floatValue];
-            if ((v = d[@"layer1"]))    _layer1    = [v integerValue];
-            if ((v = d[@"layer2"]))    _layer2    = [v integerValue];
-            if ((v = d[@"layer3"]))    _layer3    = [v integerValue];
-            if ((v = d[@"snapMode"]))  _snapMode  = [v integerValue];
-            if ((v = d[@"snapDelay"])) _snapDelay = [v doubleValue];
-            if ((v = d[@"winW"]))      _winW      = [v floatValue];
-            if ((v = d[@"winH"]))      _winH      = [v floatValue];
-            NSString *t = d[@"ballTitle"]; if (t.length) _ballTitle = t;
-            NSString *c = d[@"ballColor"]; if (c.length) _ballColor = c;
-            NSData  *bi = d[@"ballIcon"];  if ([bi isKindOfClass:[NSData class]] && bi.length) _ballIcon = bi;
-            return YES;
-        }
-    } @catch (NSException *e) { NSLog(@"[FloatingURL] 读配置快照异常（已忽略）: %@", e); }
-    return NO;
-}
-// App：启动「模式心跳」监听（App 进程 %ctor 里调用）。
-- (void)fuAppModeStart {
-    if (fuIsSpringBoard()) return;
-    static BOOL started = NO; if (started) return; started = YES;
-    @try {
-        static int tok = 0;
-        notify_register_dispatch(kFUSingleAppBeacon.UTF8String, &tok, dispatch_get_main_queue(), ^(int t){
-            @try { [[FUFloatingManager shared] fuNoteBeacon]; } @catch (NSException *e) {}
-        });
-        NSTimer *chk = [NSTimer timerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *tt){
-            @try { [[FUFloatingManager shared] fuAppModeTick]; }
-            @catch (NSException *e) { NSLog(@"[FloatingURL] 单App 轮询异常（已忽略）: %@", e); }
-        }];
-        [[NSRunLoop mainRunLoop] addTimer:chk forMode:NSRunLoopCommonModes];
-    } @catch (NSException *e) { NSLog(@"[FloatingURL] 单App 监听启动异常（已忽略）: %@", e); }
-}
-- (void)fuNoteBeacon { _lastBeacon = CFAbsoluteTimeGetCurrent(); }
-- (void)fuAppModeTick {
-    if (fuIsSpringBoard()) return;
-    UIApplication *app = UIApplication.sharedApplication;
-    BOOL active = (!app || app.applicationState == UIApplicationStateActive);
-    BOOL fresh  = (_lastBeacon > 0) && (CFAbsoluteTimeGetCurrent() - _lastBeacon < 8.0);
-    BOOL silent = [[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"];
-    if (fresh && active && !silent) {
-        if (!_appModeOn) { _appModeOn = YES; [self setupWhenHostReady]; }
-        else [self applyAppModeVisibility];
-    } else if (_appModeOn) {
-        _appModeOn = NO;
-        [self applyAppModeVisibility];
-    }
-}
-// App 端可见性：完全不读偏好（沙盒读不到），只看「桌面心跳是否新鲜 + 自己是否在前台」。
-- (void)applyAppModeVisibility {
-    if (!_didSetup) return;
-    @try {
-        BOOL silent = [[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"];
-        UIApplication *app = UIApplication.sharedApplication;
-        BOOL active = (!app || app.applicationState == UIApplicationStateActive);
-        BOOL fresh  = (_lastBeacon > 0) && (CFAbsoluteTimeGetCurrent() - _lastBeacon < 8.0);
-        if (silent || !active || !fresh) {
-            _overlay.hidden = YES; _ball.hidden = YES; _panel.hidden = YES;
-            if (_fanOpen) [self closeFan];
-            if (_expanded) { _expanded = NO; [self setInteractive:NO]; }
-            return;
-        }
-        _overlay.hidden = NO;
-        if (!_expanded && !_fanOpen && !_draggingBall) { _ball.hidden = NO; [self setInteractive:NO]; }
-    } @catch (NSException *e) {
-        NSLog(@"[FloatingURL] App 端可见性异常（已忽略）: %@", e);
-    }
-}
 
 - (void)applyVisibility {
     if (!_didSetup) return;
-    // v1.3.20：非桌面进程（单App模式下的球）走另一套判定——只看心跳与前台，不走黑名单/偏好逻辑。
-    if (!fuIsSpringBoard()) { [self applyAppModeVisibility]; return; }
+    // 非桌面进程一律不建 UI（沙盒 App 读不到偏好），这里兜底防守。
+    if (!fuIsSpringBoard()) return;
     // v1.3.3：静默模式 → 整窗彻底休眠（球/环/面板全藏），App 端也跳过心跳，最省电。
     if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"]) {
-        _overlay.hidden = YES; _ball.hidden = YES; _panel.hidden = YES;
-        if (_fanOpen) [self closeFan];
-        if (_expanded) { _expanded = NO; [self setInteractive:NO]; }
-        return;
-    }
-    // v1.3.20：单App模式 → 桌面不显示球（球由每个 App 进程各自持有），避免同一个屏幕上叠两个球。
-    if (_runMode == 1) {
         _overlay.hidden = YES; _ball.hidden = YES; _panel.hidden = YES;
         if (_fanOpen) [self closeFan];
         if (_expanded) { _expanded = NO; [self setInteractive:NO]; }
@@ -2479,10 +2359,6 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
         if ([bid isEqualToString:@"com.apple.Preferences"]) return;   // 设置里不挂球
         if (![bid isEqualToString:@"com.apple.springboard"]) {
             fuStartAppHeartbeat(bid);   // 沙盒 App 读不到设置 → 只发心跳，暂不建球
-            // v1.3.20：单App模式的监听。平时零开销（只注册一个达尔文通知 + 一个 2 秒轮询），
-            // 只有真的收到桌面广播的「单App模式心跳」时，才会在本 App 里把球建起来。
-            @try { [[FUFloatingManager shared] fuAppModeStart]; }
-            @catch (NSException *e) { NSLog(@"[FloatingURL] 单App 监听启动失败（已忽略）: %@", e); }
             return;
         }
         if (!INCLUDE_SPRINGBOARD) return;
