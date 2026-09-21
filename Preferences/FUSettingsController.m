@@ -783,17 +783,20 @@ static NSArray *FUColorPalette(void) {
     [super viewDidLoad];
     [self loadEntries];
     self.view.backgroundColor = [UIColor systemBackgroundColor];
-    // ---- v1.3.13 修「搜索/筛选/全选/批量 按不了」----
-    //  1.3.9 之前写死 y=0 → 被导航栏盖住（看着像在屏幕外）；
-    //  1.3.10 改成 safeAreaInsets 手算 frame → 看着出来了，但层叠/坐标仍可能在部分机型上
-    //  被 tableView 或导航栏吃掉触摸。现在彻底改成 Auto Layout 约束 + 显式置顶，从结构上避免。
-    _bar = [[UIView alloc] initWithFrame:CGRectZero];
-    _bar.translatesAutoresizingMaskIntoConstraints = NO;
+    // ---- 1.3.15 修「搜索/筛选/全选/批量 按不了」+ 列表不显示 ----
+    //  1.3.13 把按钮条改成 Auto Layout 约束，但在本 PreferenceLoader 宿主里约束没被布局引擎
+    //  解析，所有子视图 frame 卡在 0,0,0,0 → 按钮点不到、列表也看不见（添加后像「没保存」）。
+    //  改回 frame 布局（与能正常工作的 FULayoutController 同一套）：直接用 self.view.bounds 算
+    //  frame + autoresizingMask，可靠且自适应横竖屏。viewDidLayoutSubviews 会再跑 layoutParts 兜底。
+    CGFloat w = self.view.bounds.size.width;
+    CGFloat H = self.view.bounds.size.height;
+    _bar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 46)];
+    _bar.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     _bar.backgroundColor = [UIColor secondarySystemBackgroundColor];
     [self.view addSubview:_bar];
 
-    UIStackView *stack = [[UIStackView alloc] initWithFrame:CGRectZero];
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    UIStackView *stack = [[UIStackView alloc] initWithFrame:_bar.bounds];
+    stack.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     stack.axis = UILayoutConstraintAxisHorizontal;
     stack.distribution = UIStackViewDistributionFillEqually;
     stack.spacing = 0.5;
@@ -814,73 +817,46 @@ static NSArray *FUColorPalette(void) {
     }
     _bSearch = btns[0]; _bFilter = btns[1]; _bAll = btns[2]; _bBulk = btns[3];
 
-    UIView *line = [[UIView alloc] initWithFrame:CGRectZero];
-    line.translatesAutoresizingMaskIntoConstraints = NO;
+    UIView *line = [[UIView alloc] initWithFrame:CGRectMake(0, 45.5, w, 0.5)];
+    line.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     line.backgroundColor = [UIColor separatorColor];
     [_bar addSubview:line];
 
-    _search = [[UISearchBar alloc] initWithFrame:CGRectZero];
-    _search.translatesAutoresizingMaskIntoConstraints = NO;
+    _search = [[UISearchBar alloc] initWithFrame:CGRectMake(0, 46, w, 44)];
+    _search.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     _search.delegate = self; _search.placeholder = @"搜索网址 / 名称";
     _search.hidden = YES; [self.view addSubview:_search];
 
-    _tv = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
-    _tv.translatesAutoresizingMaskIntoConstraints = NO;
+    _tv = [[UITableView alloc] initWithFrame:CGRectMake(0, 46, w, H - 46) style:UITableViewStylePlain];
+    _tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     _tv.delegate = self; _tv.dataSource = self;
     _tv.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
     [self.view addSubview:_tv];
 
     // 空状态提示：以前列表空就是一片白，用户会以为「加了没保存 / 不显示」
-    _empty = [[UILabel alloc] initWithFrame:CGRectZero];
-    _empty.translatesAutoresizingMaskIntoConstraints = NO;
+    _empty = [[UILabel alloc] initWithFrame:CGRectMake(24, H/2.0 - 30, w - 48, 60)];
+    _empty.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin | UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
     _empty.numberOfLines = 0; _empty.textAlignment = NSTextAlignmentCenter;
     _empty.font = [UIFont systemFontOfSize:14]; _empty.textColor = [UIColor secondaryLabelColor];
     _empty.text = @"还没有快捷 URL\n点右上角「添加」，或用上面的「＋ 批量」多行粘贴";
     _empty.hidden = YES;
     [self.view addSubview:_empty];
 
-    UILayoutGuide *g = self.view.safeAreaLayoutGuide;
-    NSMutableArray *cs = [NSMutableArray array];
-    [cs addObjectsFromArray:@[
-        [_bar.topAnchor      constraintEqualToAnchor:g.topAnchor],
-        [_bar.leadingAnchor  constraintEqualToAnchor:self.view.leadingAnchor],
-        [_bar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [_bar.heightAnchor   constraintEqualToConstant:46],
-        [stack.topAnchor      constraintEqualToAnchor:_bar.topAnchor],
-        [stack.leadingAnchor  constraintEqualToAnchor:_bar.leadingAnchor],
-        [stack.trailingAnchor constraintEqualToAnchor:_bar.trailingAnchor],
-        [stack.bottomAnchor   constraintEqualToAnchor:_bar.bottomAnchor],
-        [line.leadingAnchor   constraintEqualToAnchor:_bar.leadingAnchor],
-        [line.trailingAnchor  constraintEqualToAnchor:_bar.trailingAnchor],
-        [line.bottomAnchor    constraintEqualToAnchor:_bar.bottomAnchor],
-        [line.heightAnchor    constraintEqualToConstant:0.5],
-        [_search.topAnchor      constraintEqualToAnchor:_bar.bottomAnchor],
-        [_search.leadingAnchor  constraintEqualToAnchor:self.view.leadingAnchor],
-        [_search.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [_tv.topAnchor      constraintEqualToAnchor:_search.bottomAnchor],
-        [_tv.leadingAnchor  constraintEqualToAnchor:self.view.leadingAnchor],
-        [_tv.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [_tv.bottomAnchor   constraintEqualToAnchor:self.view.bottomAnchor],
-        [_empty.centerXAnchor   constraintEqualToAnchor:self.view.centerXAnchor],
-        [_empty.centerYAnchor   constraintEqualToAnchor:self.view.centerYAnchor],
-        [_empty.leadingAnchor   constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor constant:24],
-        [_empty.trailingAnchor  constraintLessThanOrEqualToAnchor:self.view.trailingAnchor constant:-24],
-    ]];
-    _searchH = [_search.heightAnchor constraintEqualToConstant:0];
-    [cs addObject:_searchH];
-    [NSLayoutConstraint activateConstraints:cs];
+    // v1.3.15：frame 布局，约束段已移除（见 layoutParts 直接算 frame）
 
     [self refreshCount];
     [self applyFilter];
     [self layoutParts];
 }
 - (void)layoutParts {
-    // v1.3.13：坐标全部交给约束，这里只切「搜索框显隐」+ 层叠顺序（按钮条永远最上层）。
-    _searchH.constant = _searchVisible ? 44.0f : 0.0f;
+    // v1.3.15：frame 布局，只切「搜索框显隐」+ 重算 _tv/_search 的 frame（不依赖约束引擎）
+    CGFloat w = self.view.bounds.size.width;
+    CGFloat H = self.view.bounds.size.height;
+    CGFloat sh = _searchVisible ? 44.0f : 0.0f;
     _search.hidden = !_searchVisible;
-    [self.view bringSubviewToFront:_bar];
-    if (_searchVisible) [self.view bringSubviewToFront:_search];
-    [self.view bringSubviewToFront:_empty];
+    _search.frame = CGRectMake(0, 46, w, 44);
+    _tv.frame = CGRectMake(0, 46 + sh, w, H - 46 - sh);
+    _empty.frame = CGRectMake(24, H/2.0 - 30, w - 48, 60);
 }
 - (void)viewDidLayoutSubviews { [super viewDidLayoutSubviews]; [self layoutParts]; }
 - (void)viewWillAppear:(BOOL)animated {
