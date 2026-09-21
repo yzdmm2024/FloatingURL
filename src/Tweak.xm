@@ -470,7 +470,7 @@ static void fuStartAppHeartbeat(NSString *bid) {
 
 #pragma mark - 浮动管理器
 @interface FUFloatingManager : NSObject <WKNavigationDelegate, UITextFieldDelegate,
-                                         UITableViewDataSource, UITableViewDelegate>
+                                         UITableViewDataSource, UITableViewDelegate, UIWebViewDelegate>
 + (instancetype)shared;
 - (void)reloadPrefs;
 - (void)setupWhenHostReady;
