@@ -587,6 +587,7 @@ static void fuStartAppHeartbeat(NSString *bid) {
 - (void)fuOpenViaWorkspace:(NSURL *)u;       // v1.3.13：LSApplicationWorkspace 最后兜底
 - (void)fuOpenPrefsURL:(NSURL *)u;          // v1.3.26：设置页深链 prefs:/App-Prefs: 专用入口
 - (void)fuCaptureWillHide;                             // v1.3.27：截图按下快门前收拢扇形 + 藏球
+- (void)fuApplyCaptureExclusion;                       // v1.3.28：把悬浮窗从截图/录屏里彻底排除（私有 API）
 - (NSArray *)fuFanPointArray;                           // v1.3.13：扇形点位（openFan 与拖动重排共用同一套算法）
 - (void)fuScheduleFanAutoHide;                          // v1.3.21：重排「闲置自动收回」倒计时
 - (void)fuCancelFanAutoHide;                            // v1.3.21：取消空闲收回倒计时
@@ -2029,6 +2030,22 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 
 
 
+// v1.3.28：把悬浮窗从「截图 / 录屏」里彻底排除（Apple 私有 API）。
+// 这是最稳的手段——不依赖钩住某个系统截图入口（iOS 各版本类名/方法名会变，钩子可能失效），
+// 也不靠「截图前赶在 0.2 秒内把球藏起来」的时序赌博。设上后球在画面里照常可见，
+// 但截出来的图 / 录出来的屏里它就是一片透明，绝对不会带进去。captureHide 关掉则恢复正常（可被拍到）。
+- (void)fuApplyCaptureExclusion {
+    if (!_overlay) return;
+    SEL s = NSSelectorFromString(@"_setExcludedFromScreenCapture:");
+    if (![_overlay respondsToSelector:s]) { _captureExclusionOK = NO; return; }
+    _captureExclusionOK = YES;
+    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:[_overlay methodSignatureForSelector:s]];
+    [inv setSelector:s]; [inv setTarget:_overlay];
+    BOOL v = _captureHide ? YES : NO;
+    [inv setArgument:&v atIndex:2];
+    @try { [inv invoke]; } @catch (NSException *e) { NSLog(@"[FloatingURL] 排除截图异常（已忽略）: %@", e); }
+}
+
 @end
 
 // ============================================================
@@ -2092,22 +2109,6 @@ static void fuInstallCaptureHooks(void) {
             NSLog(@"[FloatingURL] capture hook installed: %s -%s", names[i], sels[i]);
         }
     } @catch (NSException *e) { NSLog(@"[FloatingURL] 装截图钩子异常（已忽略）: %@", e); }
-}
-
-// v1.3.28：把悬浮窗从「截图 / 录屏」里彻底排除（Apple 私有 API）。
-// 这是最稳的手段——不依赖钩住某个系统截图入口（iOS 各版本类名/方法名会变，钩子可能失效），
-// 也不靠「截图前赶在 0.2 秒内把球藏起来」的时序赌博。设上后球在画面里照常可见，
-// 但截出来的图 / 录出来的屏里它就是一片透明，绝对不会带进去。captureHide 关掉则恢复正常（可被拍到）。
-- (void)fuApplyCaptureExclusion {
-    if (!_overlay) return;
-    SEL s = NSSelectorFromString(@"_setExcludedFromScreenCapture:");
-    if (![_overlay respondsToSelector:s]) { _captureExclusionOK = NO; return; }
-    _captureExclusionOK = YES;
-    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:[_overlay methodSignatureForSelector:s]];
-    [inv setSelector:s]; [inv setTarget:_overlay];
-    BOOL v = _captureHide ? YES : NO;
-    [inv setArgument:&v atIndex:2];
-    @try { [inv invoke]; } @catch (NSException *e) { NSLog(@"[FloatingURL] 排除截图异常（已忽略）: %@", e); }
 }
 
 
