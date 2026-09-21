@@ -30,6 +30,25 @@ static const NSInteger kFUMaxEntries   = 48;   // v1.3.6：上限 48（三层默
 static const NSInteger kFULayer1Max    = 4;    // 第一层（内环）最多 4 个
 static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 个
 
+// ===== v1.3.7 统一调色板：48 色（够 48 个入口各用一色），末尾空串 = 默认（入口=默认蓝 / 球=玻璃） =====
+static NSArray *FUColorPalette(void) {
+    return @[
+        // 浅色系（薄涂）
+        @"#FF8787", @"#FFA94D", @"#FFD43B", @"#A9E34B", @"#63E6BE", @"#66D9E8", @"#74C0FC", @"#B197FC",
+        // 亮色系
+        @"#FF6B6B", @"#FF922B", @"#FCC419", @"#94D82D", @"#38D9A9", @"#22B8CF", @"#4DABF7", @"#9775FA",
+        // 标准色
+        @"#E03131", @"#F76707", @"#F59F00", @"#2F9E44", @"#0CA678", @"#1971C2", @"#7048E8", @"#D6336C",
+        // 深色系
+        @"#C92A2A", @"#D9480F", @"#E67700", @"#2B8A3E", @"#087F5B", @"#1864AB", @"#5F3DC4", @"#A61E4D",
+        // 暗色系
+        @"#8C1C1C", @"#9C3A0A", @"#A85B00", @"#1E5C2B", @"#05563D", @"#12457A", @"#4527A0", @"#7B1538",
+        // 其它常用
+        @"#F783AC", @"#E599F7", @"#8B5E3C", @"#20C997", @"#5C7CFA", @"#868E96", @"#343A40", @"#F1F3F5",
+        @"",
+    ];
+}
+
 #pragma mark - 方形裁剪控制器
 @interface FUCropVC : UIViewController <UIScrollViewDelegate>
 @property (nonatomic, strong) UIImage *image;
@@ -87,7 +106,7 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
 @end
 
 #pragma mark - 编辑单条 URI（含方形裁剪）
-@interface FUUrlEditController : UIViewController <PHPickerViewControllerDelegate, UITextFieldDelegate>
+@interface FUUrlEditController : UIViewController <PHPickerViewControllerDelegate, UITextFieldDelegate, UIColorPickerViewControllerDelegate>
 @property (nonatomic, strong) NSMutableArray *entries;
 @property (nonatomic, assign) NSInteger index;
 @property (nonatomic, strong) UITextField *urlField, *labelField;
@@ -96,6 +115,7 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
 @property (nonatomic, copy)   NSString    *colorHex;     // v1.3.3 自定义图标底色（hex）
 @property (nonatomic, strong) NSMutableArray *colorButtons;
 @property (nonatomic, strong) NSArray     *colorPresets;
+@property (nonatomic, strong) UIButton    *customColorButton;   // v1.3.7 任意色入口
 @end
 @implementation FUUrlEditController
 - (void)viewDidLoad {
@@ -154,11 +174,14 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     // v1.3.3：图标底色选择（不填图标时生效）
     UILabel *colLab = [[UILabel alloc] initWithFrame:CGRectMake(pad, y, w, 18)];
     colLab.font = [UIFont systemFontOfSize:12]; colLab.textColor = [UIColor secondaryLabelColor];
-    colLab.text = @"图标底色（不填图标时生效，留空=默认蓝）";
+    colLab.text = @"图标底色（48 色 + 自定义任意色；不填图标时生效，留空 = 默认蓝）";
     [scroll addSubview:colLab]; y += 22;
-    _colorPresets = @[@"#3385E6",@"#E63946",@"#2EA44F",@"#F4801A",@"#8E44AD",@"#16A2B8",@"#E84393",@"#6C757D",@""];
+    _colorPresets = FUColorPalette();
     _colorButtons = [NSMutableArray array];
-    CGFloat sw = 36, csp = 8; CGFloat cx = pad;
+    CGFloat csp = 8; NSInteger cols = 8;
+    CGFloat sw = (CGFloat)((NSInteger)((w - csp * (cols - 1)) / cols));
+    if (sw < 26) { cols = 6; sw = (CGFloat)((NSInteger)((w - csp * (cols - 1)) / cols)); }
+    CGFloat cx = pad;
     for (NSString *hex in _colorPresets) {
         if (cx + sw > pad + w) { cx = pad; y += sw + csp; }
         UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -173,9 +196,18 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
         [b addTarget:self action:@selector(colorTapped:) forControlEvents:UIControlEventTouchUpInside];
         [scroll addSubview:b]; [_colorButtons addObject:b]; cx += sw + csp;
     }
-    y += sw + 20; [self refreshColor];
+    y += sw + 14;
+    // v1.3.7：48 色不够就调系统取色器，任意色
+    _customColorButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    _customColorButton.frame = CGRectMake(pad, y, w, 38);
+    _customColorButton.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    _customColorButton.layer.cornerRadius = 9; _customColorButton.clipsToBounds = YES;
+    _customColorButton.titleLabel.font = [UIFont systemFontOfSize:13];
+    [_customColorButton addTarget:self action:@selector(pickCustomColor) forControlEvents:UIControlEventTouchUpInside];
+    [scroll addSubview:_customColorButton]; y += 38 + 16;
     scroll.contentSize = CGSizeMake(self.view.bounds.size.width, y);
     if (_index >= 0) [self prefill];
+    [self refreshColor];
 }
 - (void)prefill {
     CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUURLs, (__bridge CFStringRef)kFUSuite);
@@ -220,6 +252,30 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     }];
 }
 - (void)clearIcon { _iconData = nil; [self refreshIcon:nil]; }
+#pragma mark v1.3.7 任意色（系统取色器，iOS 14+）
+- (void)pickCustomColor {
+    if (@available(iOS 14.0, *)) {
+        UIColorPickerViewController *p = [[UIColorPickerViewController alloc] init];
+        p.supportsAlpha = NO;
+        UIColor *cur = [self colorFromHex:_colorHex];
+        if (cur) p.selectedColor = cur;
+        p.delegate = self;
+        [self presentViewController:p animated:YES completion:nil];
+    }
+}
+- (void)colorPickerViewControllerDidSelectColor:(UIColorPickerViewController *)viewController {
+    [self applyPickedColor:viewController.selectedColor];
+}
+- (void)colorPickerViewControllerDidFinish:(UIColorPickerViewController *)viewController {
+    [self applyPickedColor:viewController.selectedColor];
+}
+- (void)applyPickedColor:(UIColor *)c {
+    CGFloat r = 0, g = 0, b = 0, a = 1;
+    if (!c || ![c getRed:&r green:&g blue:&b alpha:&a]) return;
+    _colorHex = [NSString stringWithFormat:@"#%02X%02X%02X",
+                 (int)(r * 255.0 + 0.5), (int)(g * 255.0 + 0.5), (int)(b * 255.0 + 0.5)];
+    [self refreshColor];
+}
 - (void)colorTapped:(UIButton *)b {
     NSInteger idx = b.tag - 900;
     if (idx < 0 || idx >= (NSInteger)_colorPresets.count) return;
@@ -237,6 +293,19 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
         b.layer.borderColor = (sel ? [UIColor systemBlueColor] : [UIColor separatorColor]).CGColor;
         b.layer.borderWidth = sel ? 3.0f : 2.0f;
     }
+    [self refreshCustomButton];
+}
+- (void)refreshCustomButton {
+    NSString *cur = _colorHex ?: @"";
+    BOOL inPreset = NO;
+    for (NSString *h in _colorPresets) {
+        if (h.length && cur.length && [h caseInsensitiveCompare:cur] == NSOrderedSame) { inPreset = YES; break; }
+    }
+    [_customColorButton setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
+    if (cur.length && !inPreset)
+        [_customColorButton setTitle:[NSString stringWithFormat:@"自定义色 %@（点这里换）", cur] forState:UIControlStateNormal];
+    else
+        [_customColorButton setTitle:@"＋ 自定义颜色（任意色，48 色不够时用）" forState:UIControlStateNormal];
 }
 - (UIColor *)colorFromHex:(NSString *)hex {
     if (![hex isKindOfClass:[NSString class]] || hex.length < 6) return nil;
@@ -270,13 +339,14 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
 @end
 
 #pragma mark - v1.3.5 悬浮球外观编辑（名称 / 图标 / 底色）
-@interface FUBallEditController : UIViewController <PHPickerViewControllerDelegate, UITextFieldDelegate>
+@interface FUBallEditController : UIViewController <PHPickerViewControllerDelegate, UITextFieldDelegate, UIColorPickerViewControllerDelegate>
 @property (nonatomic, strong) UITextField *nameField;
 @property (nonatomic, strong) UIButton    *iconButton;
 @property (nonatomic, strong) NSData      *iconData;
 @property (nonatomic, copy)   NSString    *colorHex;
 @property (nonatomic, strong) NSMutableArray *colorButtons;
 @property (nonatomic, strong) NSArray     *colorPresets;
+@property (nonatomic, strong) UIButton    *customColorButton;   // v1.3.7 任意色入口
 @end
 @implementation FUBallEditController
 - (void)viewDidLoad {
@@ -333,10 +403,13 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     // 底色
     UILabel *cl = [[UILabel alloc] initWithFrame:CGRectMake(pad, y, w, 18)];
     cl.font = [UIFont systemFontOfSize:12]; cl.textColor = [UIColor secondaryLabelColor];
-    cl.text = @"悬浮球底色（不设图标时生效，留空 = 玻璃质感）"; [scroll addSubview:cl]; y += 22;
-    _colorPresets = @[@"#3385E6",@"#E63946",@"#2EA44F",@"#F4801A",@"#8E44AD",@"#16A2B8",@"#E84393",@""];
+    cl.text = @"悬浮球底色（48 色 + 自定义任意色；不设图标时生效，留空 = 玻璃质感）"; [scroll addSubview:cl]; y += 22;
+    _colorPresets = FUColorPalette();
     _colorButtons = [NSMutableArray array];
-    CGFloat sw = 36, csp = 8; CGFloat cx = pad;
+    CGFloat csp = 8; NSInteger cols = 8;
+    CGFloat sw = (CGFloat)((NSInteger)((w - csp * (cols - 1)) / cols));
+    if (sw < 26) { cols = 6; sw = (CGFloat)((NSInteger)((w - csp * (cols - 1)) / cols)); }
+    CGFloat cx = pad;
     for (NSString *hex in _colorPresets) {
         if (cx + sw > pad + w) { cx = pad; y += sw + csp; }
         UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -351,7 +424,14 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
         [b addTarget:self action:@selector(colorTapped:) forControlEvents:UIControlEventTouchUpInside];
         [scroll addSubview:b]; [_colorButtons addObject:b]; cx += sw + csp;
     }
-    y += sw + 20;
+    y += sw + 14;
+    _customColorButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    _customColorButton.frame = CGRectMake(pad, y, w, 38);
+    _customColorButton.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    _customColorButton.layer.cornerRadius = 9; _customColorButton.clipsToBounds = YES;
+    _customColorButton.titleLabel.font = [UIFont systemFontOfSize:13];
+    [_customColorButton addTarget:self action:@selector(pickCustomColor) forControlEvents:UIControlEventTouchUpInside];
+    [scroll addSubview:_customColorButton]; y += 38 + 16;
     scroll.contentSize = CGSizeMake(self.view.bounds.size.width, y);
     [self refreshIcon:_iconData]; [self refreshColor];
 }
@@ -387,6 +467,30 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     }];
 }
 - (void)clearIcon { _iconData = nil; [self refreshIcon:nil]; }
+#pragma mark v1.3.7 任意色（系统取色器，iOS 14+）
+- (void)pickCustomColor {
+    if (@available(iOS 14.0, *)) {
+        UIColorPickerViewController *p = [[UIColorPickerViewController alloc] init];
+        p.supportsAlpha = NO;
+        UIColor *cur = [self colorFromHex:_colorHex];
+        if (cur) p.selectedColor = cur;
+        p.delegate = self;
+        [self presentViewController:p animated:YES completion:nil];
+    }
+}
+- (void)colorPickerViewControllerDidSelectColor:(UIColorPickerViewController *)viewController {
+    [self applyPickedColor:viewController.selectedColor];
+}
+- (void)colorPickerViewControllerDidFinish:(UIColorPickerViewController *)viewController {
+    [self applyPickedColor:viewController.selectedColor];
+}
+- (void)applyPickedColor:(UIColor *)c {
+    CGFloat r = 0, g = 0, b = 0, a = 1;
+    if (!c || ![c getRed:&r green:&g blue:&b alpha:&a]) return;
+    _colorHex = [NSString stringWithFormat:@"#%02X%02X%02X",
+                 (int)(r * 255.0 + 0.5), (int)(g * 255.0 + 0.5), (int)(b * 255.0 + 0.5)];
+    [self refreshColor];
+}
 - (void)colorTapped:(UIButton *)b {
     NSInteger idx = b.tag - 900;
     if (idx < 0 || idx >= (NSInteger)_colorPresets.count) return;
@@ -404,6 +508,19 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
         b.layer.borderColor = (sel ? [UIColor systemBlueColor] : [UIColor separatorColor]).CGColor;
         b.layer.borderWidth = sel ? 3.0f : 2.0f;
     }
+    [self refreshCustomButton];
+}
+- (void)refreshCustomButton {
+    NSString *cur = _colorHex ?: @"";
+    BOOL inPreset = NO;
+    for (NSString *h in _colorPresets) {
+        if (h.length && cur.length && [h caseInsensitiveCompare:cur] == NSOrderedSame) { inPreset = YES; break; }
+    }
+    [_customColorButton setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
+    if (cur.length && !inPreset)
+        [_customColorButton setTitle:[NSString stringWithFormat:@"自定义色 %@（点这里换）", cur] forState:UIControlStateNormal];
+    else
+        [_customColorButton setTitle:@"＋ 自定义颜色（任意色，48 色不够时用）" forState:UIControlStateNormal];
 }
 - (UIColor *)colorFromHex:(NSString *)hex {
     if (![hex isKindOfClass:[NSString class]] || hex.length < 6) return nil;
