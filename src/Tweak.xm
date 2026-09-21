@@ -332,7 +332,7 @@ static void fuStartAppHeartbeat(NSString *bid) {
 @end
 
 #pragma mark - 条目编辑器（设置/长按扇形共用：URL+汉字+字母+图标）
-@interface FUEntryEditorViewController : UIViewController <UITextFieldDelegate, PHPickerViewControllerDelegate>
+@interface FUEntryEditorViewController : UIViewController <UITextFieldDelegate>
 @property (nonatomic, assign) NSInteger index;        // -1 = 新增
 @property (nonatomic, copy)   void (^onSaved)(void);
 @property (nonatomic, strong) UITextField *urlField, *labelField;
