@@ -1,5 +1,4 @@
 #import <UIKit/UIKit.h>
-#import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <math.h>
@@ -15,6 +14,12 @@
 // ============================================================
 // 悬浮URL —— 系统级悬浮窗 tweak（rootless / iOS16 / A14 arm64e）
 // 包名：com.yzdmm.floatingurl
+//
+// v1.3.24 变更（两条主线）：
+//  ① 彻底移除「内置小窗」：网页面板(WKWebView)、历史、确认框，以及「App 端内置浏览器交接」
+//     （SFSafariViewController）全部删掉。点快捷入口 = 直接交给系统：网页走 Safari，scheme 走对应 App。
+//  ② 交互与功耗：扇形永远往屏幕里展开、只有真贴到四角才走对角线；底部的上滑、顶部的下拉
+//     会按球的位置动态让位给悬浮球（无定时器、无轮询）；息屏时完全停止轮询。
 //
 // v1.3.5 变更（6 条修复）：
 //  01 自动吸附改为「以屏幕中心线为界」：球在左半屏→吸左边，右半屏→吸右边（不再四边乱吸）。
@@ -41,16 +46,6 @@ static NSString * const kFUPrefsChanged = @"com.yzdmm.floatingurl/settingsChange
 static NSString * const kFUSyncChanged  = @"com.yzdmm.floatingurl/syncChanged";
 static NSString * const kFUAlivePrefix  = @"com.yzdmm.floatingurl/alive/";  // v1.3.2：+App bundle id（前台心跳）
 static NSString * const kFUGonePrefix   = @"com.yzdmm.floatingurl/gone/";   // v1.3.2：+App bundle id（退到后台）
-// v1.3.12：桌面 → App 进程的「内置浏览器」请求。球归桌面（读得到设置），但桌面渲染不了网页，
-//  所以桌面把 URL 写进目标 App 容器 + 发这个通知，由 App 进程用 SFSafariViewController 显示。
-static NSString * const kFUInAppWebName = @"com.yzdmm.floatingurl/inAppWeb";
-static NSString * const kFUInAppWebFile = @"fu_inapp_web.txt";
-// v1.3.13：App 真正弹出内置浏览器后的「回执」。桌面据此判断要不要兜底系统浏览器 ——
-// 修 1.3.12 的漏洞：App 只删了交接文件却没弹出浏览器时，桌面以为已接住 → 结果什么都不开。
-static NSString * const kFUInAppWebAck  = @"com.yzdmm.floatingurl/inAppWebAck";
-// v1.3.13：备用信箱。桌面写目标 App 容器常被沙盒拒绝，写不进去就改投这里；
-// App 端两处都看，读不到就静默跳过（无副作用）。
-static NSString * const kFUWebMailboxMedia = @"/var/mobile/Media/FloatingURL_incoming.txt";
 // v1.3.17：deb 升级后不再自动注销——postinst 写旗标 + 发本通知，由运行中的 tweak
 // 弹「立即注销 / 稍后」让用户自己选。旗标留着 = 尚未注销生效，下次手动注销时 %ctor 清掉。
 static NSString * const kFUNeedsRespring  = @"com.yzdmm.floatingurl/needsRespring";
@@ -91,10 +86,6 @@ static const CGFloat   kFUSnapThreshold = 48.0f; // 松手时距边 ≤48pt 才�
 
 static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
                            CFStringRef name, const void *object, CFDictionaryRef userInfo);
-static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
-                          CFStringRef name, const void *object, CFDictionaryRef userInfo);
-static void fuInAppWebAckCb(CFNotificationCenterRef center, void *observer,
-                            CFStringRef name, const void *object, CFDictionaryRef userInfo);
 static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
                               CFStringRef name, const void *object, CFDictionaryRef userInfo);
 
@@ -114,23 +105,7 @@ static BOOL fuIsSpringBoard(void) {
 static NSString *fuAliveName(NSString *bid) { return [kFUAlivePrefix stringByAppendingString:bid]; }
 static NSString *fuGoneName(NSString *bid)  { return [kFUGonePrefix  stringByAppendingString:bid]; }
 
-// ---- v1.3.12：App 进程内的「内置浏览器」----
-// 为什么必须由 App 进程来显示网页：SpringBoard 进程里 WKWebView 白屏（WebKit2 内容进程拿不到
-// 桌面沙盒豁免）、UIWebView 会挂死桌面主线程（watchdog 杀 SpringBoard → 无限注销），都是真机实锤；
-// 而 App 进程有网络权限 —— 这正是 1.2.1 能打开网页的原因（那时球在每个 App 进程里）。
-static NSString *fuAppWebFilePath(void) {
-    NSArray *dirs = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
-    if (!dirs.count) return nil;
-    return [(NSString *)dirs.firstObject stringByAppendingPathComponent:kFUInAppWebFile];
-}
 // v1.3.13：App 端要看的「信箱」列表（桌面写哪处能成功，就走哪处）。
-static NSArray *fuAppWebMailboxPaths(void) {
-    NSMutableArray *out = [NSMutableArray array];
-    NSString *own = fuAppWebFilePath();
-    if (own.length) [out addObject:own];
-    [out addObject:kFUWebMailboxMedia];
-    return out;
-}
 static UIViewController *fuTopViewController(void) {
     UIApplication *a = UIApplication.sharedApplication;
     if (!a) return nil;
@@ -140,58 +115,6 @@ static UIViewController *fuTopViewController(void) {
     UIViewController *vc = key.rootViewController;
     while (vc.presentedViewController) { vc = vc.presentedViewController; }
     return vc;
-}
-static double fuLastWebSeq = 0;   // v1.3.13：已处理过的请求序号（防陈旧文件被重复打开）
-static void fuHandleInAppWebRequest(void) {
-    @try {
-        for (NSString *p in fuAppWebMailboxPaths()) {
-            NSString *raw = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:NULL];
-            if (!raw.length) continue;                     // 没有交接文件 = 不是给我的
-            [[NSFileManager defaultManager] removeItemAtPath:p error:NULL];   // 先清掉，避免下次误触发
-            // 文件格式：第一行是序号（时间戳），第二行是 URL
-            NSString *seqS = raw, *urlS = @"";
-            NSRange nl = [raw rangeOfCharacterFromSet:[NSCharacterSet newlineCharacterSet]];
-            if (nl.location != NSNotFound) {
-                seqS = [raw substringToIndex:nl.location];
-                urlS = [raw substringFromIndex:nl.location + 1];
-            }
-            double seq = seqS.doubleValue;
-            if (seq <= fuLastWebSeq) continue;              // 陈旧请求（上次没删干净的）→ 忽略
-            fuLastWebSeq = seq;
-            NSString *s = [urlS stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            if (!s.length) return;
-            if (![s.lowercaseString hasPrefix:@"http"]) s = [@"https://" stringByAppendingString:s];
-            NSURL *u = [NSURL URLWithString:s];
-            UIApplication *a = UIApplication.sharedApplication;
-            // 不在前台就不打扰，也**不发回执** —— 桌面 1.5s 收不到回执会自动改用系统浏览器，
-            // 所以绝不会出现「点了没反应」。
-            if (!u || !a || a.applicationState != UIApplicationStateActive) return;
-            NSString *myBid = [[NSBundle mainBundle] bundleIdentifier];
-            if ([myBid isEqualToString:@"com.apple.mobilesafari"]) {   // 自己就是浏览器：直接跳转
-                [a openURL:u options:@{} completionHandler:nil];
-                notify_post(kFUInAppWebAck.UTF8String);
-                return;
-            }
-            Class sfCls = NSClassFromString(@"SFSafariViewController");
-            if (!sfCls) {   // SafariServices 一般没被 App 加载 → 现场按需加载（只在真要开网页时，非启动路径）
-                dlopen("/System/Library/Frameworks/SafariServices.framework/SafariServices", RTLD_LAZY);
-                sfCls = NSClassFromString(@"SFSafariViewController");
-            }
-            UIViewController *top = fuTopViewController();
-            if (sfCls && top) {                 // 内置浏览器：不离开当前 App，附带刷新/分享/完成按钮
-                id svc = ((id (*)(id, SEL, id))objc_msgSend)([sfCls alloc], NSSelectorFromString(@"initWithURL:"), u);
-                if (svc) {
-                    [top presentViewController:svc animated:YES completion:nil];
-                    notify_post(kFUInAppWebAck.UTF8String);   // 真弹出来了才回执
-                    return;
-                }
-            }
-            NSLog(@"[FloatingURL] 内置浏览器不可用（sf=%@ top=%@）→ 交给桌面走系统浏览器", sfCls, top);
-            return;
-        }
-    } @catch (NSException *e) {
-        NSLog(@"[FloatingURL] inAppWeb 异常（已忽略）: %@", e);
-    }
 }
 
 // 非 SpringBoard 进程：只广播前台状态，不建任何 UI、不加载设置。
@@ -218,11 +141,13 @@ static void fuStartAppHeartbeat(NSString *bid) {
                      queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *n){ notify_post(gone.UTF8String); }];
     [nc addObserverForName:UIApplicationWillTerminateNotification object:nil
                      queue:nil usingBlock:^(NSNotification *n){ notify_post(gone.UTF8String); }];
-    // v1.3.12：接收桌面发来的「用内置浏览器打开网页」请求（纯 C 注册，重活在回调里，不碰启动路径的 UI）。
-    static int fuWebToken = 0;
-    notify_register_dispatch(kFUInAppWebName.UTF8String, &fuWebToken,
-                             dispatch_get_main_queue(), ^(int t){ fuHandleInAppWebRequest(); });
 }
+
+// v1.3.24：由根视图控制器告诉 UIKit「哪条边的系统手势要让位给我」。
+// 之所以用协议：manager 的 @interface 在后面才出现，这里先定义能力再让 manager 实现。
+@protocol FUDeferredEdgesProvider <NSObject>
+- (UIRectEdge)fuDeferredEdges;
+@end
 
 #pragma mark - 穿透 window（空白区域把触摸交还给下层窗口）
 // 关键：本 window 永远不 makeKey（不当 key → 不吞 App 触摸）；空白命中 window 自身 → 返回 nil 穿透。
@@ -234,6 +159,21 @@ static void fuStartAppHeartbeat(NSString *bid) {
     // 命中 window 自身（空白区域）→ 返回 nil，触摸穿透到下层窗口。
     // 命中球/面板/扇形/编辑器 → 正常返回。
     return (hit == self) ? nil : hit;
+}
+@end
+
+#pragma mark - v1.3.24：悬浮球优先 —— 动态「压住」会撞车的系统手势边
+// 现象：球停在底部会被「上滑回主屏」抢走；停在左上/右上会被「下拉通知 / 控制中心」抢走。
+// UIKit 官方给的机制：preferredScreenEdgesDeferringSystemGestures 返回要压住的边。
+// 这里做成**跟随球的位置动态变化** —— 球贴哪条边才压哪条边，球移到中间一条边都不压。
+// 没有定时器、没有轮询，delegate 回调式，零额外耗电；被压住的那条边只是「第一次划先给悬浮球」，
+// 立刻再划一次照样拉出系统面板，日常手感不受影响。
+@interface FUOverlayRootController : UIViewController
+@property (nonatomic, weak) id<FUDeferredEdgesProvider> edgesProvider;
+@end
+@implementation FUOverlayRootController
+- (UIRectEdge)preferredScreenEdgesDeferringSystemGestures {
+    return self.edgesProvider ? [self.edgesProvider fuDeferredEdges] : UIRectEdgeNone;
 }
 @end
 
@@ -623,8 +563,7 @@ static void fuStartAppHeartbeat(NSString *bid) {
 @end
 
 #pragma mark - 浮动管理器
-@interface FUFloatingManager : NSObject <WKNavigationDelegate, UITextFieldDelegate,
-                                         UITableViewDataSource, UITableViewDelegate>
+@interface FUFloatingManager : NSObject <FUDeferredEdgesProvider>
 + (instancetype)shared;
 - (void)reloadPrefs;
 - (void)setupWhenHostReady;
@@ -636,27 +575,45 @@ static void fuStartAppHeartbeat(NSString *bid) {
 - (NSArray *)fuBlacklist;
 - (void)fuSyncFrontWatches;
 - (void)fuOpenExternally:(NSString *)s;
-- (BOOL)fuHandoffWebToFrontApp:(NSURL *)u;   // v1.3.12：把网页交给前台 App 的内置浏览器
 - (void)fuOpenViaSystem:(NSURL *)u;          // v1.3.13：系统打开链路（openURL → FBSSystemService → workspace）
 - (void)showRespringPrompt;                  // v1.3.17：升级后「立即注销 / 稍后」选择框
 - (void)fuOpenViaFBS:(NSURL *)u;             // v1.3.13：FrontBoard 异步接口（失败回调里继续往下兜底）
 - (void)fuOpenViaWorkspace:(NSURL *)u;       // v1.3.13：LSApplicationWorkspace 最后兜底
-- (NSArray *)fuWebMailboxPathsForBid:(NSString *)bid;   // v1.3.13：可写的投递信箱列表
 - (NSArray *)fuFanPointArray;                           // v1.3.13：扇形点位（openFan 与拖动重排共用同一套算法）
 - (void)fuScheduleFanAutoHide;                          // v1.3.21：重排「闲置自动收回」倒计时
 - (void)fuCancelFanAutoHide;                            // v1.3.21：取消空闲收回倒计时
 - (void)fuRelayoutFanInstant;                           // v1.3.13：拖动球时围绕球实时重排扇形
+- (UIRectEdge)fuDeferredEdges;                          // v1.3.24：当前要让位给悬浮球的系统手势边
+- (void)fuRefreshDeferredEdges;                         // v1.3.24：位置变了让 UIKit 重新问一次
 - (void)cancelPendingSnap;                              // v1.3.13：取消「待吸附」
 - (void)scheduleSnapAfterDrop;                          // v1.3.13：松手后按「吸附延时」归位
 - (void)triggerEntry:(NSDictionary *)entry;          // v1.3.8：触发一条入口（扇形点击 / 单入口点球共用）
 - (CGFloat)fuAngleToScreenCenter:(CGPoint)c;         // v1.3.8：球心 -> 屏幕中心 的方向角
-// v1.3.18：网页打开「先小窗、失败兜底」三件套（前向声明，供 triggerEntry / urlGo / 导航代理调用）
-- (void)openWebURL:(NSString *)norm;
-- (void)scheduleWebWatchdog:(NSInteger)tok url:(NSString *)u;
-- (void)fallbackWebToExternal:(NSString *)u;@property (nonatomic, strong) UIView      *schemeBox;     // 非网页入口的简单输入框容器
-@property (nonatomic, strong) UITextField *schemeField;
-@property (nonatomic, strong) UIButton    *schemeOpenBtn;
 @end
+
+// v1.3.24 省电：息屏时直接跳过轮询（不读偏好、不判前台、不动 UI）。
+// SpringBoard 里直接问 SBBacklightController（本 dylib 就跑在 SpringBoard，类是真实存在的）；
+// 取不到就一律当作「亮屏」——最坏也只是回到原来的行为，不会锁死功能。
+static BOOL fuScreenIsOn(void) {
+    @try {
+        Class cls = NSClassFromString(@"SBBacklightController");
+        if (!cls) return YES;
+        SEL si = NSSelectorFromString(@"sharedInstance");
+        if (![cls respondsToSelector:si]) return YES;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        id ctrl = [cls performSelector:si];
+#pragma clang diagnostic pop
+        SEL so = NSSelectorFromString(@"screenIsOn");
+        if (!ctrl || ![ctrl respondsToSelector:so]) return YES;
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:[ctrl methodSignatureForSelector:so]];
+        inv.selector = so;
+        [inv invokeWithTarget:ctrl];
+        BOOL on = YES;
+        [inv getReturnValue:&on];
+        return on;
+    } @catch (NSException *e) { return YES; }
+}
 
 // v1.3.2：前台 App 心跳回调（SpringBoard 侧）。通知名 = 前缀 + bundle id，从通知名反解出 App。
 static void fuFrontAliveCb(CFNotificationCenterRef center, void *observer,
@@ -690,43 +647,23 @@ static void fuFrontGoneCb(CFNotificationCenterRef center, void *observer,
     UIButton              *_ball;
     UIVisualEffectView    *_ballBlur;
     UILabel               *_ballLabel;
-    UIView                *_panel;
-    UIView                *_bar;
-    UITextField           *_urlField;
-    UIButton              *_reloadBtn;
-    UITableView           *_historyTable;
-    WKWebView             *_webView;
-    UIActivityIndicatorView *_spinner;
-    UILabel               *_webErrorLabel;   // 网页加载失败时显示原因（否则白屏无提示）
     // v1.3.18：桌面小窗网页「尽力开放 + 绝不卡白屏」三件套。
     //  桌面（SpringBoard）里 WKWebView 能不能真渲染网页，在不同越狱/环境上结论不一（用户反馈过
     //  「以前能打开」，也实测过「WebContent 起不来白屏」）。与其二选一赌一边，这里做成：
     //  先按用户想要的方式开内置小窗 → 加载失败或超时未完成就自动兜底外部浏览器 →
     //  并且本会话内记下「这台机器渲染不了」，之后不再白等，直接走浏览器（秒开）。
-    NSInteger             _webLoadToken;     // 每次网页加载自增，防止旧看门狗误判成新加载失败
-    BOOL                  _webLoadedOK;      // 本次加载已成功完成
-    BOOL                  _webStarted;       // 本次加载连"开始导航"回调都没收到（= 结构性失败的特征）
-    BOOL                  _desktopWebBroken; // 本会话已确认桌面小窗渲染不了 → 之后直接外部浏览器
-    BOOL                  _expanded;
     BOOL                  _didSetup;
     BOOL                  _enabled;
-    BOOL                  _barAtBottom;
     BOOL                  _fanOpen;
     // v1.3.21：扇形闲置自动收回（设置里可调秒数，0=永不自动收）
     NSTimer              *_fanHideTimer;
+    BOOL                  _edgeGuard;     // v1.3.24：悬浮球是否在「会撞车的边」上压住系统手势（默认开）
+    BOOL                  _screenWasOn;   // v1.3.24：上次轮询时的亮屏状态（亮屏瞬间补一次完整刷新）
     CGFloat               _fanAutoHide;
-    BOOL                  _tapConfirm;  // YES=点扇形图标先弹确认框(输入框+打开按钮)，NO=一点就直接触发
     BOOL                  _applyingRemote;
 
     NSString              *_url;
-    CGFloat               _winW;
-    CGFloat               _winH;
     CGPoint               _ballDragOrigin;
-    CGSize                _pinchBaseSize;
-    CGPoint               _pinchBaseCenter;
-    NSMutableArray        *_history;
-    CGRect                _lastPanelFrame;
-    BOOL                  _hasLastFrame;
 
     NSArray               *_entries;
     NSMutableArray        *_fanItems;
@@ -757,7 +694,6 @@ static void fuFrontGoneCb(CFNotificationCenterRef center, void *observer,
     NSInteger             _snapGen;          // 吸附延时：代号（每次重排 +1，让排队中的旧延时块失效）
     BOOL                  _snapPending;      // 有待吸附（扇形/面板开着时先挂起）
     NSTimeInterval        _snapDelay;        // 松手后「完整悬浮图标」停留秒数（默认 3，0=立即吸附）
-    BOOL                  _webAckPending;    // 正在等 App 的内置浏览器回执（没有就兜底系统浏览器）
     BOOL                  _respringPromptShowing;   // v1.3.17：注销选择框防重复弹
     NSData               *_ballIconShown;    // 球外观缓存（避免每秒轮询重复解码图片）
     NSString             *_ballShownTitle;
@@ -773,26 +709,20 @@ static void fuFrontGoneCb(CFNotificationCenterRef center, void *observer,
 - (instancetype)init {
     if (self = [super init]) {
         _enabled  = YES; _url = @"https://www.apple.com";
-        _winW = 340; _winH = 480; _expanded = NO; _didSetup = NO; _fanOpen = NO;
+        _didSetup = NO; _fanOpen = NO;
         _side = 0; _iconSize = 40.0f; _iconGap = 56.0f;   // v1.3.1：球默认停靠右侧
         _fanSpan = 180.0f; _fanScale = 100.0f;            // v1.3.2 扇形角度 / 整体距离
         _fanAutoHide = 5.0f;                              // v1.3.21：默认闲置 5 秒自动收回扇形
         _snapMode = 0; _webMode = 0; _ballTitle = @"URL";  // v1.3.5 默认：自动吸附 + 系统浏览器
         _snapDelay = 3.0;                                  // v1.3.13：默认吸附延时 3 秒（松手后先给完整图标）
         _layer1 = 8; _layer2 = 16; _layer3 = 24;           // v1.3.6：三层默认数量 8/16/24（合计 48）
+        _edgeGuard = YES; _screenWasOn = YES;              // v1.3.24：默认压住冲突边 + 起始按亮屏算
         _frontWatched = [NSMutableSet set];
-        _history = [NSMutableArray array]; _fanItems = [NSMutableArray array]; _fanOffsets = [NSMutableArray array];
-        [self reloadPrefs]; [self loadHistory];
+        _fanItems = [NSMutableArray array]; _fanOffsets = [NSMutableArray array];
+        [self reloadPrefs];
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
             (__bridge const void *)(self), &fuPrefsChanged,
             (__bridge CFStringRef)kFUPrefsChanged, NULL, CFNotificationSuspensionBehaviorCoalesce);
-        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
-            (__bridge const void *)(self), &fuSyncChanged,
-            (__bridge CFStringRef)kFUSyncChanged, NULL, CFNotificationSuspensionBehaviorCoalesce);
-        // v1.3.13：App 弹出内置浏览器后的回执（纯 C 通知注册，与上面两条同一套路，不碰启动路径 UI）
-        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
-            (__bridge const void *)(self), &fuInAppWebAckCb,
-            (__bridge CFStringRef)kFUInAppWebAck, NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         // v1.3.17：deb 升级完成（postinst 发出）→ 弹「立即注销 / 稍后」
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
             (__bridge const void *)(self), &fuNeedsRespringCb,
@@ -808,30 +738,10 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
         dispatch_async(dispatch_get_main_queue(), ^{ fuPrefsChanged(center, observer, name, object, userInfo); });
         return;
     }
-    [mgr reloadPrefs]; [mgr loadHistory];
-    if (mgr->_historyTable) [mgr->_historyTable reloadData];
+    [mgr reloadPrefs];
     [mgr applyVisibility];
 }
-static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
-                          CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-    FUFloatingManager *mgr = (__bridge FUFloatingManager *)observer;
-    if (![NSThread isMainThread]) {
-        dispatch_async(dispatch_get_main_queue(), ^{ fuSyncChanged(center, observer, name, object, userInfo); });
-        return;
-    }
-    [mgr applySync];
-}
 // v1.3.13：前台 App 的内置浏览器真的弹出来了 → 撤销系统浏览器兜底
-static void fuInAppWebAckCb(CFNotificationCenterRef center, void *observer,
-                            CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-    FUFloatingManager *mgr = (__bridge FUFloatingManager *)observer; if (!mgr) return;
-    if (![NSThread isMainThread]) {
-        dispatch_async(dispatch_get_main_queue(), ^{ fuInAppWebAckCb(center, observer, name, object, userInfo); });
-        return;
-    }
-    mgr->_webAckPending = NO;
-    NSLog(@"[FloatingURL] App 已弹出内置浏览器（回执收到）");
-}
 
 // ---- v1.3.17：升级后「立即注销 / 稍后」选择弹窗 ----
 static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
@@ -853,14 +763,10 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     _enabled = valid ? en : YES;
     CFPropertyListRef urlRef = CFPreferencesCopyAppValue(CFSTR("url"), (__bridge CFStringRef)kFUSuite);
     if (urlRef) { NSString *u = (__bridge_transfer NSString *)urlRef; if (u.length) _url = u; }
-    CFPropertyListRef wRef = CFPreferencesCopyAppValue(CFSTR("winWidth"), (__bridge CFStringRef)kFUSuite);
-    if (wRef && CFGetTypeID(wRef) == CFNumberGetTypeID()) { _winW = [(__bridge NSNumber *)wRef floatValue]; CFRelease(wRef); }
-    CFPropertyListRef hRef = CFPreferencesCopyAppValue(CFSTR("winHeight"), (__bridge CFStringRef)kFUSuite);
-    if (hRef && CFGetTypeID(hRef) == CFNumberGetTypeID()) { _winH = [(__bridge NSNumber *)hRef floatValue]; CFRelease(hRef); }
-    if (_winW < 200) _winW = 200; if (_winW > 600) _winW = 600;
-    if (_winH < 280) _winH = 280; if (_winH > 900) _winH = 900;
-    CFPropertyListRef barRef = CFPreferencesCopyAppValue(CFSTR("barAtBottom"), (__bridge CFStringRef)kFUSuite);
-    if (barRef) { _barAtBottom = [(__bridge NSNumber *)barRef boolValue]; CFRelease(barRef); }
+    // v1.3.24：动态压住系统手势边（底部上滑 / 顶部下拉），默认开
+    Boolean egValid;
+    BOOL eg = CFPreferencesGetAppBooleanValue(CFSTR("edgeGuard"), (__bridge CFStringRef)kFUSuite, &egValid);
+    _edgeGuard = egValid ? eg : YES;
     // v1.3.1 布局：停靠边(side) + 图标大小 + 图标间隔（位置不再用 X/Y 滑杆，球固定在左/右边）
     CFPropertyListRef sdRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUSide, (__bridge CFStringRef)kFUSuite);
     if (sdRef && CFGetTypeID(sdRef) == CFNumberGetTypeID()) { _side = [(__bridge NSNumber *)sdRef integerValue]; CFRelease(sdRef); }
@@ -1022,22 +928,6 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 }
 
 #pragma mark - 历史
-- (void)loadHistory {
-    CFPropertyListRef hRef = CFPreferencesCopyAppValue(CFSTR("history"), (__bridge CFStringRef)kFUSuite);
-    if (hRef) { NSArray *arr = (__bridge_transfer NSArray *)hRef;
-        if ([arr isKindOfClass:[NSArray class]]) _history = [arr mutableCopy]; }
-    if (!_history) _history = [NSMutableArray array];
-}
-- (void)saveHistory {
-    CFPreferencesSetAppValue(CFSTR("history"), (__bridge CFPropertyListRef)(_history), (__bridge CFStringRef)kFUSuite);
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
-}
-- (void)pushHistory:(NSString *)raw {
-    NSString *u = [self normalizeURL:raw]; if (!u.length) return;
-    [_history removeObject:u]; [_history insertObject:u atIndex:0];
-    while (_history.count > 30) [_history removeLastObject];
-    [self saveHistory];
-}
 - (NSString *)normalizeURL:(NSString *)raw {
     NSString *s = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (!s.length) return nil;
@@ -1083,7 +973,9 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
         _overlay.hidden = NO;            // 仅可见，绝不 makeKeyAndVisible
         _overlay.userInteractionEnabled = YES;
         // disabled 透明 rootVC：用于承载编辑器 VC，且其 view 不参与 hitTest（安全穿透）
-        _overlayRoot = [UIViewController new];
+        FUOverlayRootController *root = [FUOverlayRootController new];
+        root.edgesProvider = self;   // v1.3.24：让 rootVC 能动态问出「要压住哪条边」
+        _overlayRoot = root;
         _overlayRoot.view.backgroundColor = [UIColor clearColor];
         _overlayRoot.view.userInteractionEnabled = NO;
         _overlay.rootViewController = _overlayRoot;
@@ -1098,7 +990,8 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     // v1.3.0 兜底：每秒重读偏好并重判黑名单/开关。Darwin 通知在某些 App（如 QQ）里会被
     // 延迟或吞掉，导致「设置里加了黑名单、球还在」——轮询保证 1 秒内必生效。
     if (!_pollTimer) {
-        _pollTimer = [NSTimer timerWithTimeInterval:1.0 target:self selector:@selector(onBecomeActive)
+        // v1.3.24：1 秒 → 2 秒（黑名单仍有 2 秒内响应），再叠加「息屏完全停轮询」，CPU 唤醒减半以上。
+        _pollTimer = [NSTimer timerWithTimeInterval:2.0 target:self selector:@selector(onBecomeActive)
                                            userInfo:nil repeats:YES];
         [[NSRunLoop mainRunLoop] addTimer:_pollTimer forMode:NSRunLoopCommonModes];
     }
@@ -1109,6 +1002,10 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 - (void)onBecomeActive {
     if (!_didSetup) return;
     @try {
+        // v1.3.24：息屏 → 什么都不做（不读偏好、不判前台、不刷 UI），这是最大的一块省电。
+        // 刚亮屏那一轮会立刻补一次完整刷新，所以不会出现「解锁后黑名单/开关不生效」。
+        if (!fuScreenIsOn()) { _screenWasOn = NO; return; }
+        _screenWasOn = YES;
         // v1.3.3：静默模式 → 桌面球彻底休眠，跳过前台检测与偏好重读（最省电）
         if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"]) {
             [self applyVisibility]; return;
@@ -1184,109 +1081,6 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     [_overlay addSubview:_ball];
     [self placeBallInWindow:_overlay];
 
-    // ---- 网页面板 ----
-    _panel = [[UIView alloc] initWithFrame:CGRectZero];
-    _panel.backgroundColor = [UIColor systemBackgroundColor];
-    _panel.layer.cornerRadius = 14.0f; _panel.clipsToBounds = YES; _panel.hidden = YES;
-    _panel.layer.borderColor = [UIColor separatorColor].CGColor; _panel.layer.borderWidth = 0.5f;
-
-    _bar = [[UIView alloc] initWithFrame:CGRectZero];
-    _bar.backgroundColor = [UIColor secondarySystemBackgroundColor];
-    _bar.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    [_bar addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(panPanel:)]];
-    UILongPressGestureRecognizer *barLong = [[UILongPressGestureRecognizer alloc]
-        initWithTarget:self action:@selector(toggleBarPosition:)];
-    barLong.minimumPressDuration = 0.6;
-    [_bar addGestureRecognizer:barLong];
-
-    UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
-    close.frame = CGRectMake(4, 0, 44, 40); [close setTitle:@"✕" forState:UIControlStateNormal];
-    close.titleLabel.font = [UIFont boldSystemFontOfSize:15];
-    [close addTarget:self action:@selector(collapse) forControlEvents:UIControlEventTouchUpInside];
-    close.autoresizingMask = UIViewAutoresizingFlexibleRightMargin; [_bar addSubview:close];
-
-    _urlField = [[UITextField alloc] initWithFrame:CGRectZero];
-    _urlField.placeholder = @"输入网址"; _urlField.text = _url; _urlField.font = [UIFont systemFontOfSize:12];
-    _urlField.textAlignment = NSTextAlignmentCenter; _urlField.borderStyle = UITextBorderStyleRoundedRect;
-    _urlField.autocorrectionType = UITextAutocorrectionTypeNo; _urlField.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    _urlField.keyboardType = UIKeyboardTypeURL; _urlField.returnKeyType = UIReturnKeyGo;
-    _urlField.clearButtonMode = UITextFieldViewModeWhileEditing; _urlField.delegate = self;
-    _urlField.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    [_urlField addTarget:self action:@selector(urlGo) forControlEvents:UIControlEventEditingDidEndOnExit];
-    [_urlField addTarget:self action:@selector(urlEditingBegan) forControlEvents:UIControlEventEditingDidBegin];
-    [_bar addSubview:_urlField];
-
-    UIButton *reload = [UIButton buttonWithType:UIButtonTypeSystem];
-    _reloadBtn = reload; reload.frame = CGRectMake(0, 0, 44, 40); [reload setTitle:@"↻" forState:UIControlStateNormal];
-    reload.titleLabel.font = [UIFont boldSystemFontOfSize:16];
-    [reload addTarget:self action:@selector(reload) forControlEvents:UIControlEventTouchUpInside];
-    reload.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin; [_bar addSubview:reload];
-    [_panel addSubview:_bar];
-
-    _historyTable = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
-    _historyTable.dataSource = self; _historyTable.delegate = self; _historyTable.hidden = YES;
-    _historyTable.backgroundColor = [UIColor secondarySystemBackgroundColor];
-    _historyTable.layer.cornerRadius = 10;
-    _historyTable.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [_panel addSubview:_historyTable];
-
-    WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];
-    // ★ 关键：独立悬浮窗里的 WKWebView 白屏，常见根因是 Web 内容进程在「非 App 主窗口」里启停不稳。
-    //   复用同一个 WKProcessPool，让 Web 进程持久稳定，杜绝白屏。
-    static WKProcessPool *fuPool = nil;
-    static dispatch_once_t oncePool;
-    dispatch_once(&oncePool, ^{ fuPool = [[WKProcessPool alloc] init]; });
-    cfg.processPool = fuPool;
-    cfg.allowsAirPlayForMediaPlayback = YES;
-    _webView = [[WKWebView alloc] initWithFrame:CGRectZero configuration:cfg];
-    _webView.navigationDelegate = self;
-    _webView.allowsBackForwardNavigationGestures = YES;
-    // v1.3.0 修「只有网址没有网页内容(白屏)」：透明 WKWebView 在独立 window 里
-    // 合成路径异常 → 改回不透明 + 实底色，内容进程稳定渲染。
-    _webView.opaque = YES; _webView.backgroundColor = [UIColor systemBackgroundColor];
-    _webView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    _webView.scrollView.bounces = YES; [_panel addSubview:_webView];
-    // v1.3.11 血泪教训：绝对不要在 SpringBoard 里创建 UIWebView(WebKit1) —— 它会拉起 WebThread
-    // 挂死桌面主线程，watchdog 每 60~120s 杀一次 SpringBoard → 无限 respring 循环（真机复现）。
-    // 桌面内置网页面板暂不可行；webMode 打开时桌面点击仍走系统浏览器。
-
-    _spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
-    _spinner.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin |
-                                UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
-    [_webView addSubview:_spinner];
-
-    // 网页加载失败时显示原因（白屏无提示太难排查）；叠在 webView 之上、工具条之下。
-    _webErrorLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-    _webErrorLabel.hidden = YES; _webErrorLabel.numberOfLines = 0;
-    _webErrorLabel.textAlignment = NSTextAlignmentCenter;
-    _webErrorLabel.font = [UIFont systemFontOfSize:12];
-    _webErrorLabel.textColor = [UIColor systemRedColor];
-    _webErrorLabel.backgroundColor = [UIColor secondarySystemBackgroundColor];
-    _webErrorLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [_panel addSubview:_webErrorLabel];
-    [_panel bringSubviewToFront:_bar];   // 保证关闭/地址条始终在最上层
-
-    // 非网页入口（scheme 类）的简单输入框：仅此模式显示，不显示网页工具条/网页视图。
-    _schemeBox = [[UIView alloc] initWithFrame:CGRectZero];
-    _schemeBox.backgroundColor = [UIColor secondarySystemBackgroundColor];
-    _schemeBox.layer.cornerRadius = 12; _schemeBox.hidden = YES;
-    [_panel addSubview:_schemeBox];
-    _schemeField = [[UITextField alloc] initWithFrame:CGRectZero];
-    _schemeField.borderStyle = UITextBorderStyleRoundedRect; _schemeField.font = [UIFont systemFontOfSize:13];
-    _schemeField.textAlignment = NSTextAlignmentCenter; _schemeField.keyboardType = UIKeyboardTypeURL;
-    _schemeField.autocorrectionType = UITextAutocorrectionTypeNo; _schemeField.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    _schemeField.clearButtonMode = UITextFieldViewModeWhileEditing; _schemeField.returnKeyType = UIReturnKeyGo;
-    [_schemeBox addSubview:_schemeField];
-    _schemeOpenBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    _schemeOpenBtn.layer.cornerRadius = 10; _schemeOpenBtn.backgroundColor = [UIColor systemBlueColor];
-    [_schemeOpenBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    [_schemeOpenBtn setTitle:@"打开" forState:UIControlStateNormal];
-    [_schemeOpenBtn addTarget:self action:@selector(openScheme) forControlEvents:UIControlEventTouchUpInside];
-    [_schemeBox addSubview:_schemeOpenBtn];
-
-    [_panel addGestureRecognizer:[[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(pinchPanel:)]];
-    [_overlay addSubview:_panel];
-    [self layoutPanel];
 }
 - (void)placeBallInWindow:(UIWindow *)w {
     if (!_ball || !w) return;
@@ -1308,6 +1102,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     CGFloat y = MAX(2.0f,             MIN(s.size.height - kFUButtonSize - 2.0f, cy - kFUButtonSize/2.0f));
     _ball.frame = CGRectMake(x, y, kFUButtonSize, kFUButtonSize);
     _ball.alpha = 0.4f;   // 初始即半透明待机（拖动/点击会临时变实心）
+    [self fuRefreshDeferredEdges];   // v1.3.24：按恢复出来的位置压住对应边
 }
 // v1.3.5 修 05：把自定义的名称/图标/底色应用到悬浮球（图标优先于文字）
 - (void)applyBallAppearance {
@@ -1344,6 +1139,27 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
         _ballBlur.backgroundColor = bg ?: [UIColor clearColor];   // 不填底色 = 玻璃质感
     }
 }
+// v1.3.24：当前要让位给悬浮球的系统手势边（由 FUOverlayRootController 每帧回调时查询）。
+//   球贴底 ⇒ 压底边（上滑回主屏让位）；球贴顶 ⇒ 压顶边（下拉通知/控制中心让位）；
+//   拖动中 / 扇形展开中 ⇒ 上下两条边都压住，防止半路被系统抢走触点；
+//   球移到中间 ⇒ 一条边都不压，系统手势 100% 恢复正常。
+- (UIRectEdge)fuDeferredEdges {
+    if (!_edgeGuard) return UIRectEdgeNone;
+    if (!_ball || _ball.hidden || !_overlay || _overlay.hidden) return UIRectEdgeNone;
+    if (_draggingBall || _fanOpen) return (UIRectEdge)(UIRectEdgeTop | UIRectEdgeBottom);
+    CGRect s = _overlay.bounds;
+    if (s.size.width < 1 || s.size.height < 1) return UIRectEdgeNone;
+    CGPoint c = CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame));
+    CGFloat band = MAX(kFUButtonSize * 1.6f, MIN(s.size.width, s.size.height) * 0.18f);
+    UIRectEdge e = UIRectEdgeNone;
+    if (c.y < band)                 { e = (UIRectEdge)(e | UIRectEdgeTop); }
+    if (s.size.height - c.y < band) { e = (UIRectEdge)(e | UIRectEdgeBottom); }
+    return e;
+}
+// v1.3.24：位置/状态变了，让 UIKit 重新问一次（只在落点确定的时刻调用，拖动过程中不刷，省开销）
+- (void)fuRefreshDeferredEdges {
+    [_overlayRoot setNeedsUpdateOfScreenEdgesDeferringSystemGestures];
+}
 // v1.3.5 修 03：扇形朝向 = 由球的「实际位置」判定左右，而不是设置里手选的边。
 // 球在屏幕中心线左边 → 扇形朝右（屏幕内侧）展开；在右边 → 朝左展开。
 - (NSInteger)fuBallSide {
@@ -1362,42 +1178,12 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
         (__bridge CFPropertyListRef)@(CGRectGetMidY(_ball.frame) / s.size.height), (__bridge CFStringRef)kFUSuite);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
 }
-- (void)layoutPanel {
-    if (!_panel) return;
-    CGRect b = _panel.bounds; CGFloat barH = 40; CGRect barF, webF;
-    if (_barAtBottom) { barF = CGRectMake(0, b.size.height - barH, b.size.width, barH);
-        webF = CGRectMake(0, 0, b.size.width, b.size.height - barH); }
-    else { barF = CGRectMake(0, 0, b.size.width, barH); webF = CGRectMake(0, barH, b.size.width, b.size.height - barH); }
-    _bar.frame = barF; _webView.frame = webF; _historyTable.frame = webF;
-    _urlField.frame = CGRectMake(52, 6, b.size.width - 104, 28);
-    _reloadBtn.frame = CGRectMake(b.size.width - 48, 0, 44, 40);
-    _spinner.center = CGPointMake(webF.size.width/2.0, webF.size.height/2.0);
-    if (_webErrorLabel) _webErrorLabel.frame = webF;   // 覆盖网页区域（不含工具条）
-    if (_schemeBox) {
-        _schemeBox.frame = CGRectMake(12, 12, b.size.width - 24, b.size.height - 24);
-        CGFloat pad = 16; CGRect ib = _schemeBox.bounds;
-        _schemeField.frame = CGRectMake(pad, 24, ib.size.width - pad*2, 36);
-        _schemeOpenBtn.frame = CGRectMake(pad, 76, ib.size.width - pad*2, 44);
-    }
-    [_historyTable setNeedsLayout]; [self applyWebZoom];
-}
-- (void)applyWebZoom {
-    if (!_webView || !_expanded) return;
-    CGFloat z = _panel.bounds.size.width / 340.0f; z = MAX(0.5f, MIN(3.0f, z));
-    UIScrollView *sv = _webView.scrollView;
-    if (fabs(sv.zoomScale - z) < 0.02f) return;
-    CGSize cs = sv.contentSize; if (cs.width < 1) cs = _webView.bounds.size;
-    CGPoint c = CGPointMake(cs.width/2.0, cs.height/2.0);
-    CGFloat w = _webView.bounds.size.width / z, h = _webView.bounds.size.height / z;
-    [sv zoomToRect:CGRectMake(c.x - w/2.0, c.y - h/2.0, w, h) animated:NO];
-}
 
 #pragma mark - 交互
 - (void)ballTapped {
     [self cancelPendingSnap];     // v1.3.13：点球 = 取消待吸附（否则扇形刚弹出球就被吸走）
     _ball.alpha = 1.0f;   // 点击唤醒：变实心，方便使用
     [self restoreBallFromSnap];   // 半隐吸附态 → 先拉回完整可见
-    if (_expanded) { [self collapse]; return; }
     if (_fanOpen)  { [self closeFan]; return; }
     // v1.3.5 修 06：一个入口都没有（用户把快捷 URL 删光了）→ 什么都不做，
     // 不能再弹出一个默认网页（那既莫名又打不开）。
@@ -1415,6 +1201,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     if (g.state == UIGestureRecognizerStateBegan) {
         _ballDragOrigin = _ball.frame.origin; _ball.alpha = 1.0f; _draggingBall = YES;   // 拖动时变实心
         [self cancelPendingSnap];   // v1.3.13：一开始拖就取消待吸附，别拖到一半被吸走
+        [self fuRefreshDeferredEdges];   // v1.3.24：一抓住球就把上下两条边压住，拖动不会被系统抢走
     }
     else if (g.state == UIGestureRecognizerStateChanged) {
         CGPoint t = [g translationInView:_overlay];
@@ -1430,6 +1217,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     else if (g.state == UIGestureRecognizerStateEnded || g.state == UIGestureRecognizerStateCancelled) {
         _draggingBall = NO;   // 取消/中断也要复位，否则球的半透明待机态回不来
         if (g.state == UIGestureRecognizerStateEnded) [self scheduleSnapAfterDrop];   // v1.3.13：按延时吸附
+        [self fuRefreshDeferredEdges];   // v1.3.24：松手后按新落点重算要压住的边
     }
 }
 // v1.3.13：吸附改成「延时吸附」三步走（用户要求：松手后先给完整的悬浮图标，N 秒后再吸附）：
@@ -1458,7 +1246,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
         _snapPending = NO; _ball.alpha = 0.4f; return;
     }
     _ball.alpha = 1.0f;          // ★ 延时期间 = 完整的悬浮图标（用户明确要的效果）
-    if (_fanOpen || _expanded) { _snapPending = YES; return; }   // 扇形/面板还开着 → 等关掉再排（见 closeFan）
+    if (_fanOpen) { _snapPending = YES; return; }   // 扇形还开着 → 等关掉再排（见 closeFan）
     _snapPending = NO;
     NSTimeInterval d = MAX(0.0, _snapDelay);
     if (d <= 0.05) { [self doSnapToEdgeWithGen:myGen]; return; }   // 设成 0 = 立即吸附（老行为）
@@ -1473,7 +1261,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 - (void)doSnapToEdgeWithGen:(NSInteger)gen {
     if (!_ball || !_overlay) return;
     if (gen != _snapGen) return;
-    if (_snapMode == 1 || _fanOpen || _expanded) return;
+    if (_snapMode == 1 || _fanOpen) return;
     CGRect b = _ball.frame; CGRect s = _overlay.bounds;
     CGFloat half = b.size.width / 2.0f;
     // 竖向永远停在松手位置（不吸上/下边，避免球跑到状态栏或 Dock 上）
@@ -1488,6 +1276,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
                      completion:^(BOOL done){
         FUFloatingManager *ss = ws; if (!ss) return;
         [ss persistBallPos];
+        [ss fuRefreshDeferredEdges];   // v1.3.24：吸附归位后按最终位置重算
     }];
 }
 // 球处于「半隐吸附态」时，点击先把它完整拉回屏幕内（再弹环/面板）。
@@ -1499,40 +1288,6 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
                                 f.size.width, f.size.height);
     if (!CGRectEqualToRect(f, clamped))
         [UIView animateWithDuration:0.2 animations:^{ _ball.frame = clamped; }];
-}
-- (void)panPanel:(UIPanGestureRecognizer *)g {
-    if (!_panel || !_panel.superview) return;
-    if (g.state == UIGestureRecognizerStateChanged) {
-        CGPoint t = [g translationInView:_overlay]; CGRect f = _panel.frame;
-        f.origin.x += t.x; f.origin.y += t.y;
-        f.origin.x = MAX(0, MIN(_overlay.bounds.size.width  - f.size.width,  f.origin.x));
-        f.origin.y = MAX(0, MIN(_overlay.bounds.size.height - f.size.height, f.origin.y));
-        _panel.frame = f; _lastPanelFrame = f; _hasLastFrame = YES; [g setTranslation:CGPointZero inView:_overlay];
-    } else if (g.state == UIGestureRecognizerStateEnded) [self writeSync];
-}
-- (void)pinchPanel:(UIPinchGestureRecognizer *)g {
-    if (!_panel || !_panel.superview) return;
-    if (g.state == UIGestureRecognizerStateBegan) {
-        _pinchBaseSize = _panel.frame.size; _pinchBaseCenter = CGPointMake(CGRectGetMidX(_panel.frame), CGRectGetMidY(_panel.frame));
-    } else if (g.state == UIGestureRecognizerStateChanged) {
-        CGFloat scale = g.scale; if (scale <= 0.01) return;
-        CGRect s = _overlay.bounds;
-        CGFloat ww = MIN(MAX(_pinchBaseSize.width*scale, 220), s.size.width-16);
-        CGFloat hh = MIN(MAX(_pinchBaseSize.height*scale, 300), s.size.height-24);
-        CGRect f = CGRectMake(_pinchBaseCenter.x - ww/2.0, _pinchBaseCenter.y - hh/2.0, ww, hh);
-        f.origin.x = MAX(0, MIN(s.size.width  - f.size.width,  f.origin.x));
-        f.origin.y = MAX(0, MIN(s.size.height - f.size.height, f.origin.y));
-        _panel.frame = f; _lastPanelFrame = f; _hasLastFrame = YES; _winW = ww; _winH = hh;
-        [self layoutPanel];
-    } else if (g.state == UIGestureRecognizerStateEnded) [self writeSync];
-}
-- (void)toggleBarPosition:(UILongPressGestureRecognizer *)g {
-    if (g.state != UIGestureRecognizerStateBegan) return;
-    _barAtBottom = !_barAtBottom;
-    CFPreferencesSetAppValue(CFSTR("barAtBottom"), (__bridge CFPropertyListRef)[NSNumber numberWithBool:_barAtBottom],
-        (__bridge CFStringRef)kFUSuite);
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
-    [self layoutPanel];
 }
 
 #pragma mark - 扇形快捷菜单（v1.3.2：数量决定层数与位置 + 贴边自动变形）
@@ -1627,23 +1382,23 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
             caps[i] = add; placed2 += add;
         }
     }
-    // v1.3.10：朝向回归「按屏幕中心线分左右」—— 球在左→扇形朝右、在右→朝左，始终围绕悬浮球。
-    // （1.3.8 的「球心指向屏幕中心」让球在四角/上下边时扇形乱指，真机反馈：除角落外都应围绕球。）
-    // v1.3.21：朝向改为「按球所在的区域」决定——除了左/右边这首尾两种情况，四个角落也单独处理：
-    //   贴左边（非角落）→ 朝右(0°)；贴右边（非角落）→ 朝左(180°)【保留 1.3.10 的行为】
-    //   左上角 → 沿对角线朝右下(45°)；右上角 → 朝左下(135°)
-    //   左下角 → 沿对角线朝右上(-45°)；右下角 → 朝左上(-135°)
-    //   这样球在角落时扇形是「从角落向屏幕里散开」，不会被两条边各切掉一大半。
-    CGFloat csx = (sc.size.width  > 0) ? (c.x / sc.size.width)  : 0.5f;
-    CGFloat csy = (sc.size.height > 0) ? (c.y / sc.size.height) : 0.5f;
-    BOOL leftZone  = (csx < 0.34f), rightZone = (csx > 0.66f);
-    BOOL topZone   = (csy < 0.34f), botZone   = (csy > 0.66f);
+    // v1.3.24：朝向判定重写。旧版用「屏幕三等分」判角落 → 屏幕一大片区域都算角落，扇形乱指。
+    //   改成按「离边的绝对距离」判，只有**真的快贴到角了**才走对角线：
+    //     · 四个角      → 沿对角线朝屏幕内侧散开（左上 45° / 右上 135° / 左下 -45° / 右下 -135°）
+    //     · 正上边(非角)→ 朝正下方 90°      · 正下边(非角) → 朝正上方 -90°
+    //     · 左 / 右边   → 水平朝屏幕内（0° / 180°），保留老行为
+    //   无论朝哪 APC 不准的就是弧覆盖固定角度，下面还有「收缩 + 整体平移」双重兜底，绝不越界。
+    CGFloat band = MAX(kFUButtonSize * 1.8f, MIN(sc.size.width, sc.size.height) * 0.22f);
+    BOOL nearL = (c.x < band), nearR = (sc.size.width  - c.x < band);
+    BOOL nearT = (c.y < band), nearB = (sc.size.height - c.y < band);
     CGFloat centerA;
-    if      (topZone && leftZone)  centerA =  45.0f;    // 左上 → 右下
-    else if (topZone && rightZone) centerA = 135.0f;    // 右上 → 左下
-    else if (botZone && leftZone)  centerA = -45.0f;    // 左下 → 右上
-    else if (botZone && rightZone) centerA = -135.0f;   // 右下 → 左上
-    else                           centerA = [self fuBallSide] ? 0.0f : 180.0f;   // 只在左/右边 → 水平朝内
+    if      (nearT && nearL) centerA =  45.0f;    // 左上角 → 朝右下（斜角对角）
+    else if (nearT && nearR) centerA = 135.0f;    // 右上角 → 朝左下
+    else if (nearB && nearL) centerA = -45.0f;    // 左下角 → 朝右上
+    else if (nearB && nearR) centerA = -135.0f;   // 右下角 → 朝左上
+    else if (nearT)          centerA =  90.0f;    // 正上边 → 朝下铺开
+    else if (nearB)          centerA = -90.0f;    // 正下边 → 朝上铺开
+    else                     centerA = [self fuBallSide] ? 0.0f : 180.0f;   // 左/右边 → 水平朝内
     // v1.3.8 修 02：角度自适应——从用户设定角度起逐档收缩，直到所有图标都在屏内；
     // （收缩会让同层弧距变小 → 一旦会挤到一起就停止收缩，改由下方「整体平移」兜底。）
     CGFloat span = [self fuFittingSpanForCenter:centerA radii:R caps:caps icon:isz margin:6.0f maxSpan:spanMax];
@@ -1693,6 +1448,10 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     return pts;
 }
 // v1.3.13 修「拖动球时扇形被推着走」：拖动过程中就用上面的算法重新排布（不带动画，跟手）。
+// v1.3.22：小窗展开时球是隐藏的，但它的坐标还停在打开前的旧位置 ——
+// 于是「拖动/缩放小窗到屏幕下方后收起」，球会突然出现在完全不相干的上面。
+// 解决：小窗每动一次就把球悄悄挪到小窗中心（此刻球不可见，看不出位移），
+// 收起时球自然就在小窗刚才的位置。
 - (void)fuRelayoutFanInstant {
     if (!_fanOpen || !_ball || !_overlay) return;
     [self restoreBallFromSnap];
@@ -1759,12 +1518,12 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 }
 - (void)fuScheduleFanAutoHide {
     [self fuCancelFanAutoHide];
-    if (!_fanOpen || _expanded || _fanAutoHide < 0.5) return;   // 0 秒 = 永不自动收
+    if (!_fanOpen || _fanAutoHide < 0.5) return;   // 0 秒 = 永不自动收
     __weak FUFloatingManager *ws = self;
     _fanHideTimer = [NSTimer scheduledTimerWithTimeInterval:_fanAutoHide repeats:NO block:^(NSTimer *t){
         FUFloatingManager *ss = ws; if (!ss) return;
         if (!ss->_fanOpen) return;
-        if (ss->_expanded || ss->_draggingBall) { [ss fuScheduleFanAutoHide]; return; }  // 正在用 → 再给一轮
+        if (ss->_draggingBall) { [ss fuScheduleFanAutoHide]; return; }  // 正在拖 → 再给一轮
         [ss closeFan];   // 收拢 → 球按「吸附延时」归位到半透明待机，恢复原状
     }];
 }
@@ -1848,57 +1607,9 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     if (![entry isKindOfClass:[NSDictionary class]]) return;
     NSString *u = entry[kFUEntryURL]; if (![u isKindOfClass:[NSString class]] || !u.length) return;
     NSString *norm = [self normalizeURL:u]; if (!norm.length) return;
-    // 确认模式（设置里可开）：不直接触发，先弹输入框+打开按钮，用户点「打开」才执行。
-    if (_tapConfirm) { [self showSchemeBox:norm]; return; }
-    // v1.3.18：网页不再一律外跳，改成「先试内置小窗，失败自动兜底浏览器」。
-    //  用户反馈"以前能在小窗口打开"，而 1.3.17 的实测又显示 SpringBoard 里 WebContent 可能起不来。
-    //  两种结论都可能成立（取决于越狱/环境），所以不赌一边：先给小窗，加载失败或超时就自动转浏览器，
-    //  并在本会话记住结果，避免每次都白等 —— 详见 openWebURL:。
-    if ([self isWebScheme:norm]) {
-        [self pushHistory:norm];
-        [self openWebURL:norm];
-        return;
-    }
+    // v1.3.24：内置小窗整套移除 → 点哪个入口都直接交给系统：
+    //   网页走 Safari（默认浏览器），scheme 走对应 App。没有任何中间弹窗。
     [self fuOpenExternally:norm];
-}
-// v1.3.18：网页打开策略 —— 先按用户想要的方式开内置小窗加载；
-//  加载失败 / 超时未完成 ⇒ 自动兜底转外部浏览器，绝不把人留在白屏里。
-- (void)openWebURL:(NSString *)norm {
-    if (!norm.length) return;
-    // 本会话已经确认过「这台机器桌面小窗渲染不了」→ 不再让用户白等，直接秒开浏览器。
-    if (_desktopWebBroken) { [self fuOpenExternally:norm]; return; }
-    @try {
-        _url = norm;
-        if (_urlField && !_urlField.isEditing) _urlField.text = norm;
-        NSInteger tok = ++_webLoadToken;
-        _webLoadedOK = NO; _webStarted = NO;
-        [self expand];                       // 先出小窗
-        [self loadURL];                      // 再往面板里加载
-        [self scheduleWebWatchdog:tok url:norm];
-    } @catch (NSException *e) {
-        NSLog(@"[FloatingURL] openWebURL 异常，转外部浏览器: %@", e);
-        [self fallbackWebToExternal:norm];
-    }
-}
-// 看门狗：加载既不成功也不报错（= WebContent 起不来的白屏）时兜底。
-- (void)scheduleWebWatchdog:(NSInteger)tok url:(NSString *)u {
-    __weak FUFloatingManager *ws = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        FUFloatingManager *ss = ws; if (!ss) return;
-        if (ss->_webLoadToken != tok) return;   // 期间换过别的加载 → 本次判定作废
-        if (ss->_webLoadedOK) return;           // 已成功加载 → 放行
-        if (!ss->_expanded) return;             // 用户已手动关掉面板 → 绝不事后再弹出浏览器
-        NSLog(@"[FloatingURL] 桌面小窗网页超时未完成 -> 兜底外部浏览器: %@", u);
-        // 连「开始导航」回调都没收到 = 结构性失败（渲染进程根本没起来）；
-        // 收到过但没完成 = 更可能是网络慢，本次兜底但不永久禁用小窗。
-        if (!ss->_webStarted) ss->_desktopWebBroken = YES;
-        [ss fallbackWebToExternal:u];
-    });
-}
-- (void)fallbackWebToExternal:(NSString *)u {
-    @try { [self collapse]; } @catch (NSException *e) {}
-    if (_webErrorLabel) _webErrorLabel.hidden = YES;
-    [self fuOpenExternally:u];
 }
 - (void)fanItemLongPressed:(UILongPressGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan) return;
@@ -1931,69 +1642,13 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     }
 }
 
-// v1.3.0 修「历史列表看得见点不动」：_webView 比 _historyTable 后加入 _panel，
-// 永远压在历史表上层把触摸吞掉 → 显示历史时必须把表置顶，收起时把 webView 顶回。
-- (void)setHistoryVisible:(BOOL)v {
-    if (!_historyTable) return;
-    if (v) { [_historyTable reloadData]; _historyTable.hidden = (_history.count == 0);
-             [_panel bringSubviewToFront:_historyTable]; [_panel bringSubviewToFront:_bar]; }
-    else   { _historyTable.hidden = YES; [_panel bringSubviewToFront:_webView]; [_panel bringSubviewToFront:_bar]; }
-}
-
 // v1.3.2：跨进程打开 URL。SpringBoard 里 UIApplication.openURL 不稳，优先用 LSApplicationWorkspace。
 // v1.3.8 修 01（卡死 bug）：**绝不能在主线程同步调用** —— openSensitiveURL:withOptions: 会一路同步等
 // FrontBoard 把目标 App 拉起，Safari/微信冷启动时要好几秒，这几秒里 SpringBoard 主线程被占死，
 // 表现就是「点了网页 -> 整机卡住、屏幕动不了」。这里整段丢到后台队列，主线程立刻返回。
 // v1.3.13：返回「可以投递的信箱路径」列表（按优先级）。桌面写目标 App 容器常被沙盒拒绝，
 // 所以多准备一个 /var/mobile/Media 下的公共信箱 —— 哪个写成功就用哪个，App 端两处都看。
-- (NSArray *)fuWebMailboxPathsForBid:(NSString *)bid {
-    NSMutableArray *out = [NSMutableArray array];
-    if (bid.length) {
-        @try {
-            Class proxyCls = NSClassFromString(@"LSApplicationProxy");
-            SEL fSel = NSSelectorFromString(@"applicationProxyForIdentifier:");
-            if (proxyCls && [proxyCls respondsToSelector:fSel]) {
-                id proxy = [proxyCls performSelector:fSel withObject:bid];
-                SEL dSel = NSSelectorFromString(@"dataContainerURL");
-                if (proxy && [proxy respondsToSelector:dSel]) {
-                    id dataURL = [proxy performSelector:dSel];
-                    if ([dataURL isKindOfClass:[NSURL class]]) {
-                        NSString *caches = [[(NSURL *)dataURL path] stringByAppendingPathComponent:@"Library/Caches"];
-                        if (caches.length) {
-                            [[NSFileManager defaultManager] createDirectoryAtPath:caches
-                                withIntermediateDirectories:YES attributes:nil error:NULL];
-                            [out addObject:[caches stringByAppendingPathComponent:kFUInAppWebFile]];
-                        }
-                    }
-                }
-            }
-        } @catch (NSException *e) { }
-    }
-    [out addObject:kFUWebMailboxMedia];   // 公共备用信箱
-    return out;
-}
 
-- (BOOL)fuHandoffWebToFrontApp:(NSURL *)u {
-    @try {
-        NSString *bid = [self fuFrontmostBid];
-        if (!bid.length) return NO;                       // 在桌面 → 没有 App 能接手，直接走系统浏览器
-        if ([bid isEqualToString:@"com.apple.mobilesafari"]) return NO;   // Safari 自己就是浏览器，别套一层
-        // 载荷 = 第一行时间戳（序号，防陈旧文件被重复打开）+ 第二行 URL
-        NSString *payload = [NSString stringWithFormat:@"%.3f\n%@",
-                             CFAbsoluteTimeGetCurrent(), u.absoluteString];
-        if (!payload.length) return NO;
-        for (NSString *p in [self fuWebMailboxPathsForBid:bid]) {
-            if ([payload writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:NULL]) {
-                NSLog(@"[FloatingURL] 网页已投递给 %@（信箱 %@）", bid, p);
-                _webAckPending = YES;                     // 先立旗，再喊人（App 回执可能瞬间到）
-                notify_post(kFUInAppWebName.UTF8String);
-                return YES;
-            }
-        }
-        NSLog(@"[FloatingURL] 投递信箱全部写失败（沙盒）→ 走系统浏览器");
-        return NO;                                        // 写不进去 → 兜底系统浏览器，绝不「点了没反应」
-    } @catch (NSException *e) { return NO; }
-}
 
 - (void)fuOpenViaWorkspace:(NSURL *)u {
     @try {
@@ -2061,35 +1716,15 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     }
 }
 
-// v1.3.12：网页统一入口。
-//   ① 在前台 App 里点 → 交回该 App 进程用「内置浏览器」(SFSafariViewController) 打开
-//      —— 与 1.2.1 体验一致（那时球在 App 进程里，所以网页能渲染）。
-//   ② 在桌面点 / 交不出去 / App 1.1 秒内没接住 → 系统浏览器。
-// 任何一步失败都会继续往下走，绝不会「点了没反应」。
+// v1.3.24：唯一的打开入口 —— 一律交给系统（Safari / 对应 App）。
 - (void)fuOpenExternally:(NSString *)s {
     NSURL *u = [NSURL URLWithString:s]; if (!u) return;
-    NSString *scheme = u.scheme.lowercaseString;
-    BOOL isWeb = [scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"];
+    // v1.3.24：内置面板 / App 端内置浏览器两套链路全部删除 —— 现在只有一条路：交给系统。
+    //   http(s) → Safari（用户默认浏览器）；weixin://、tel:、alipay:// 等 → 对应 App。
+    //  少一层就少一个故障点：以前「点了弹 App 内小窗」「点了半天没反应」都是从这两条链路漏出来的。
     dispatch_async(dispatch_get_main_queue(), ^{
-        @try {
-            if (isWeb && [self fuHandoffWebToFrontApp:u]) {
-                // 已交给前台 App 的内置浏览器。**只认 App 的回执**（真弹出来了才发），
-                // 1.5s 没回执 = App 没接住 / 不在前台 → 自动兜底系统浏览器。
-                // （1.3.12 是看「交接文件是否被删」——App 删了文件却没弹出浏览器时，这里会以为已接住，
-                //   结果什么都不开；用户反馈的「网页还是用不了」就是这个洞。）
-                __weak FUFloatingManager *ws = self;
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
-                               dispatch_get_main_queue(), ^{
-                    FUFloatingManager *ss = ws; if (!ss) return;
-                    if (!ss->_webAckPending) return;      // App 已弹出内置浏览器，收工
-                    ss->_webAckPending = NO;
-                    NSLog(@"[FloatingURL] App 未回执 → 改用系统浏览器打开");
-                    [ss fuOpenViaSystem:u];
-                });
-                return;
-            }
-            [self fuOpenViaSystem:u];
-        } @catch (NSException *e) {
+        @try { [self fuOpenViaSystem:u]; }
+        @catch (NSException *e) {
             NSLog(@"[FloatingURL] fuOpenExternally 异常（已忽略）: %@", e);
             [self fuOpenViaSystem:u];
         }
@@ -2097,75 +1732,6 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 }
 
 #pragma mark - 展开 / 收起 面板
-- (void)expand {
-    if (!_didSetup) { dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3*NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{ [self expand]; }); return; }
-    [self loadHistory];
-    CGRect s = _overlay.bounds;
-    CGFloat ww = MIN(_winW, s.size.width-16), hh = MIN(_winH, s.size.height-24);
-    if (_hasLastFrame) { CGRect f = _lastPanelFrame; f.size.width = ww; f.size.height = hh;
-        f.origin.x = MAX(0, MIN(s.size.width - f.size.width, f.origin.x));
-        f.origin.y = MAX(0, MIN(s.size.height - f.size.height, f.origin.y)); _panel.frame = f; }
-    else _panel.frame = CGRectMake((s.size.width-ww)/2.0, (s.size.height-hh)/2.0, ww, hh);
-    _urlField.text = _url; _schemeBox.hidden = YES; _bar.hidden = NO; _webView.hidden = NO;
-    _ball.hidden = YES; _expanded = YES; [self setInteractive:YES];   // 先把 overlay 设为 key，WKWebView 才能正常渲染
-    [_overlay bringSubviewToFront:_panel]; _panel.hidden = NO; [self setHistoryVisible:NO];
-    [self layoutPanel]; [_panel layoutIfNeeded]; [_webView layoutIfNeeded];
-    // v1.3.0：等 key 窗口 + 布局生效后再发起加载（WKWebView 在非 key/零尺寸下加载会白屏）。
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [self loadURL]; });
-    [self writeSync];
-}
-- (void)showSchemeBox:(NSString *)u {
-    if (!_didSetup) { dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3*NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{ [self showSchemeBox:u]; }); return; }
-    CGRect s = _overlay.bounds;
-    CGFloat ww = MIN(_winW, s.size.width-16), hh = MIN(_winH, s.size.height-24);
-    if (_hasLastFrame) { CGRect f = _lastPanelFrame; f.size.width = ww; f.size.height = hh;
-        f.origin.x = MAX(0, MIN(s.size.width - f.size.width, f.origin.x));
-        f.origin.y = MAX(0, MIN(s.size.height - f.size.height, f.origin.y)); _panel.frame = f; }
-    else _panel.frame = CGRectMake((s.size.width-ww)/2.0, (s.size.height-hh)/2.0, ww, hh);
-    _schemeField.text = u; _url = u;
-    [_overlay bringSubviewToFront:_panel]; _panel.hidden = NO;
-    // 非网页模式：只显示输入框 + 打开按钮，隐藏网页工具条/网页视图/历史。
-    _bar.hidden = YES; _webView.hidden = YES; [self setHistoryVisible:NO]; _schemeBox.hidden = NO;
-    [self layoutPanel];
-    _ball.hidden = YES; _expanded = YES; [self setInteractive:YES]; [self writeSync];
-}
-- (void)openScheme {
-    NSString *u = _schemeField.text; if (!u.length) return;
-    NSString *norm = [self normalizeURL:u];
-    if (norm.length) [self pushHistory:norm];
-    [self fuOpenExternally:norm];   // v1.3.2：网页/非网页都交给系统打开
-    [self collapse];
-}
-- (void)collapse {
-    [_urlField resignFirstResponder]; [_schemeField resignFirstResponder];
-    [self setHistoryVisible:NO]; _panel.hidden = YES;
-    _expanded = NO; [self setInteractive:NO]; [self writeSync];
-    // v1.3.0：统一走 applyVisibility（同时尊重总开关 + 黑名单），不再只判 enabled。
-    [self applyVisibility];
-}
-- (void)reload { [self loadURL]; }
-- (void)urlGo {
-    NSString *raw = _urlField.text; NSString *u = [self normalizeURL:raw];
-    if (!u.length) { _urlField.text = _url; return; }
-    // v1.3.18：改用 openWebURL:（内含看门狗兜底），手输网址也不会卡白屏。
-    _url = u; [self pushHistory:u]; [self openWebURL:u]; [_urlField resignFirstResponder];
-    [self setHistoryVisible:NO]; [self writeSync];
-}
-- (void)urlEditingBegan { [self setHistoryVisible:YES]; }
-- (void)loadURL {
-    NSURL *u = [NSURL URLWithString:_url]; if (!u || u.scheme == nil) u = [NSURL URLWithString:@"https://www.apple.com"];
-    NSString *scheme = u.scheme.lowercaseString;
-    NSSet *webSchemes = [NSSet setWithObjects:@"http",@"https",@"about",@"data",@"blob",@"file",@"javascript", nil];
-    if (scheme.length && ![webSchemes containsObject:scheme]) {
-        [self fuOpenExternally:u.absoluteString]; return;   // v1.3.5：统一走跨进程打开
-    }
-    // v1.3.18：去掉 1.3.17 的「桌面一律外跳」。桌面网页照样往内置面板加载，由
-    //  openURLInPanel: 起的看门狗负责：加载成功 → 正常小窗；失败/超时 → 自动转外部浏览器。
-    //  （这样既能保住用户想要的小窗，又绝不会再卡在白屏。）
-    [_webView loadRequest:[NSURLRequest requestWithURL:u]];
-}
 // v1.3.17：升级后「立即注销 / 稍后」选择弹窗（postinst 发 needsRespring 通知后走到这里）
 - (void)showRespringPrompt {
     @try {
@@ -2206,9 +1772,9 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     if (!fuIsSpringBoard()) return;
     // v1.3.3：静默模式 → 整窗彻底休眠（球/环/面板全藏），App 端也跳过心跳，最省电。
     if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"]) {
-        _overlay.hidden = YES; _ball.hidden = YES; _panel.hidden = YES;
+        _overlay.hidden = YES; _ball.hidden = YES;
         if (_fanOpen) [self closeFan];
-        if (_expanded) { _expanded = NO; [self setInteractive:NO]; }
+        [self setInteractive:NO];
         return;
     }
     // 防御：直接读之前也刷新一次进程内偏好缓存，确保拿到设置里最新改的值。
@@ -2233,115 +1799,19 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     // v1.3.2：不再需要「让位」——球只存在于 SpringBoard，App 进程根本不建球了。
     if (!_enabled || hidden) {
         _overlay.hidden = YES;
-        _ball.hidden = YES; _panel.hidden = YES;
-        // v1.3.1：隐藏时同步复位「展开态」，否则恢复显示时球仍 hidden、面板也 hidden → 屏幕上空无一物。
+        _ball.hidden = YES;
         if (_fanOpen) [self closeFan];
-        if (_expanded) { _expanded = NO; [self setInteractive:NO]; }
+        [self setInteractive:NO];
         return;
     }
     _overlay.hidden = NO;   // 允许显示：确保窗口一定恢复（含控制中心收起后）
-    if (!_expanded && !_fanOpen && !_draggingBall) { _ball.hidden = NO; _ball.alpha = 0.4f; [_overlay bringSubviewToFront:_ball]; [self setInteractive:NO]; }
+    if (!_fanOpen && !_draggingBall) { _ball.hidden = NO; _ball.alpha = 0.4f; [_overlay bringSubviewToFront:_ball]; [self setInteractive:NO]; }
+    [self fuRefreshDeferredEdges];   // v1.3.24：显隐变化会影响要不要压系统手势边
 }
 
-#pragma mark - 跨 App 轻量同步（v1.3.2：只剩 SpringBoard 一个实例，同步已无意义，直接空转）
-- (void)writeSync {
-    return;   // v1.3.2：球只在 SpringBoard，跨进程面板镜像正是「QQ 里残留一个 URL」的来源，停用
-    if (_applyingRemote) return;
-    NSMutableDictionary *d = [NSMutableDictionary dictionary];
-    d[@"open"] = @(_expanded);
-    if (_expanded) { d[@"url"] = _url ?: @""; d[@"panel"] = NSStringFromCGRect(_panel.frame); }
-    CFPreferencesSetAppValue((__bridge CFStringRef)kFUSync, (__bridge CFPropertyListRef)d, (__bridge CFStringRef)kFUSuite);
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
-    notify_post("com.yzdmm.floatingurl/syncChanged");
-}
-- (void)applySync {
-    return;   // v1.3.2：球只在 SpringBoard，跨进程面板镜像停用（它就是「QQ 里残留 URL」的来源）
-    if (_applyingRemote) return;
-    CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUSync, (__bridge CFStringRef)kFUSuite);
-    if (!r) return;
-    NSDictionary *d = (__bridge_transfer NSDictionary *)r;
-    BOOL open = [d[@"open"] boolValue]; NSString *u = d[@"url"];
-    if (open == _expanded && (!open || (_url && u && [_url isEqualToString:[self normalizeURL:u]]))) {
-        NSString *pf = d[@"panel"];
-        if (open && pf && _hasLastFrame) { CGRect f = CGRectFromString(pf);
-            if (!CGRectIsNull(f) && !CGRectEqualToRect(f, _panel.frame)) { _lastPanelFrame = f; _panel.frame = f; [self layoutPanel]; } }
-        return;
-    }
-    _applyingRemote = YES;
-    if (open) {
-        if (u.length) _url = [self normalizeURL:u];
-        NSString *pf = d[@"panel"]; if (pf) { _lastPanelFrame = CGRectFromString(pf); _hasLastFrame = YES; }
-        if (!_expanded) [self expand]; else { _urlField.text = _url; [self layoutPanel]; [self loadURL]; }
-    } else { if (_expanded) [self collapse]; }
-    _applyingRemote = NO;
-}
 
-#pragma mark - UITextFieldDelegate
-- (BOOL)textFieldShouldReturn:(UITextField *)textField { [self urlGo]; return YES; }
-- (BOOL)textFieldShouldClear:(UITextField *)textField { _historyTable.hidden = NO; return YES; }
 
-#pragma mark - 历史 UITableView
-- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section { return _history.count; }
-- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
-    static NSString *cellId = @"FUHistCell";
-    UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:cellId];
-    if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:cellId];
-    c.textLabel.text = _history[ip.row]; c.textLabel.font = [UIFont systemFontOfSize:12];
-    c.textLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    c.detailTextLabel.text = @"长按地址栏可切换工具条位置"; c.detailTextLabel.font = [UIFont systemFontOfSize:9];
-    c.detailTextLabel.textColor = [UIColor tertiaryLabelColor]; return c;
-}
-- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
-    NSString *u = _history[ip.row]; _url = u; _urlField.text = u; [self loadURL]; [self pushHistory:u];
-    [tv reloadData]; [self setHistoryVisible:NO]; [_urlField resignFirstResponder];
-}
-- (void)tableView:(UITableView *)tv commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
-                                            forRowAtIndexPath:(NSIndexPath *)ip {
-    if (editingStyle == UITableViewCellEditingStyleDelete) {
-        [_history removeObjectAtIndex:ip.row]; [self saveHistory];
-        [tv deleteRowsAtIndexPaths:@[ip] withRowAnimation:UITableViewRowAnimationFade];
-        if (_history.count == 0) _historyTable.hidden = YES;
-    }
-}
-- (NSString *)tableView:(UITableView *)tv titleForDeleteConfirmationButtonForRowAtIndexPath:(NSIndexPath *)ip { return @"删除"; }
 
-#pragma mark - WKNavigationDelegate
-- (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)nav {
-    [_spinner startAnimating]; if (_webErrorLabel) _webErrorLabel.hidden = YES;   // 开始新加载 → 清掉旧错误
-    _webStarted = YES;   // v1.3.18：收到过回调 → 说明 WebContent 起来了，不是结构性白屏
-}
-- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)nav {
-    [_spinner stopAnimating]; NSString *cur = webView.URL.absoluteString;
-    _webLoadedOK = YES;   // v1.3.18：加载成功 → 看门狗放行，小窗保持打开
-    if (cur.length && _expanded) { _url = cur; _urlField.text = cur; [self pushHistory:cur]; }
-    [self applyWebZoom];
-}
-- (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)nav withError:(NSError *)error {
-    [_spinner stopAnimating]; [self showWebError:[error localizedDescription]];
-    // v1.3.18：连最初导航都失败 = 这台机器确实渲染不了 → 记住，并立刻兜底浏览器（不停在错误页）
-    _webStarted = YES;
-    if (!_webLoadedOK && _expanded) { _desktopWebBroken = YES; [self fallbackWebToExternal:_url ?: webView.URL.absoluteString]; }
-}
-- (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)nav withError:(NSError *)error {
-    [_spinner stopAnimating]; [self showWebError:[error localizedDescription]];
-    _webStarted = YES;
-    if (!_webLoadedOK && _expanded) { _desktopWebBroken = YES; [self fallbackWebToExternal:_url ?: webView.URL.absoluteString]; }
-}
-- (void)showWebError:(NSString *)msg {
-    if (!_webErrorLabel) return;
-    _webErrorLabel.text = [NSString stringWithFormat:@"⚠️ 网页无法加载\n%@", msg ?: @"(无详细信息)"];
-    _webErrorLabel.hidden = NO;
-}
-- (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction
-                                                   decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
-    NSURL *u = navigationAction.request.URL; NSString *scheme = u.scheme.lowercaseString;
-    NSSet *webSchemes = [NSSet setWithObjects:@"http",@"https",@"about",@"data",@"blob",@"file",@"javascript", nil];
-    if (u && scheme.length && ![webSchemes containsObject:scheme]) {
-        [self fuOpenExternally:u.absoluteString];   // v1.3.5：统一走跨进程打开
-        decisionHandler(WKNavigationActionPolicyCancel); return;
-    }
-    decisionHandler(WKNavigationActionPolicyAllow);
-}
 
 @end
 

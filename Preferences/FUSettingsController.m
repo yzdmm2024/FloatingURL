@@ -780,8 +780,8 @@ static NSArray *FUColorPalette(void) {
         @{@"t":@"⑳ 高铁/12306", @"c":@"cn.12306://", @"d":@"拉起铁路12306 查票改签"},
         @{@"t":@"㉑ 跳系统设置", @"c":@"App-prefs:", @"d":@"填 App-prefs: 打开系统设置；App-prefs:Bluetooth 直达蓝牙等子页"},
         @{@"t":@"㉒ App Store 应用页", @"c":@"itms-apps://itunes.apple.com/app/id123456", @"d":@"把 id 换成应用 AppID，一键跳应用详情/评分"},
-        @{@"t":@"㉓ 工作门户", @"c":@"把公司 OA / 项目系统网址设为主 URL", @"d":@"悬浮球一键直达工作台，配合窗口大小调节当小窗浏览器用"},
-        @{@"t":@"㉔ 直播监控", @"c":@"监控摄像头/直播流的 http 网页地址", @"d":@"点开即小窗看画面，拖动+双指缩放随意摆位"},
+        @{@"t":@"㉓ 工作门户", @"c":@"把公司 OA / 项目系统网址设为主 URL", @"d":@"悬浮球一键直达工作台，点开直接跳 Safari，全屏看最舒服"},
+        @{@"t":@"㉔ 直播监控", @"c":@"监控摄像头/直播流的 http 网页地址", @"d":@"点开直接在 Safari 里打开监控画面，不用再挂着浮窗"},
         @{@"t":@"㉕ 查快递", @"c":@"快递查询网页 + 运单号参数", @"d":@"常用查件页设成快捷入口，收件高峰一键查"},
     ];
     _tv = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleGrouped];
