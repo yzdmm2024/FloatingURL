@@ -881,7 +881,6 @@ static NSArray *FUColorPalette(void) {
     [self.view bringSubviewToFront:_bar];
     if (_searchVisible) [self.view bringSubviewToFront:_search];
     [self.view bringSubviewToFront:_empty];
-    [self.view setNeedsLayout];
 }
 - (void)viewDidLayoutSubviews { [super viewDidLayoutSubviews]; [self layoutParts]; }
 - (void)viewWillAppear:(BOOL)animated {
@@ -1371,33 +1370,42 @@ static NSArray *FUColorPalette(void) {
     R[0] = (bs/2.0f + isz/2.0f + _iconGap * k) * kscale;
     R[1] = R[0] + stepR * kscale;
     R[2] = R[1] + stepR * kscale;
-    // v1.3.8 修 06：预览固定按「最大 48 个」渲染（真实入口优先，不足的用序号占位），
-    // 一眼就能看出满配时的密度/半径/朝向合不合适，画布也不会大片留空。
+    // v1.3.14：预览严格按「设置里每层数量」渲染（有显式数量就按数量画，不再自动补满 48）。
+    // 这样拖动任意一层滑杆，预览里对应圈的点数都会立刻变化；只有三层都设为 0（自动）时才铺满 48。
     NSInteger n = 48;
-    // v1.3.3：每层数量可指定（0=自动），与 tweak 内 openFan 同套逻辑
     NSInteger want[3] = { _layer1, _layer2, _layer3 };
     NSInteger caps[3] = { 0, 0, 0 };
-    NSInteger placed = 0;
-    for (int i = 0; i < 3; i++) {
-        if (want[i] > 0) {
-            NSInteger c2 = MIN(want[i], n - placed);
-            if (c2 > 0) { caps[i] = c2; placed += c2; }
-        }
-    }
+    BOOL anyExplicit = (want[0] > 0) || (want[1] > 0) || (want[2] > 0);
     CGFloat spanMax = MAX(60.0f, MIN(180.0f, (_span > 0 ? _span : 180.0f)));
-    NSInteger li = 0;
-    while (placed < n) {
-        NSInteger target = -1;
-        for (int i = li; i < 3; i++) { if (want[i] == 0) { target = i; break; } }
-        if (target < 0) target = 2;
-        CGFloat arc = R[target] * spanMax * (CGFloat)M_PI / 180.0f;
-        NSInteger autoCap = MAX(1, (NSInteger)floor(arc / (isz + gap)));
-        if (autoCap > 24) autoCap = 24;   // v1.3.8：与 tweak 内一致（原来预览卡在 8）
-        NSInteger space = n - placed;
-        NSInteger add = MIN(autoCap, space);
-        caps[target] += add; placed += add;
-        li = target + 1;
-        if (li >= 3 && placed < n) { caps[2] += (n - placed); placed = n; }
+    CGFloat spanRad = spanMax * (CGFloat)M_PI / 180.0f;
+    NSInteger placed = 0;
+    if (!anyExplicit) {
+        // 全部自动：按弧长把 48 个铺满三层（与 tweak 内 openFan 同套）
+        NSInteger li = 0;
+        while (placed < n) {
+            NSInteger target = -1;
+            for (int i = li; i < 3; i++) { if (want[i] == 0) { target = i; break; } }
+            if (target < 0) target = 2;
+            CGFloat arc = R[target] * spanRad;
+            NSInteger autoCap = MAX(1, (NSInteger)floor(arc / (isz + gap)));
+            if (autoCap > 24) autoCap = 24;
+            NSInteger space = n - placed;
+            NSInteger add = MIN(autoCap, space);
+            caps[target] += add; placed += add;
+            li = target + 1;
+            if (li >= 3 && placed < n) { caps[2] += (n - placed); placed = n; }
+        }
+    } else {
+        // 有显式数量：每层最多画用户指定的个数（受该层弧长容量与 48 上限约束），不自动补满
+        for (int i = 0; i < 3; i++) {
+            if (want[i] > 0) {
+                CGFloat arc = R[i] * spanRad;
+                NSInteger arcCap = MAX(1, (NSInteger)floor(arc / (isz + gap)));
+                NSInteger c = MIN(want[i], arcCap);
+                c = MIN(c, n - placed);
+                if (c > 0) { caps[i] = c; placed += c; }
+            }
+        }
     }
     // v1.3.8 修 02：朝向 = 球心指向画布中心（与真机 fuAngleToScreenCenter: 同源）
     CGFloat centerA = atan2f((s.size.height/2.0f) - c.y, (s.size.width/2.0f) - c.x) * 180.0f / (CGFloat)M_PI;
@@ -1442,7 +1450,7 @@ static NSArray *FUColorPalette(void) {
         }
     }
     // 底部小字：说明当前实际条目数（预览固定按 48 个满配画）
-    NSString *cap = [NSString stringWithFormat:@"实际 %ld 个入口 · 预览按最多 48 个满配显示", (long)real];
+    NSString *cap = [NSString stringWithFormat:@"实际 %ld 个入口 · 预览按设置排 %ld 个", (long)real, (long)(caps[0]+caps[1]+caps[2])];
     [cap drawInRect:CGRectMake(8, s.size.height - 18.0f, s.size.width - 16.0f, 14.0f) withAttributes:@{
         NSFontAttributeName: [UIFont systemFontOfSize:9],
         NSForegroundColorAttributeName: [UIColor colorWithWhite:1.0 alpha:0.45]}];

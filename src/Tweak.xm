@@ -476,19 +476,13 @@ static void fuStartAppHeartbeat(NSString *bid) {
     }
 }
 - (void)pickIcon {
-    Class cfgCls = NSClassFromString(@"PHPickerConfiguration"); if (!cfgCls) return;
-    id cfg = [[cfgCls alloc] init];
-    [cfg setValue:@1 forKey:@"selectionLimit"];
-    id filter = [NSClassFromString(@"PHPickerFilter") valueForKey:@"imagesFilter"];
-    if (filter) [cfg setValue:filter forKey:@"filter"];
-    Class pvcCls = NSClassFromString(@"PHPickerViewController"); if (!pvcCls) return;
-    // 用 objc_msgSend 直接调 initWithConfiguration:，避开 performSelector 的 ARC 选择器归属告警（-Werror）。
-    // 标注 ns_returns_retained 让 ARC 正确平衡 init 返回的 +1。
-    typedef id (*FUPickerInit)(id, SEL, id) __attribute__((ns_returns_retained));
-    SEL initSel = NSSelectorFromString(@"initWithConfiguration:");
-    id p = ((FUPickerInit)objc_msgSend)([pvcCls alloc], initSel, cfg);
-    [p setValue:self forKey:@"delegate"];
-    [self presentViewController:p animated:YES completion:nil];
+    // v1.3.14：桌面（SpringBoard）里直接弹 PHPickerViewController 会因缺宿主窗口/相册权限把 SpringBoard
+    // 搞崩（安全模式）。改在「设置 → 悬浮URL → 快捷URI」里选图标——那里是正常 App 进程，照片选择器安全。
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"换图标请到「设置」里"
+        message:@"桌面上不能直接选照片（会崩到安全模式）。打开「设置 → 悬浮URL → 快捷URI」，点对应入口的「选择图标」即可。"
+        preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"知道啦" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
 }
 - (void)picker:(id)picker didFinishPicking:(NSArray *)results {
     [picker dismissViewControllerAnimated:YES completion:nil];
