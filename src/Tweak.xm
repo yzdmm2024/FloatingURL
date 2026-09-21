@@ -29,7 +29,8 @@
 static NSString * const kFUSuite        = @"com.yzdmm.floatingurl";
 static NSString * const kFUPrefsChanged = @"com.yzdmm.floatingurl/settingsChanged";
 static NSString * const kFUSyncChanged  = @"com.yzdmm.floatingurl/syncChanged";
-static NSString * const kFUAppAlive     = @"com.yzdmm.floatingurl/appAlive";   // v1.3.1：App 前台存活心跳
+static NSString * const kFUAlivePrefix  = @"com.yzdmm.floatingurl/alive/";  // v1.3.2：+App bundle id（前台心跳）
+static NSString * const kFUGonePrefix   = @"com.yzdmm.floatingurl/gone/";   // v1.3.2：+App bundle id（退到后台）
 
 static NSString * const kFUURLs        = @"urls";
 static NSString * const kFUEntryURL    = @"url";
@@ -41,6 +42,8 @@ static NSString * const kFUEnabledApps = @"enabledApps";
 static NSString * const kFUSide        = @"side";       // 球停靠边：0=右(默认) 1=左
 static NSString * const kFUIconSize    = @"iconSize";   // 快捷图标尺寸 pt
 static NSString * const kFUIconGap     = @"iconGap";    // 图标/圈层间隔 pt
+static NSString * const kFUFanSpan     = @"fanSpan";    // v1.3.2 扇形角度（60~180°，默认 180）
+static NSString * const kFUFanScale    = @"fanScale";   // v1.3.2 整体距离（%，默认 100）
 
 static const NSInteger kFUMaxEntries = 10;   // v1.3.1：扇形两层（第一层 4 + 第二层 6 = 10）
 static const NSInteger kFULayer1Max  = 4;    // 第一层（内环）最多 4 个
@@ -53,29 +56,42 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
 static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
                           CFStringRef name, const void *object, CFDictionaryRef userInfo);
 
-// ---- v1.3.1 核心修复：悬浮球「单一持有者」----
-// 现状：本 tweak 经 Bundles=com.apple.UIKit 注入到「每个 App 进程」，每个进程各建一份球；
-// SpringBoard 也建一份（桌面兜底）。于是 App 内同时存在两份球：
-//   · 视觉：两个球重叠/交错 → 用户看到「到处都是球、有的 2 个有的 3 个」；
-//   · 黑名单：顶层那份是 SpringBoard 的，_hostBid 恒为 com.apple.springboard，
-//             永远比不中黑名单 → 「黑名单 App 里球还在」；
-//   · 网页：点开的其实是 SpringBoard 那份，WKWebView 在 SpringBoard 里渲染不出内容 → 白屏
-//           （用户实测「QQ 自己那个 URL 能打开网页」＝ App 进程内的那份是好的）；
-//   · 跨进程 sync 还会把 App 里的面板镜像到 SpringBoard → 「残留的 URL」。
-// 方案：非 SpringBoard 进程每秒广播「我在前台」心跳；SpringBoard 收到心跳就让位（隐藏自己的
-//      球并拒绝镜像面板）；3 秒收不到心跳（App 退后台被挂起）→ 桌面球恢复。
-static CFAbsoluteTime fuLastAppAliveTs = 0;
+// ---- v1.3.2 核心修复：球只由 SpringBoard 持有 ----
+// 真机 frida 实测（Notes / 闲鱼 等沙盒 App 进程内）：
+//   · NSUserDefaults(suite) → null；CFPreferences 各种变体 → 全 nil；
+//   · 连 /var/mobile/Library/Preferences 都无法读、无法写（沙盒直接拒绝，报 ENOENT）。
+//   → 沙盒 App 进程**根本读不到本 tweak 的偏好**：json/URL/布局全回退成默认值，
+//     黑名单也拿不到。这正是用户反馈「每个 App 里只有 1 个快捷 URL、黑名单不生效」的根因。
+//   而 SpringBoard 进程读设置完全正常（实测 6 条 URL + 黑名单都在）。
+// 方案：UI（球/扇形/面板）只在 SpringBoard 进程创建（设置可读、层级最高、全 App 可见）；
+//      各 App 进程只做一件事——用 Darwin 通知上报「我现在在前台」，
+//      SpringBoard 据此在黑名单 App 里隐藏悬浮球（跨进程通知不受沙盒限制）。
 static BOOL fuIsSpringBoard(void) {
     return [[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.springboard"];
 }
-static BOOL fuDesktopShouldYield(void) {
-    // SpringBoard 进程 + 3 秒内收到过 App 心跳 → 当前前台是某个 App，桌面球让位。
-    return fuIsSpringBoard() && fuLastAppAliveTs > 0 &&
-           (CFAbsoluteTimeGetCurrent() - fuLastAppAliveTs) < 3.0;
-}
-static void fuAppAliveCallback(CFNotificationCenterRef center, void *observer,
-                               CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-    fuLastAppAliveTs = CFAbsoluteTimeGetCurrent();
+static NSString *fuAliveName(NSString *bid) { return [kFUAlivePrefix stringByAppendingString:bid]; }
+static NSString *fuGoneName(NSString *bid)  { return [kFUGonePrefix  stringByAppendingString:bid]; }
+
+// 非 SpringBoard 进程：只广播前台状态，不建任何 UI、不加载设置。
+static void fuStartAppHeartbeat(NSString *bid) {
+    static BOOL started = NO; if (started) return; started = YES;
+    if (!bid.length) return;
+    NSString *alive = fuAliveName(bid), *gone = fuGoneName(bid);
+    void (^beat)(void) = ^{
+        // 关键：只有「真前台」才上报。后台 App 的定时器可能仍在校跑，
+        // 若无条件上报，桌面球会被永久顶掉（用户实测「常驻桌面的悬浮球没了」）。
+        UIApplication *a = UIApplication.sharedApplication;
+        if (a && a.applicationState == UIApplicationStateActive) notify_post(alive.UTF8String);
+    };
+    NSTimer *t = [NSTimer timerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *tt){ beat(); }];
+    [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
+    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+    [nc addObserverForName:UIApplicationDidBecomeActiveNotification object:nil
+                     queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *n){ beat(); }];
+    [nc addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil
+                     queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *n){ notify_post(gone.UTF8String); }];
+    [nc addObserverForName:UIApplicationWillTerminateNotification object:nil
+                     queue:nil usingBlock:^(NSNotification *n){ notify_post(gone.UTF8String); }];
 }
 
 #pragma mark - 穿透 window（空白区域把触摸交还给下层窗口）
@@ -381,10 +397,42 @@ static void fuAppAliveCallback(CFNotificationCenterRef center, void *observer,
 - (void)setupWhenHostReady;
 - (void)applyVisibility;
 - (void)setInteractive:(BOOL)on;   // 面板/扇形/编辑器打开时临时当 key
+// v1.3.2：前台 App 上报（Darwin 心跳）→ 黑名单判断；以及跨进程打开 URL
+- (void)markFrontBid:(NSString *)bid;
+- (void)clearFrontBid:(NSString *)bid;
+- (NSArray *)fuBlacklist;
+- (void)fuSyncFrontWatches;
+- (void)fuOpenExternally:(NSString *)s;
 @property (nonatomic, strong) UIView      *schemeBox;     // 非网页入口的简单输入框容器
 @property (nonatomic, strong) UITextField *schemeField;
 @property (nonatomic, strong) UIButton    *schemeOpenBtn;
 @end
+
+// v1.3.2：前台 App 心跳回调（SpringBoard 侧）。通知名 = 前缀 + bundle id，从通知名反解出 App。
+static void fuFrontAliveCb(CFNotificationCenterRef center, void *observer,
+                           CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    FUFloatingManager *mgr = (__bridge FUFloatingManager *)observer; if (!mgr) return;
+    NSString *n = (__bridge NSString *)name;
+    if (![n hasPrefix:kFUAlivePrefix]) return;
+    NSString *bid = [n substringFromIndex:kFUAlivePrefix.length];
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [mgr markFrontBid:bid]; });
+        return;
+    }
+    [mgr markFrontBid:bid];
+}
+static void fuFrontGoneCb(CFNotificationCenterRef center, void *observer,
+                          CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    FUFloatingManager *mgr = (__bridge FUFloatingManager *)observer; if (!mgr) return;
+    NSString *n = (__bridge NSString *)name;
+    if (![n hasPrefix:kFUGonePrefix]) return;
+    NSString *bid = [n substringFromIndex:kFUGonePrefix.length];
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [mgr clearFrontBid:bid]; });
+        return;
+    }
+    [mgr clearFrontBid:bid];
+}
 
 @implementation FUFloatingManager {
     FUOverlayWindow        *_overlay;
@@ -428,6 +476,11 @@ static void fuAppAliveCallback(CFNotificationCenterRef center, void *observer,
     CGFloat               _iconSize;         // 快捷图标尺寸
     CGFloat               _iconGap;          // 图标/圈层间隔
     NSTimer               *_pollTimer;       // 每秒兜底重判黑名单/开关（修黑名单不生效）
+    CGFloat               _fanSpan;          // v1.3.2 扇形角度 60~180°
+    CGFloat               _fanScale;         // v1.3.2 整体距离 %
+    NSString             *_frontBid;         // v1.3.2 当前前台 App 的 bundle id（来自 Darwin 心跳）
+    CFAbsoluteTime        _frontBidTs;       // 心跳时间戳（>3s 视为过期）
+    NSMutableSet         *_frontWatched;     // 已注册通知监听的黑名单 bundle id
 }
 
 + (instancetype)shared {
@@ -441,6 +494,8 @@ static void fuAppAliveCallback(CFNotificationCenterRef center, void *observer,
         _enabled  = YES; _url = @"https://www.apple.com";
         _winW = 340; _winH = 480; _expanded = NO; _didSetup = NO; _fanOpen = NO;
         _side = 0; _iconSize = 40.0f; _iconGap = 56.0f;   // v1.3.1：球默认停靠右侧
+        _fanSpan = 180.0f; _fanScale = 100.0f;            // v1.3.2 扇形角度 / 整体距离
+        _frontWatched = [NSMutableSet set];
         _history = [NSMutableArray array]; _fanItems = [NSMutableArray array]; _fanOffsets = [NSMutableArray array];
         [self reloadPrefs]; [self loadHistory];
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
@@ -501,7 +556,50 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     if (_side != 0) _side = 1;
     if (_iconSize < 24) _iconSize = 24; if (_iconSize > 64) _iconSize = 64;
     if (_iconGap  < 12) _iconGap  = 12; if (_iconGap  > 120) _iconGap = 120;
+    // v1.3.2：扇形角度 / 整体距离
+    CFPropertyListRef fspRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUFanSpan, (__bridge CFStringRef)kFUSuite);
+    if (fspRef && CFGetTypeID(fspRef) == CFNumberGetTypeID()) { _fanSpan = [(__bridge NSNumber *)fspRef floatValue]; CFRelease(fspRef); }
+    CFPropertyListRef fscRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUFanScale, (__bridge CFStringRef)kFUSuite);
+    if (fscRef && CFGetTypeID(fscRef) == CFNumberGetTypeID()) { _fanScale = [(__bridge NSNumber *)fscRef floatValue]; CFRelease(fscRef); }
+    if (_fanSpan  < 60.0f) _fanSpan = 60.0f;  if (_fanSpan  > 180.0f) _fanSpan = 180.0f;
+    if (_fanScale < 60.0f) _fanScale = 60.0f; if (_fanScale > 160.0f) _fanScale = 160.0f;
     [self loadEntries];
+}
+#pragma mark - v1.3.2 黑名单（前台 App 心跳驱动）
+- (NSArray *)fuBlacklist {
+    CFPropertyListRef arr = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUEnabledApps, (__bridge CFStringRef)kFUSuite);
+    NSArray *list = nil;
+    if (arr) { list = (__bridge_transfer NSArray *)arr; if (![list isKindOfClass:[NSArray class]]) list = nil; }
+    return list ?: @[];
+}
+// 黑名单里的每个 bundle id 注册「来前台 / 退后台」两条 Darwin 通知（通知名带 bundle id，可精确匹配）
+- (void)fuSyncFrontWatches {
+    if (!fuIsSpringBoard()) return;
+    if (!_frontWatched) _frontWatched = [NSMutableSet set];
+    for (id b in [self fuBlacklist]) {
+        if (![b isKindOfClass:[NSString class]] || ![(NSString *)b length]) continue;
+        NSString *bid = (NSString *)b;
+        if ([_frontWatched containsObject:bid]) continue;
+        [_frontWatched addObject:bid];
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+            (__bridge const void *)(self), &fuFrontAliveCb,
+            (__bridge CFStringRef)fuAliveName(bid), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+            (__bridge const void *)(self), &fuFrontGoneCb,
+            (__bridge CFStringRef)fuGoneName(bid), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+    }
+}
+- (void)markFrontBid:(NSString *)bid {
+    if (!bid.length) return;
+    _frontBid = bid; _frontBidTs = CFAbsoluteTimeGetCurrent();
+    NSLog(@"[FloatingURL] frontApp -> %@", bid);
+    [self applyVisibility];
+}
+- (void)clearFrontBid:(NSString *)bid {
+    if (![_frontBid isEqualToString:bid]) return;
+    _frontBid = nil; _frontBidTs = 0;
+    NSLog(@"[FloatingURL] frontApp left -> %@", bid);
+    [self applyVisibility];
 }
 - (void)loadEntries {
     CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUURLs, (__bridge CFStringRef)kFUSuite);
@@ -590,19 +688,16 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
                                            userInfo:nil repeats:YES];
         [[NSRunLoop mainRunLoop] addTimer:_pollTimer forMode:NSRunLoopCommonModes];
     }
-    // v1.3.1：SpringBoard 实例监听「App 前台心跳」，收到即让位（避免与 App 内的球重叠）。
-    if (fuIsSpringBoard()) {
-        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
-            fuAppAliveCallback, (__bridge CFStringRef)kFUAppAlive, NULL,
-            CFNotificationSuspensionBehaviorDeliverImmediately);
-    }
+    // v1.3.2：SpringBoard 监听「黑名单 App 来前台/退后台」心跳，命中即隐藏悬浮球。
+    [self fuSyncFrontWatches];
     [self onBecomeActive];
 }
 - (void)onBecomeActive {
     if (!_didSetup) return;
-    // v1.3.1：非 SpringBoard 进程每秒广播心跳——告诉桌面的兜底球「前台是我的，你让位」。
-    if (!fuIsSpringBoard()) notify_post([kFUAppAlive UTF8String]);
     [self reloadPrefs];
+    [self fuSyncFrontWatches];   // 黑名单可能刚被改过 → 补注册监听
+    // 心跳超过 3 秒没刷新（App 被强杀、来不及发 gone）→ 视作已回桌面
+    if (_frontBid && (CFAbsoluteTimeGetCurrent() - _frontBidTs) > 3.0) { _frontBid = nil; _frontBidTs = 0; }
     [self applyVisibility];
 }
 // 把 key 还给 App 的主窗口（level Normal）
@@ -898,41 +993,88 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     [self layoutPanel];
 }
 
-#pragma mark - 扇形快捷菜单（v1.3.1：球固定在左/右边，朝屏幕内展开半圆扇形；第一层 4 + 第二层 6）
+#pragma mark - 扇形快捷菜单（v1.3.2：数量决定层数与位置 + 贴边自动变形）
+// 布局规则（对齐「悬浮扇形编辑器」的思路）：
+//   · 球固定在左/右边，扇形只朝屏幕内展开；
+//   · 圈层半径 = 球半径 + 图标/间隔 逐层递推，再乘「整体距离」滑杆；
+//   · 每层能放几个 = 该半径下的扇形弧长 ÷ (图标 + 最小净空隙)
+//     → **用户加几个入口就排几个**：第 1 层放满自动溢到第 2、3 层；
+//   · 球靠近上/下边缘时，扇形角度逐档收缩，直到所有图标都留在屏内（遇到屏幕边自动变形）。
+- (CGFloat)fuFittingSpanForCenter:(CGFloat)center radii:(const CGFloat *)R caps:(const NSInteger *)caps
+                            icon:(CGFloat)isz margin:(CGFloat)m maxSpan:(CGFloat)spanMax {
+    CGRect sc = _overlay.bounds;
+    CGPoint c = CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame));
+    for (CGFloat sp = spanMax; sp >= 60.0f; sp -= 5.0f) {
+        BOOL ok = YES;
+        for (int layer = 0; layer < 3 && ok; layer++) {
+            NSInteger cnt = caps[layer]; if (cnt <= 0) continue;
+            CGFloat a0 = center - sp/2.0f;
+            CGFloat sp2 = (cnt > 1) ? sp / (CGFloat)(cnt - 1) : 0.0f;
+            for (NSInteger k = 0; k < cnt; k++) {
+                CGFloat a = (cnt > 1) ? (a0 + sp2 * (CGFloat)k) : center;
+                CGFloat rad = a * (CGFloat)M_PI / 180.0f;
+                CGFloat x = c.x + R[layer] * cosf(rad), y = c.y + R[layer] * sinf(rad);
+                if (x - isz/2.0f < m || x + isz/2.0f > sc.size.width  - m ||
+                    y - isz/2.0f < m || y + isz/2.0f > sc.size.height - m) { ok = NO; break; }
+            }
+        }
+        if (ok) return sp;
+    }
+    return 60.0f;
+}
 - (void)openFan {
     if (_fanOpen || _entries.count < 1) return;   // 0 个入口不弹（loadEntries 至少兜底 1 个）
     _fanOpen = YES; _ball.alpha = 1.0f;           // 展开期间球保持实心可见
     [self closeFanItemsAnimated:NO];
     [self restoreBallFromSnap];                   // 半隐态先拉回，环才不会跟着缩在屏外
     // 环无需键盘，保持非 key（不抢 App 触摸）；触摸经 hitTest 正常命中图标按钮。
+    CGRect sc = _overlay.bounds;
     CGPoint c = CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame));
-    CGFloat isz = _iconSize;                      // 图标尺寸（设置滑杆）
-    CGFloat gap = _iconGap;                       // 图标/圈层间隔（设置滑杆）
-    CGFloat R1 = kFUButtonSize/2.0f + isz/2.0f + gap;   // 第一层（内环）半径
-    CGFloat R2 = R1 + isz + gap;                        // 第二层（外环）半径
-    NSInteger n  = _entries.count;
-    NSInteger n1 = MIN(n, kFULayer1Max);                // 第一层最多 4 个
-    NSInteger n2 = MIN(n - n1, kFULayer2Max);           // 第二层最多 6 个（n>4 才出现）
-    BOOL right = (_side != 1);                    // side=0 右侧 → 朝左展开；side=1 左侧 → 朝右展开
-    CGFloat centerA = right ? 180.0f : 0.0f;      // 扇形朝向的圆心角（屏坐标：0°右 90°下 180°左 270°上）
+    CGFloat isz   = _iconSize;
+    CGFloat gap   = MAX(4.0f, _iconGap * 0.5f);   // 图标之间至少要留的净空隙
+    CGFloat stepR = isz + _iconGap;               // 相邻圈层的半径差
+    CGFloat scale = _fanScale / 100.0f;           // 整体距离
+    // 1) 三层半径
+    CGFloat R[3];
+    R[0] = (kFUButtonSize/2.0f + isz/2.0f + _iconGap) * scale;
+    R[1] = R[0] + stepR * scale;
+    R[2] = R[1] + stepR * scale;
+    // 2) 每层容量由弧长决定 → 数量决定层数与位置
+    NSInteger n = (NSInteger)_entries.count;
+    NSInteger caps[3] = {0, 0, 0};
+    NSInteger left = n;
+    CGFloat spanMax = MAX(60.0f, MIN(180.0f, _fanSpan));
+    for (int i = 0; i < 3; i++) {
+        if (left <= 0) break;
+        if (i == 2) { caps[i] = left; break; }    // 最后一层兜底，全部装下
+        CGFloat arc = R[i] * spanMax * (CGFloat)M_PI / 180.0f;
+        NSInteger c2 = (NSInteger)floor(arc / (isz + gap));
+        caps[i] = MAX(1, MIN(c2, 8));
+        if (caps[i] > left) caps[i] = left;
+        left -= caps[i];
+    }
+    // 3) 贴边自动变形：收缩扇形角度，直到所有图标都留在屏内
+    CGFloat centerA = (_side != 1) ? 180.0f : 0.0f;   // 屏坐标：0°右 90°下 180°左 270°上
+    CGFloat span = [self fuFittingSpanForCenter:centerA radii:R caps:caps
+                                           icon:isz margin:6.0f maxSpan:spanMax];
+    // 4) 摆位
     [_fanOffsets removeAllObjects];
-    // 逐层在「朝屏幕内的半圆」上均布：第一层 4 个、第二层 6 个（用户加几个排几个）。
-    for (NSInteger layer = 0; layer < 2; layer++) {
-        NSInteger cnt = (layer == 0) ? n1 : n2;
-        if (cnt <= 0) break;
-        CGFloat R = (layer == 0) ? R1 : R2;
-        CGFloat a0 = centerA - 90.0f;             // 半圆起角（圆心角 ±90°）
-        CGFloat step = (cnt > 1) ? 180.0f / (CGFloat)(cnt - 1) : 0.0f;
+    NSInteger placed = 0;
+    for (NSInteger layer = 0; layer < 3; layer++) {
+        NSInteger cnt = caps[layer];
+        if (cnt <= 0) continue;
+        CGFloat a0  = centerA - span/2.0f;
+        CGFloat sp2 = (cnt > 1) ? span / (CGFloat)(cnt - 1) : 0.0f;
         for (NSInteger k = 0; k < cnt; k++) {
-            NSInteger idx = (layer == 0) ? k : (kFULayer1Max + k);
-            if (idx >= (NSInteger)n) break;
-            CGFloat a = (cnt > 1) ? (a0 + step * (CGFloat)k) : centerA;
-            CGFloat rad = a * M_PI / 180.0f;
-            CGFloat x = c.x + R * cos(rad), y = c.y + R * sin(rad);
+            if (placed >= n) break;
+            NSInteger idx = placed; placed++;
+            CGFloat a = (cnt > 1) ? (a0 + sp2 * (CGFloat)k) : centerA;
+            CGFloat rad = a * (CGFloat)M_PI / 180.0f;
+            CGFloat x = c.x + R[layer] * cosf(rad), y = c.y + R[layer] * sinf(rad);
             UIButton *it = [self buildFanItem:_entries[idx] index:idx size:isz];
             CGRect target = CGRectMake(x - isz/2.0f, y - isz/2.0f, isz, isz);
-            target.origin.x = MAX(2, MIN(_overlay.bounds.size.width  - isz - 2, target.origin.x));
-            target.origin.y = MAX(2, MIN(_overlay.bounds.size.height - isz - 2, target.origin.y));
+            target.origin.x = MAX(6.0f, MIN(sc.size.width  - isz - 6.0f, target.origin.x));
+            target.origin.y = MAX(6.0f, MIN(sc.size.height - isz - 6.0f, target.origin.y));
             // 先把最终 frame 定死，再只动画 transform(缩放) + alpha。
             // 严禁在同一动画块里既设 frame 又设 transform（UIKit 未定义行为会放大 10 倍）。
             it.frame = target;
@@ -940,7 +1082,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
                 CGPointMake(CGRectGetMidX(target) - c.x, CGRectGetMidY(target) - c.y)]];
             it.alpha = 0.0f; it.transform = CGAffineTransformMakeScale(0.1f, 0.1f);
             [_overlay addSubview:it]; [_fanItems addObject:it];
-            [UIView animateWithDuration:0.22 delay:0.02*(k + (layer==0?0:cnt))
+            [UIView animateWithDuration:0.22 delay:0.02 * (CGFloat)idx
                                 usingSpringWithDamping:0.7 initialSpringVelocity:0.6
                                               options:UIViewAnimationOptionCurveEaseOut
                                            animations:^{ it.alpha = 1.0f; it.transform = CGAffineTransformIdentity; }
@@ -1039,6 +1181,22 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     else   { _historyTable.hidden = YES; [_panel bringSubviewToFront:_webView]; [_panel bringSubviewToFront:_bar]; }
 }
 
+// v1.3.2：跨进程打开 URL。SpringBoard 里 UIApplication.openURL 不稳，优先用 LSApplicationWorkspace。
+- (void)fuOpenExternally:(NSString *)s {
+    NSURL *u = [NSURL URLWithString:s]; if (!u) return;
+    Class wsc = NSClassFromString(@"LSApplicationWorkspace");
+    id ws = wsc ? [wsc performSelector:NSSelectorFromString(@"defaultWorkspace")] : nil;
+    SEL selSensitive = NSSelectorFromString(@"openSensitiveURL:withOptions:");
+    if (ws && [ws respondsToSelector:selSensitive]) {
+        [ws performSelector:selSensitive withObject:u withObject:nil];
+        return;
+    }
+    SEL selOpen = NSSelectorFromString(@"openURL:");
+    if (ws && [ws respondsToSelector:selOpen]) { [ws performSelector:selOpen withObject:u]; return; }
+    UIApplication *app = UIApplication.sharedApplication;
+    if (app) [app openURL:u options:@{} completionHandler:nil];
+}
+
 #pragma mark - 展开 / 收起 面板
 - (void)expand {
     if (!_didSetup) { dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3*NSEC_PER_SEC)),
@@ -1077,9 +1235,8 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 - (void)openScheme {
     NSString *u = _schemeField.text; if (!u.length) return;
     NSString *norm = [self normalizeURL:u];
-    if ([self isWebScheme:norm]) { _url = norm; [self expand]; return; }
-    UIApplication *app = UIApplication.sharedApplication; NSURL *nu = [NSURL URLWithString:norm];
-    if (app && nu) [app openURL:nu options:@{} completionHandler:nil];
+    if (norm.length) [self pushHistory:norm];
+    [self fuOpenExternally:norm];   // v1.3.2：网页/非网页都交给系统打开
     [self collapse];
 }
 - (void)collapse {
@@ -1110,23 +1267,24 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     if (!_didSetup) return;
     // 防御：直接读之前也刷新一次进程内偏好缓存，确保拿到设置里最新改的值。
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
-    // 黑名单语义：enabledApps 里列出的 App 在「该 App 内」隐藏悬浮窗；列表为空 = 全部显示。
-    // 桌面(SpringBoard) 同样遵循黑名单（用户不勾它就不会隐藏）。全局 enabled 关闭则全部隐藏。
+    // v1.3.2 黑名单语义（重写）：球只在 SpringBoard 里，所以判断对象是「当前前台 App」。
+    // 前台 App 由各 App 进程的 Darwin 心跳上报（沙盒 App 读不到设置，但发跨进程通知没问题）；
+    // 之前的写法把 SpringBoard 自己的 _hostBid 拿去比黑名单，永远比不中 → 黑名单形同虚设。
     BOOL hidden = NO;
-    if (_hostBid.length) {
-        CFPropertyListRef arr = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUEnabledApps, (__bridge CFStringRef)kFUSuite);
-        NSArray *list = nil; if (arr) list = (__bridge_transfer NSArray *)arr;
-        if ([list isKindOfClass:[NSArray class]]) {
-            for (id b in list) if ([b isKindOfClass:[NSString class]] &&
-                [b caseInsensitiveCompare:_hostBid] == NSOrderedSame) { hidden = YES; break; }
-        }
-        NSLog(@"[FloatingURL] blacklist check host=%@ list=%@ -> hidden=%d", _hostBid, list, hidden);
+    NSArray *list = [self fuBlacklist];
+    NSString *front = _frontBid;
+    if (front && (CFAbsoluteTimeGetCurrent() - _frontBidTs) > 3.0) front = nil;
+    for (id b in list) {
+        if (![b isKindOfClass:[NSString class]]) continue;
+        if (front.length && [(NSString *)b caseInsensitiveCompare:front] == NSOrderedSame) { hidden = YES; break; }
+        if (_hostBid.length && [(NSString *)b caseInsensitiveCompare:_hostBid] == NSOrderedSame) { hidden = YES; break; }
     }
+    NSLog(@"[FloatingURL] visibility host=%@ front=%@ list=%@ -> hidden=%d", _hostBid, front, list, hidden);
     // v1.3.0 修「黑名单加了球还在 / QQ 残留 URL」：黑名单或总开关命中时直接隐藏整个
     // overlay 窗口（球、环、面板一锅端），比只藏球更彻底——之前只藏 _ball，环/面板
     // 以及某些时序下 re-show 的球都会漏出来，看起来就像「残留了第二个 URL」。
     // v1.3.1：桌面兜底球门控——前台是某个 App 时，SpringBoard 这份让位（否则叠成 2~3 个球）。
-    if (fuDesktopShouldYield()) hidden = YES;
+    // v1.3.2：不再需要「让位」——球只存在于 SpringBoard，App 进程根本不建球了。
     if (!_enabled || hidden) {
         _overlay.hidden = YES;
         _ball.hidden = YES; _panel.hidden = YES;
@@ -1139,8 +1297,9 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     if (!_expanded && !_fanOpen) { _ball.hidden = NO; _ball.alpha = 0.4f; [_overlay bringSubviewToFront:_ball]; [self setInteractive:NO]; }
 }
 
-#pragma mark - 跨 App 轻量同步
+#pragma mark - 跨 App 轻量同步（v1.3.2：只剩 SpringBoard 一个实例，同步已无意义，直接空转）
 - (void)writeSync {
+    return;   // v1.3.2：球只在 SpringBoard，跨进程面板镜像正是「QQ 里残留一个 URL」的来源，停用
     if (_applyingRemote) return;
     NSMutableDictionary *d = [NSMutableDictionary dictionary];
     d[@"open"] = @(_expanded);
@@ -1150,10 +1309,8 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     notify_post("com.yzdmm.floatingurl/syncChanged");
 }
 - (void)applySync {
+    return;   // v1.3.2：球只在 SpringBoard，跨进程面板镜像停用（它就是「QQ 里残留 URL」的来源）
     if (_applyingRemote) return;
-    // v1.3.1：SpringBoard 兜底实例不要镜像 App 里的面板——那正是「QQ 里残留一个 URL」和
-    // 「点开网页白屏」的来源（镜像面板跑在 SpringBoard 里，WebKit 渲染不出内容、也无法黑名单）。
-    if (fuDesktopShouldYield()) return;
     CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUSync, (__bridge CFStringRef)kFUSuite);
     if (!r) return;
     NSDictionary *d = (__bridge_transfer NSDictionary *)r;
@@ -1236,18 +1393,22 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 @end
 
 // ============================================================
-// 注入入口：Filter = Bundles(com.apple.UIKit)，全 App + 主屏幕。设置进程跳过。
-// 新增「作用 App」限制：勾选后仅指定 App 显示（桌面始终显示）。
-// v1.3.1：球的实际持有者是「前台 App 进程」；SpringBoard 那份只是「桌面兜底」，
-//         一旦收到 App 心跳就让位（详见 fuDesktopShouldYield 注释），从此不会重复成多个球。
+// 注入入口：Filter = Bundles(com.apple.UIKit) → 所有 App + SpringBoard 都会加载本 dylib。
+// v1.3.2：分工明确（真机 frida 实测决定）——
+//   · SpringBoard 进程：创建球/扇形/面板。**只有它能正确读到本 tweak 的设置**
+//     （沙盒 App 进程读 prefs 全为 nil），而且层级最高、全 App + 主屏幕都能看到；
+//   · 其它 App 进程：不建任何 UI，只上报「我在前台」的 Darwin 心跳，供桌面球判断黑名单；
+//   · 设置 App（com.apple.Preferences）：完全跳过。
 // ============================================================
 %ctor {
     @autoreleasepool {
         NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
         if ([bid isEqualToString:@"com.apple.Preferences"]) return;   // 设置里不挂球
-        if (!INCLUDE_SPRINGBOARD && [bid isEqualToString:@"com.apple.springboard"]) return;
-        // 不再这里 early-return：「作用 App」网关改为运行时（applyVisibility + 进入前台）实时判断，
-        // 球始终创建，被限制的 App 由 applyVisibility 隐藏，无需重启 App 才生效。
+        if (![bid isEqualToString:@"com.apple.springboard"]) {
+            fuStartAppHeartbeat(bid);   // 沙盒 App 读不到设置 → 只发心跳，不建球
+            return;
+        }
+        if (!INCLUDE_SPRINGBOARD) return;
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
             object:nil queue:[NSOperationQueue mainQueue]
             usingBlock:^(NSNotification *note){ [[FUFloatingManager shared] setupWhenHostReady]; }];
