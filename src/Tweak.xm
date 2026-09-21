@@ -68,7 +68,8 @@ static NSString * const kFUBallY       = @"ballY";      // v1.3.5：球中心 Y�
 static NSString * const kFUBallTitle   = @"ballTitle";  // v1.3.5：球的文字（默认 URL）
 static NSString * const kFUBallIcon    = @"ballIcon";   // v1.3.5：球的图标（PNG data）
 static NSString * const kFUBallColor   = @"ballColor";  // v1.3.5：球的底色 hex（无图标时生效）
-static NSString * const kFUWebMode     = @"webMode";    // v1.3.5：YES=内置面板打开网页
+static NSString * const kFUWebMode     = @"webMode";    // v1.3.5：YES=内置面板打开网页（v1.3.13 起桌面不再用它，见 triggerEntry）
+static NSString * const kFUSnapDelay   = @"snapDelay";  // v1.3.13：松手后「完整悬浮图标」停留几秒再自动吸附（默认 3，0=立即）
 
 static const NSInteger kFUMaxEntries = 48;   // v1.3.6：上限 48（三层 8 + 16 + 24）
 static const NSInteger kFULayer1Max  = 4;    // 第一层（内环）最多 4 个
@@ -106,6 +107,14 @@ static NSString *fuAppWebFilePath(void) {
     if (!dirs.count) return nil;
     return [(NSString *)dirs.firstObject stringByAppendingPathComponent:kFUInAppWebFile];
 }
+// v1.3.13：App 端要看的「信箱」列表（桌面写哪处能成功，就走哪处）。
+static NSArray *fuAppWebMailboxPaths(void) {
+    NSMutableArray *out = [NSMutableArray array];
+    NSString *own = fuAppWebFilePath();
+    if (own.length) [out addObject:own];
+    [out addObject:kFUWebMailboxMedia];
+    return out;
+}
 static UIViewController *fuTopViewController(void) {
     UIApplication *a = UIApplication.sharedApplication;
     if (!a) return nil;
@@ -116,29 +125,54 @@ static UIViewController *fuTopViewController(void) {
     while (vc.presentedViewController) { vc = vc.presentedViewController; }
     return vc;
 }
+static double fuLastWebSeq = 0;   // v1.3.13：已处理过的请求序号（防陈旧文件被重复打开）
 static void fuHandleInAppWebRequest(void) {
     @try {
-        NSString *p = fuAppWebFilePath();
-        if (!p.length) return;
-        NSString *raw = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:NULL];
-        if (!raw.length) return;                       // 没有交接文件 = 不是给我的（只有目标 App 容器里才有）
-        [[NSFileManager defaultManager] removeItemAtPath:p error:NULL];   // 立即删除 = 回执（桌面据此判断「已接住」）
-        NSString *s = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (![s.lowercaseString hasPrefix:@"http"]) s = [@"https://" stringByAppendingString:s];
-        NSURL *u = [NSURL URLWithString:s];
-        UIApplication *a = UIApplication.sharedApplication;
-        if (!u || !a || a.applicationState != UIApplicationStateActive) return;   // 不在前台就不打扰
-        Class sfCls = NSClassFromString(@"SFSafariViewController");
-        if (!sfCls) {   // SafariServices 通常没被 App 加载 → 现场按需加载（只在真正要开网页时，非启动路径）
-            dlopen("/System/Library/Frameworks/SafariServices.framework/SafariServices", RTLD_LAZY);
-            sfCls = NSClassFromString(@"SFSafariViewController");
+        for (NSString *p in fuAppWebMailboxPaths()) {
+            NSString *raw = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:NULL];
+            if (!raw.length) continue;                     // 没有交接文件 = 不是给我的
+            [[NSFileManager defaultManager] removeItemAtPath:p error:NULL];   // 先清掉，避免下次误触发
+            // 文件格式：第一行是序号（时间戳），第二行是 URL
+            NSString *seqS = raw, *urlS = @"";
+            NSRange nl = [raw rangeOfCharacterFromSet:[NSCharacterSet newlineCharacterSet]];
+            if (nl.location != NSNotFound) {
+                seqS = [raw substringToIndex:nl.location];
+                urlS = [raw substringFromIndex:nl.location + 1];
+            }
+            double seq = seqS.doubleValue;
+            if (seq <= fuLastWebSeq) continue;              // 陈旧请求（上次没删干净的）→ 忽略
+            fuLastWebSeq = seq;
+            NSString *s = [urlS stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (!s.length) return;
+            if (![s.lowercaseString hasPrefix:@"http"]) s = [@"https://" stringByAppendingString:s];
+            NSURL *u = [NSURL URLWithString:s];
+            UIApplication *a = UIApplication.sharedApplication;
+            // 不在前台就不打扰，也**不发回执** —— 桌面 1.5s 收不到回执会自动改用系统浏览器，
+            // 所以绝不会出现「点了没反应」。
+            if (!u || !a || a.applicationState != UIApplicationStateActive) return;
+            NSString *myBid = [[NSBundle mainBundle] bundleIdentifier];
+            if ([myBid isEqualToString:@"com.apple.mobilesafari"]) {   // 自己就是浏览器：直接跳转
+                [a openURL:u options:@{} completionHandler:nil];
+                notify_post(kFUInAppWebAck.UTF8String);
+                return;
+            }
+            Class sfCls = NSClassFromString(@"SFSafariViewController");
+            if (!sfCls) {   // SafariServices 一般没被 App 加载 → 现场按需加载（只在真要开网页时，非启动路径）
+                dlopen("/System/Library/Frameworks/SafariServices.framework/SafariServices", RTLD_LAZY);
+                sfCls = NSClassFromString(@"SFSafariViewController");
+            }
+            UIViewController *top = fuTopViewController();
+            if (sfCls && top) {                 // 内置浏览器：不离开当前 App，附带刷新/分享/完成按钮
+                id svc = ((id (*)(id, SEL, id))objc_msgSend)([sfCls alloc], NSSelectorFromString(@"initWithURL:"), u);
+                if (svc) {
+                    [top presentViewController:svc animated:YES completion:nil];
+                    notify_post(kFUInAppWebAck.UTF8String);   // 真弹出来了才回执
+                    return;
+                }
+            }
+            NSLog(@"[FloatingURL] 内置浏览器不可用（sf=%@ top=%@）→ 交给桌面走系统浏览器", sfCls, top);
+            return;
         }
-        UIViewController *top = fuTopViewController();
-        if (sfCls && top) {                 // 内置浏览器：不离开当前 App，附带刷新/分享/完成按钮
-            id svc = ((id (*)(id, SEL, id))objc_msgSend)([sfCls alloc], NSSelectorFromString(@"initWithURL:"), u);
-            if (svc) { [top presentViewController:svc animated:YES completion:nil]; return; }
-        }
-        [a openURL:u options:@{} completionHandler:nil];   // 兜底：系统浏览器
     } @catch (NSException *e) {
         NSLog(@"[FloatingURL] inAppWeb 异常（已忽略）: %@", e);
     }
@@ -538,9 +572,14 @@ static void fuStartAppHeartbeat(NSString *bid) {
 - (void)fuSyncFrontWatches;
 - (void)fuOpenExternally:(NSString *)s;
 - (BOOL)fuHandoffWebToFrontApp:(NSURL *)u;   // v1.3.12：把网页交给前台 App 的内置浏览器
-- (void)fuOpenViaSystem:(NSURL *)u;          // v1.3.12：系统浏览器（FBSSystemService → 失败再兜底）
-- (void)fuOpenViaWorkspace:(NSURL *)u;       // v1.3.12：LSApplicationWorkspace 最后兜底
-- (NSString *)fuWebHandoffPathForBid:(NSString *)bid;
+- (void)fuOpenViaSystem:(NSURL *)u;          // v1.3.13：系统打开链路（openURL → FBSSystemService → workspace）
+- (void)fuOpenViaFBS:(NSURL *)u;             // v1.3.13：FrontBoard 异步接口（失败回调里继续往下兜底）
+- (void)fuOpenViaWorkspace:(NSURL *)u;       // v1.3.13：LSApplicationWorkspace 最后兜底
+- (NSArray *)fuWebMailboxPathsForBid:(NSString *)bid;   // v1.3.13：可写的投递信箱列表
+- (NSArray *)fuFanPointArray;                           // v1.3.13：扇形点位（openFan 与拖动重排共用同一套算法）
+- (void)fuRelayoutFanInstant;                           // v1.3.13：拖动球时围绕球实时重排扇形
+- (void)cancelPendingSnap;                              // v1.3.13：取消「待吸附」
+- (void)scheduleSnapAfterDrop;                          // v1.3.13：松手后按「吸附延时」归位
 - (void)triggerEntry:(NSDictionary *)entry;          // v1.3.8：触发一条入口（扇形点击 / 单入口点球共用）
 - (CGFloat)fuAngleToScreenCenter:(CGPoint)c;         // v1.3.8：球心 -> 屏幕中心 的方向角
 @property (nonatomic, strong) UIView      *schemeBox;     // 非网页入口的简单输入框容器
@@ -647,6 +686,7 @@ static void fuFrontGoneCb(CFNotificationCenterRef center, void *observer,
         _side = 0; _iconSize = 40.0f; _iconGap = 56.0f;   // v1.3.1：球默认停靠右侧
         _fanSpan = 180.0f; _fanScale = 100.0f;            // v1.3.2 扇形角度 / 整体距离
         _snapMode = 0; _webMode = 0; _ballTitle = @"URL";  // v1.3.5 默认：自动吸附 + 系统浏览器
+        _snapDelay = 3.0;                                  // v1.3.13：默认吸附延时 3 秒（松手后先给完整图标）
         _layer1 = 8; _layer2 = 16; _layer3 = 24;           // v1.3.6：三层默认数量 8/16/24（合计 48）
         _frontWatched = [NSMutableSet set];
         _history = [NSMutableArray array]; _fanItems = [NSMutableArray array]; _fanOffsets = [NSMutableArray array];
@@ -657,6 +697,10 @@ static void fuFrontGoneCb(CFNotificationCenterRef center, void *observer,
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
             (__bridge const void *)(self), &fuSyncChanged,
             (__bridge CFStringRef)kFUSyncChanged, NULL, CFNotificationSuspensionBehaviorCoalesce);
+        // v1.3.13：App 弹出内置浏览器后的回执（纯 C 通知注册，与上面两条同一套路，不碰启动路径 UI）
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+            (__bridge const void *)(self), &fuInAppWebAckCb,
+            (__bridge CFStringRef)kFUInAppWebAck, NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
     }
     return self;
 }
@@ -680,6 +724,17 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
         return;
     }
     [mgr applySync];
+}
+// v1.3.13：前台 App 的内置浏览器真的弹出来了 → 撤销系统浏览器兜底
+static void fuInAppWebAckCb(CFNotificationCenterRef center, void *observer,
+                            CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    FUFloatingManager *mgr = (__bridge FUFloatingManager *)observer; if (!mgr) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ fuInAppWebAckCb(center, observer, name, object, userInfo); });
+        return;
+    }
+    mgr->_webAckPending = NO;
+    NSLog(@"[FloatingURL] App 已弹出内置浏览器（回执收到）");
 }
 
 - (void)reloadPrefs {
@@ -735,6 +790,13 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     if (_snapMode != 1) _snapMode = 0;
     Boolean wv = NO; CFPreferencesGetAppBooleanValue((__bridge CFStringRef)kFUWebMode, (__bridge CFStringRef)kFUSuite, &wv);
     _webMode = wv ? 1 : 0;
+    // v1.3.13：吸附延时（秒）。松手后球先以「完整悬浮图标」停在落点，这么久之后才自动吸附（0=立即）。
+    CFPropertyListRef sdlyRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUSnapDelay, (__bridge CFStringRef)kFUSuite);
+    if (sdlyRef && CFGetTypeID(sdlyRef) == CFNumberGetTypeID()) {
+        _snapDelay = [(__bridge NSNumber *)sdlyRef doubleValue];
+        CFRelease(sdlyRef);
+    } else if (sdlyRef) { CFRelease(sdlyRef); }
+    if (_snapDelay < 0) _snapDelay = 0; if (_snapDelay > 15) _snapDelay = 15;
     // v1.3.9 修 05（真机实测确认的根因）：键被删掉时 CFPreferencesCopyAppValue 返回 NULL，
     // 而旧代码两个分支都不走 → _ballIcon / _ballColor / _ballTitle **保持上一次的旧值**，
     // 于是「设置里删了照片，球上照片还在」。这里必须在读到 NULL 时明确清空。
@@ -748,8 +810,13 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     CFPropertyListRef bcRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallColor, (__bridge CFStringRef)kFUSuite);
     if (bcRef && CFGetTypeID(bcRef) == CFStringGetTypeID()) { _ballColor = (__bridge_transfer NSString *)bcRef; }
     else { if (bcRef) CFRelease(bcRef); _ballColor = nil; }
+    NSInteger oldEntryCount = (NSInteger)_entries.count;
     [self loadEntries];
-    if (_didSetup) [self applyBallAppearance];   // 设置里改了外观 → 立即生效
+    if (_didSetup) {
+        [self applyBallAppearance];   // 设置里改了外观 → 立即生效
+        // v1.3.13：扇形正开着时新增/删除了入口 → 立刻重排，修「添加了快捷 URL 但扇形里不显示」
+        if (_fanOpen && (NSInteger)_entries.count != oldEntryCount) [self fuRelayoutFanInstant];
+    }
 }
 #pragma mark - v1.3.2 黑名单（前台 App 心跳驱动）
 - (NSArray *)fuBlacklist {
@@ -1132,6 +1199,17 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 // v1.3.5 修 05：把自定义的名称/图标/底色应用到悬浮球（图标优先于文字）
 - (void)applyBallAppearance {
     if (!_ball) return;
+    NSString *titleNow = (_ballTitle.length ? _ballTitle : @"URL");
+    // v1.3.13：这个方法每秒都会被轮询调到 —— 外观没变就直接返回，别反复解码球图标（省电、少卡顿）。
+    if (_ballImageView) {
+        BOOL sameIcon  = (_ballIcon == nil && _ballIconShown == nil) ||
+                         (_ballIcon != nil && _ballIconShown != nil && [_ballIcon isEqualToData:_ballIconShown]);
+        BOOL sameTitle = [_ballShownTitle isEqualToString:titleNow];
+        BOOL sameColor = (_ballColor == nil && _ballShownColor == nil) ||
+                         (_ballColor != nil && _ballShownColor != nil && [_ballColor isEqualToString:_ballShownColor]);
+        if (sameIcon && sameTitle && sameColor) return;
+    }
+    _ballIconShown = _ballIcon; _ballShownTitle = titleNow; _ballShownColor = _ballColor;
     if (!_ballImageView) {
         _ballImageView = [[UIImageView alloc] initWithFrame:_ball.bounds];
         _ballImageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -1203,6 +1281,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 
 #pragma mark - 交互
 - (void)ballTapped {
+    [self cancelPendingSnap];     // v1.3.13：点球 = 取消待吸附（否则扇形刚弹出球就被吸走）
     _ball.alpha = 1.0f;   // 点击唤醒：变实心，方便使用
     [self restoreBallFromSnap];   // 半隐吸附态 → 先拉回完整可见
     if (_expanded) { [self collapse]; return; }
@@ -1220,52 +1299,83 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 }
 - (void)panBall:(UIPanGestureRecognizer *)g {
     if (!_ball) return;
-    if (g.state == UIGestureRecognizerStateBegan) { _ballDragOrigin = _ball.frame.origin; _ball.alpha = 1.0f; _draggingBall = YES; }  // 拖动时变实心
+    if (g.state == UIGestureRecognizerStateBegan) {
+        _ballDragOrigin = _ball.frame.origin; _ball.alpha = 1.0f; _draggingBall = YES;   // 拖动时变实心
+        [self cancelPendingSnap];   // v1.3.13：一开始拖就取消待吸附，别拖到一半被吸走
+    }
     else if (g.state == UIGestureRecognizerStateChanged) {
         CGPoint t = [g translationInView:_overlay];
         CGRect f = _ball.frame;
         f.origin.x = MAX(0, MIN(_overlay.bounds.size.width  - f.size.width,  _ballDragOrigin.x + t.x));
         f.origin.y = MAX(0, MIN(_overlay.bounds.size.height - f.size.height, _ballDragOrigin.y + t.y));
-        CGPoint oldC = CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame));
         _ball.frame = f;
-        // 扇形展开时拖动球 → 扇形整体跟随球移动（按相对偏移平移）。
-        if (_fanOpen && _fanItems.count == _fanOffsets.count) {
-            CGPoint newC = CGPointMake(CGRectGetMidX(f), CGRectGetMidY(f));
-            CGPoint d = CGPointMake(newC.x - oldC.x, newC.y - oldC.y);
-            for (NSUInteger k = 0; k < _fanItems.count; k++) {
-                UIButton *it = _fanItems[k];
-                it.center = CGPointMake(it.center.x + d.x, it.center.y + d.y);
-            }
-        }
+        // v1.3.13 修「拖动球时扇形被推着走」：以前只把图标按偏移平移（会被一路推出屏幕、越推越歪），
+        // 现在改成用**同一套算法围绕球重新排布**（朝向/圈层/贴边平移全部重算），
+        // 球拖到哪，扇形就正对着它重新铺开。
+        [self fuRelayoutFanInstant];
     }
     else if (g.state == UIGestureRecognizerStateEnded || g.state == UIGestureRecognizerStateCancelled) {
         _draggingBall = NO;   // 取消/中断也要复位，否则球的半透明待机态回不来
-        if (g.state == UIGestureRecognizerStateEnded) [self snapBallToEdge];   // 松手 → 按模式吸附/固定
+        if (g.state == UIGestureRecognizerStateEnded) [self scheduleSnapAfterDrop];   // v1.3.13：按延时吸附
     }
 }
-// v1.3.0 修复「没靠近屏幕边也自动吸走」：只有球心距某条边 ≤48pt 才吸附；
-// 吸附态 = 图标只露出一半（另一半藏在屏幕外），带回弹动画。远处松手则原地半透明待机。
-- (void)snapBallToEdge {
-    if (!_ball) return;
+// v1.3.13：吸附改成「延时吸附」三步走（用户要求：松手后先给完整的悬浮图标，N 秒后再吸附）：
+//   ① cancelPendingSnap        —— 用户一动球就取消，绝不「拖到一半被吸走」；
+//   ② scheduleSnapAfterDrop    —— 松手：先完整可见地停在落点，N 秒（默认 3，可设 0）后才吸附；
+//   ③ doSnapToEdgeWithGen:     —— 真正吸附（按屏幕中心线分左右，只露一半），带代号防串台。
+- (void)cancelPendingSnap {
+    _snapGen++;          // 代号 +1 → 所有已排队但还没执行的延时块自动失效
+    _snapPending = NO;
+}
+// 把球钳在屏内，保证「完整图标」（不半隐）
+- (void)clampBallFullyIntoView {
+    if (!_ball || !_overlay) return;
+    CGRect s = _overlay.bounds, f = _ball.frame;
+    CGFloat x = MAX(0.0f, MIN(s.size.width - f.size.width, f.origin.x));
+    CGFloat y = MAX(2.0f, MIN(s.size.height - f.size.height - 2.0f, f.origin.y));
+    if (fabs(x - f.origin.x) > 0.5f || fabs(y - f.origin.y) > 0.5f)
+        _ball.frame = CGRectMake(x, y, f.size.width, f.size.height);
+}
+- (void)scheduleSnapAfterDrop {
+    if (!_ball || !_overlay) return;
+    _snapGen++; NSInteger myGen = _snapGen;
+    [self clampBallFullyIntoView];
+    [self persistBallPos];       // 先把「完整可见」的落点记下来（重启后原位恢复）
+    if (_snapMode == 1) {        // 全屏固定：永不吸附，直接半透明待机
+        _snapPending = NO; _ball.alpha = 0.4f; return;
+    }
+    _ball.alpha = 1.0f;          // ★ 延时期间 = 完整的悬浮图标（用户明确要的效果）
+    if (_fanOpen || _expanded) { _snapPending = YES; return; }   // 扇形/面板还开着 → 等关掉再排（见 closeFan）
+    _snapPending = NO;
+    NSTimeInterval d = MAX(0.0, _snapDelay);
+    if (d <= 0.05) { [self doSnapToEdgeWithGen:myGen]; return; }   // 设成 0 = 立即吸附（老行为）
+    __weak FUFloatingManager *ws = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(d * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        FUFloatingManager *ss = ws; if (!ss) return;
+        if (myGen != ss->_snapGen) return;      // 已被取消（又拖了/点了球）或重排过
+        [ss doSnapToEdgeWithGen:myGen];
+    });
+}
+// 自动吸附：以「屏幕中心线（听筒→充电口）」为界 —— 球心在左半屏吸左边、右半屏吸右边，只露一半。
+- (void)doSnapToEdgeWithGen:(NSInteger)gen {
+    if (!_ball || !_overlay) return;
+    if (gen != _snapGen) return;
+    if (_snapMode == 1 || _fanOpen || _expanded) return;
     CGRect b = _ball.frame; CGRect s = _overlay.bounds;
     CGFloat half = b.size.width / 2.0f;
     // 竖向永远停在松手位置（不吸上/下边，避免球跑到状态栏或 Dock 上）
     CGFloat ty = MAX(2.0f, MIN(s.size.height - b.size.height - 2.0f, b.origin.y));
     CGRect f = b; f.origin.y = ty;
-    // ---- v1.3.5 修 01 / 02 ----
-    // 自动吸附：以「屏幕中心线」为界——球心在左半屏就吸左边，右半屏就吸右边（只露一半）。
-    // 全屏固定：松手停在原地，绝不自动吸走。
-    if (_snapMode == 1) {
-        [UIView animateWithDuration:0.2 animations:^{ _ball.frame = f; _ball.alpha = 0.4f; }
-                         completion:^(BOOL done){ [self persistBallPos]; }];
-        return;
-    }
     NSInteger side = (CGRectGetMidX(b) < s.size.width / 2.0f) ? 1 : 0;   // 1=左 0=右
     f.origin.x = (side == 1) ? -half : (s.size.width - half);
+    __weak FUFloatingManager *ws = self;
     [UIView animateWithDuration:0.3 delay:0.0 usingSpringWithDamping:0.65 initialSpringVelocity:0.5
                         options:UIViewAnimationOptionCurveEaseOut
                      animations:^{ _ball.frame = f; _ball.alpha = 0.4f; }
-                     completion:^(BOOL done){ [self persistBallPos]; }];
+                     completion:^(BOOL done){
+        FUFloatingManager *ss = ws; if (!ss) return;
+        [ss persistBallPos];
+    }];
 }
 // 球处于「半隐吸附态」时，点击先把它完整拉回屏幕内（再弹环/面板）。
 - (void)restoreBallFromSnap {
@@ -1370,12 +1480,11 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     }
     return sp;
 }
-- (void)openFan {
-    if (_fanOpen || _entries.count < 1) return;   // 0 个入口不弹（loadEntries 至少兜底 1 个）
-    _fanOpen = YES; _ball.alpha = 1.0f;           // 展开期间球保持实心可见
-    [self closeFanItemsAnimated:NO];
-    [self restoreBallFromSnap];                   // 半隐态先拉回，环才不会跟着缩在屏外
-    // 环无需键盘，保持非 key（不抢 App 触摸）；触摸经 hitTest 正常命中图标按钮。
+// v1.3.13：把「算扇形点位」抽成独立方法 —— openFan（动画摆放）与拖动球（实时重排）共用同一套算法，
+// 保证「扇形永远围绕球、且始终留在屏内」在两种场景下完全一致。
+- (NSArray *)fuFanPointArray {
+    NSMutableArray *pts = [NSMutableArray array];
+    if (!_ball || !_overlay || _entries.count < 1) return pts;
     CGRect sc = _overlay.bounds;
     CGPoint c = CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame));
     CGFloat isz   = _iconSize;
@@ -1455,6 +1564,43 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
             pts = shifted;
         }
     }
+    return pts;
+}
+// v1.3.13 修「拖动球时扇形被推着走」：拖动过程中就用上面的算法重新排布（不带动画，跟手）。
+- (void)fuRelayoutFanInstant {
+    if (!_fanOpen || !_ball || !_overlay) return;
+    [self restoreBallFromSnap];
+    NSArray *pts = [self fuFanPointArray];
+    if (pts.count != _fanItems.count) {     // 条目数变了（刚加/删了入口）→ 整组重开
+        [self closeFanItemsAnimated:NO];
+        _fanOpen = NO; [self openFan];
+        return;
+    }
+    CGFloat isz = _iconSize;
+    CGPoint c = CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame));
+    [_fanOffsets removeAllObjects];
+    for (NSUInteger k = 0; k < pts.count; k++) {
+        UIButton *it = _fanItems[k];
+        if (![it isKindOfClass:[UIButton class]]) continue;
+        CGPoint p = [pts[k] CGPointValue];
+        CGRect f = CGRectMake(p.x - isz/2.0f, p.y - isz/2.0f, isz, isz);
+        it.frame = f;
+        [_fanOffsets addObject:[NSValue valueWithCGPoint:
+            CGPointMake(CGRectGetMidX(f) - c.x, CGRectGetMidY(f) - c.y)]];
+    }
+}
+- (void)openFan {
+    if (_fanOpen || _entries.count < 1) return;   // 0 个入口不弹（loadEntries 至少兜底 1 个）
+    _fanOpen = YES; _ball.alpha = 1.0f;           // 展开期间球保持实心可见
+    [self cancelPendingSnap];                     // v1.3.13：扇形开着不吸附
+    [self closeFanItemsAnimated:NO];
+    [self restoreBallFromSnap];                   // 半隐态先拉回，环才不会跟着缩在屏外
+    // 环无需键盘，保持非 key（不抢 App 触摸）；触摸经 hitTest 正常命中图标按钮。
+    CGRect sc = _overlay.bounds;
+    CGPoint c = CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame));
+    CGFloat isz = _iconSize;
+    // v1.3.13：点位由 fuFanPointArray 统一计算（拖动重排用的是同一套）
+    NSArray *pts = [self fuFanPointArray];
     // 5) 正式摆放（带轻微 clamp 兜底 + 缩放动画）
     [_fanOffsets removeAllObjects];
     NSInteger placed = 0;
@@ -1541,19 +1687,11 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     NSString *norm = [self normalizeURL:u]; if (!norm.length) return;
     // 确认模式（设置里可开）：不直接触发，先弹输入框+打开按钮，用户点「打开」才执行。
     if (_tapConfirm) { [self showSchemeBox:norm]; return; }
-    if ([self isWebScheme:norm]) {
-        [self pushHistory:norm];
-        if (_webMode == 1) {
-            // 内置面板（实验）：SpringBoard 进程里 WKWebView 常白屏，默认不用；设置里可开。
-            _url = norm; [self expand];
-        } else {
-            // v1.3.5 修 04：默认交给系统浏览器打开——真机实测只有这条路一定能出网页。
-            [self fuOpenExternally:norm];
-        }
-    }
-    else {   // 非网页：直接拉起对应 app（走 LSApplicationWorkspace，SpringBoard 里比 openURL 稳）
-        [self fuOpenExternally:norm];
-    }
+    if ([self isWebScheme:norm]) [self pushHistory:norm];
+    // v1.3.13：网页类**不再**走桌面内置面板（SpringBoard 里 WKWebView 必白屏、UIWebView 会挂死桌面），
+    // 统一交给 fuOpenExternally：前台 App 的内置浏览器 → 系统浏览器。这就是「网页用不了」的另一个坑：
+    // 设置里如果开着「内置浏览器」开关，点网页只会弹一个白屏面板。
+    [self fuOpenExternally:norm];
 }
 - (void)fanItemLongPressed:(UILongPressGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan) return;
@@ -1569,8 +1707,9 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 }
 - (void)closeFan {
     _fanOpen = NO; [self closeFanItemsAnimated:YES];
-    if (!_ball.hidden) _ball.alpha = 0.4f;   // 关扇形 → 回到半透明待机
     [self setInteractive:NO];   // 关闭扇形 → 还给 App
+    // v1.3.13：关掉扇形后按「吸附延时」归位 —— 先完整可见地停 N 秒（默认 3），再到点吸附/固定。
+    [self scheduleSnapAfterDrop];
 }
 - (void)closeFanItemsAnimated:(BOOL)animated {
     NSArray *items = [_fanItems copy]; [_fanItems removeAllObjects]; [_fanOffsets removeAllObjects];
@@ -1597,54 +1736,79 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 // v1.3.8 修 01（卡死 bug）：**绝不能在主线程同步调用** —— openSensitiveURL:withOptions: 会一路同步等
 // FrontBoard 把目标 App 拉起，Safari/微信冷启动时要好几秒，这几秒里 SpringBoard 主线程被占死，
 // 表现就是「点了网页 -> 整机卡住、屏幕动不了」。这里整段丢到后台队列，主线程立刻返回。
-- (NSString *)fuWebHandoffPathForBid:(NSString *)bid {
-    if (!bid.length) return nil;
-    @try {
-        Class proxyCls = NSClassFromString(@"LSApplicationProxy");
-        SEL fSel = NSSelectorFromString(@"applicationProxyForIdentifier:");
-        if (!proxyCls || ![proxyCls respondsToSelector:fSel]) return nil;
-        id proxy = [proxyCls performSelector:fSel withObject:bid];
-        SEL dSel = NSSelectorFromString(@"dataContainerURL");
-        if (!proxy || ![proxy respondsToSelector:dSel]) return nil;
-        id dataURL = [proxy performSelector:dSel];
-        if (![dataURL isKindOfClass:[NSURL class]]) return nil;
-        NSString *caches = [[(NSURL *)dataURL path] stringByAppendingPathComponent:@"Library/Caches"];
-        if (!caches.length) return nil;
-        [[NSFileManager defaultManager] createDirectoryAtPath:caches withIntermediateDirectories:YES attributes:nil error:NULL];
-        return [caches stringByAppendingPathComponent:kFUInAppWebFile];
-    } @catch (NSException *e) { return nil; }
+// v1.3.13：返回「可以投递的信箱路径」列表（按优先级）。桌面写目标 App 容器常被沙盒拒绝，
+// 所以多准备一个 /var/mobile/Media 下的公共信箱 —— 哪个写成功就用哪个，App 端两处都看。
+- (NSArray *)fuWebMailboxPathsForBid:(NSString *)bid {
+    NSMutableArray *out = [NSMutableArray array];
+    if (bid.length) {
+        @try {
+            Class proxyCls = NSClassFromString(@"LSApplicationProxy");
+            SEL fSel = NSSelectorFromString(@"applicationProxyForIdentifier:");
+            if (proxyCls && [proxyCls respondsToSelector:fSel]) {
+                id proxy = [proxyCls performSelector:fSel withObject:bid];
+                SEL dSel = NSSelectorFromString(@"dataContainerURL");
+                if (proxy && [proxy respondsToSelector:dSel]) {
+                    id dataURL = [proxy performSelector:dSel];
+                    if ([dataURL isKindOfClass:[NSURL class]]) {
+                        NSString *caches = [[(NSURL *)dataURL path] stringByAppendingPathComponent:@"Library/Caches"];
+                        if (caches.length) {
+                            [[NSFileManager defaultManager] createDirectoryAtPath:caches
+                                withIntermediateDirectories:YES attributes:nil error:NULL];
+                            [out addObject:[caches stringByAppendingPathComponent:kFUInAppWebFile]];
+                        }
+                    }
+                }
+            }
+        } @catch (NSException *e) { }
+    }
+    [out addObject:kFUWebMailboxMedia];   // 公共备用信箱
+    return out;
 }
 
 - (BOOL)fuHandoffWebToFrontApp:(NSURL *)u {
     @try {
         NSString *bid = [self fuFrontmostBid];
-        if (!bid.length) return NO;                       // 在桌面 → 没有 App 能接手
-        NSString *path = [self fuWebHandoffPathForBid:bid];
-        if (!path.length) return NO;                      // 拿不到容器 → 交给系统浏览器
-        NSString *s = u.absoluteString;
-        if (!s.length) return NO;
-        // 写失败（沙盒限制等）也返回 NO → 自动兜底系统浏览器，绝不出现「点了没反应」
-        if (![s writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]) return NO;
-        notify_post(kFUInAppWebName.UTF8String);
-        return YES;
+        if (!bid.length) return NO;                       // 在桌面 → 没有 App 能接手，直接走系统浏览器
+        if ([bid isEqualToString:@"com.apple.mobilesafari"]) return NO;   // Safari 自己就是浏览器，别套一层
+        // 载荷 = 第一行时间戳（序号，防陈旧文件被重复打开）+ 第二行 URL
+        NSString *payload = [NSString stringWithFormat:@"%.3f\n%@",
+                             CFAbsoluteTimeGetCurrent(), u.absoluteString];
+        if (!payload.length) return NO;
+        for (NSString *p in [self fuWebMailboxPathsForBid:bid]) {
+            if ([payload writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:NULL]) {
+                NSLog(@"[FloatingURL] 网页已投递给 %@（信箱 %@）", bid, p);
+                _webAckPending = YES;                     // 先立旗，再喊人（App 回执可能瞬间到）
+                notify_post(kFUInAppWebName.UTF8String);
+                return YES;
+            }
+        }
+        NSLog(@"[FloatingURL] 投递信箱全部写失败（沙盒）→ 走系统浏览器");
+        return NO;                                        // 写不进去 → 兜底系统浏览器，绝不「点了没反应」
     } @catch (NSException *e) { return NO; }
 }
 
 - (void)fuOpenViaWorkspace:(NSURL *)u {
     @try {
         Class wsc = NSClassFromString(@"LSApplicationWorkspace");
-        SEL selSensitive = NSSelectorFromString(@"openSensitiveURL:withOptions:");
-        id ws = wsc ? [wsc performSelector:NSSelectorFromString(@"defaultWorkspace")] : nil;
-        if (ws && [ws respondsToSelector:selSensitive]) {
-            [ws performSelector:selSensitive withObject:u withObject:nil];
-        }
+        SEL defSel = NSSelectorFromString(@"defaultWorkspace");
+        id ws = (wsc && [wsc respondsToSelector:defSel]) ? [wsc performSelector:defSel] : nil;
+        if (!ws) { NSLog(@"[FloatingURL] 无 LSApplicationWorkspace，打不开 %@", u); return; }
+        // ★ 仍然丢后台队列：openSensitiveURL 会同步等 FrontBoard 拉起目标 App，主线程会被占死好几秒。
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+            @try {
+                SEL s1 = NSSelectorFromString(@"openSensitiveURL:withOptions:");
+                if ([ws respondsToSelector:s1]) { [ws performSelector:s1 withObject:u withObject:nil]; return; }
+                SEL s2 = NSSelectorFromString(@"openURL:");
+                if ([ws respondsToSelector:s2]) { [ws performSelector:s2 withObject:u]; }
+            } @catch (NSException *e) { NSLog(@"[FloatingURL] workspace 打开异常: %@", e); }
+        });
     } @catch (NSException *e) { NSLog(@"[FloatingURL] openViaWorkspace 异常（已忽略）: %@", e); }
 }
 
-- (void)fuOpenViaSystem:(NSURL *)u {
+// v1.3.13：FrontBoard 异步接口。1.3.10 只用它、失败了也无声无息 → 用户看到的就是「点了没反应」。
+- (void)fuOpenViaFBS:(NSURL *)u {
     @try {
         __weak FUFloatingManager *wself = self;
-        // ① FBSSystemService：FrontBoard 自家异步 API（不卡主线程）。失败回调里再兜底，避免双开。
         Class fbsCls = NSClassFromString(@"FBSSystemService");
         SEL sharedSel = NSSelectorFromString(@"sharedService");
         SEL openSel = NSSelectorFromString(@"openURL:options:withResultBlock:");
@@ -1652,19 +1816,40 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
             id svc = [fbsCls performSelector:sharedSel];
             if (svc && [svc respondsToSelector:openSel]) {
                 void (^blk)(BOOL, NSError *) = ^(BOOL ok, NSError *err){
-                    if (!ok) {
-                        NSLog(@"[FloatingURL] FBSSystemService 未受理，改走 LSApplicationWorkspace");
-                        [wself fuOpenViaWorkspace:u];
-                    }
+                    if (ok) return;
+                    NSLog(@"[FloatingURL] FBSSystemService 未受理 → 继续兜底 workspace");
+                    FUFloatingManager *ss = wself; if (ss) [ss fuOpenViaWorkspace:u];
                 };
                 ((void (*)(id, SEL, id, id, id))objc_msgSend)(svc, openSel, u, @{}, blk);
                 return;
             }
         }
-        // ② 没有 FBSSystemService → LSApplicationWorkspace（主线程同步发一次请求，必定受理）
         [self fuOpenViaWorkspace:u];
     } @catch (NSException *e) {
+        NSLog(@"[FloatingURL] fuOpenViaFBS 异常（已忽略）: %@", e);
+        [self fuOpenViaWorkspace:u];
+    }
+}
+
+// v1.3.13 系统打开链路（每步都有回执，失败就往下走，绝不「点了没反应」）：
+//   ① UIApplication openURL:options:completionHandler:  —— 系统标准入口，异步、不卡主线程；
+//   ② FBSSystemService（FrontBoard）→ ③ LSApplicationWorkspace（后台队列）。
+- (void)fuOpenViaSystem:(NSURL *)u {
+    @try {
+        __weak FUFloatingManager *wself = self;
+        UIApplication *app = UIApplication.sharedApplication;
+        if (app) {
+            [app openURL:u options:@{} completionHandler:^(BOOL ok){
+                if (ok) { NSLog(@"[FloatingURL] openURL 成功：%@", u); return; }
+                NSLog(@"[FloatingURL] openURL 未受理 → 试 FBSSystemService");
+                FUFloatingManager *ss = wself; if (ss) [ss fuOpenViaFBS:u];
+            }];
+            return;
+        }
+        [self fuOpenViaFBS:u];
+    } @catch (NSException *e) {
         NSLog(@"[FloatingURL] fuOpenViaSystem 异常（已忽略）: %@", e);
+        [self fuOpenViaFBS:u];
     }
 }
 
@@ -1679,19 +1864,21 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     BOOL isWeb = [scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"];
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
-            if (isWeb) {
-                NSString *path = [self fuWebHandoffPathForBid:[self fuFrontmostBid]];
-                if ([self fuHandoffWebToFrontApp:u]) {
-                    // 回执确认：App 读到交接文件会立刻删除；1.1s 后文件还在 = 没接住 → 系统浏览器
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.1 * NSEC_PER_SEC)),
-                                   dispatch_get_main_queue(), ^{
-                        if (path.length && [[NSFileManager defaultManager] fileExistsAtPath:path]) {
-                            NSLog(@"[FloatingURL] App 未接住网页请求，改用系统浏览器");
-                            [self fuOpenViaSystem:u];
-                        }
-                    });
-                    return;
-                }
+            if (isWeb && [self fuHandoffWebToFrontApp:u]) {
+                // 已交给前台 App 的内置浏览器。**只认 App 的回执**（真弹出来了才发），
+                // 1.5s 没回执 = App 没接住 / 不在前台 → 自动兜底系统浏览器。
+                // （1.3.12 是看「交接文件是否被删」——App 删了文件却没弹出浏览器时，这里会以为已接住，
+                //   结果什么都不开；用户反馈的「网页还是用不了」就是这个洞。）
+                __weak FUFloatingManager *ws = self;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    FUFloatingManager *ss = ws; if (!ss) return;
+                    if (!ss->_webAckPending) return;      // App 已弹出内置浏览器，收工
+                    ss->_webAckPending = NO;
+                    NSLog(@"[FloatingURL] App 未回执 → 改用系统浏览器打开");
+                    [ss fuOpenViaSystem:u];
+                });
+                return;
             }
             [self fuOpenViaSystem:u];
         } @catch (NSException *e) {
