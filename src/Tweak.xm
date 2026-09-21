@@ -65,7 +65,7 @@ static NSString * const kFUBallIcon    = @"ballIcon";   // v1.3.5：球的图标
 static NSString * const kFUBallColor   = @"ballColor";  // v1.3.5：球的底色 hex（无图标时生效）
 static NSString * const kFUWebMode     = @"webMode";    // v1.3.5：YES=内置面板打开网页
 
-static const NSInteger kFUMaxEntries = 24;   // v1.3.5：上限提到 24（三层，每层最多 8~12，按弧长自动分）
+static const NSInteger kFUMaxEntries = 48;   // v1.3.6：上限 48（三层 8 + 16 + 24）
 static const NSInteger kFULayer1Max  = 4;    // 第一层（内环）最多 4 个
 static const NSInteger kFULayer2Max  = 6;    // 第二层（外环）最多 6 个
 static const CGFloat   kFUButtonSize = 40.0f;   // 悬浮球尺寸
@@ -585,6 +585,7 @@ static void fuFrontGoneCb(CFNotificationCenterRef center, void *observer,
         _side = 0; _iconSize = 40.0f; _iconGap = 56.0f;   // v1.3.1：球默认停靠右侧
         _fanSpan = 180.0f; _fanScale = 100.0f;            // v1.3.2 扇形角度 / 整体距离
         _snapMode = 0; _webMode = 0; _ballTitle = @"URL";  // v1.3.5 默认：自动吸附 + 系统浏览器
+        _layer1 = 8; _layer2 = 16; _layer3 = 24;           // v1.3.6：三层默认数量 8/16/24（合计 48）
         _frontWatched = [NSMutableSet set];
         _history = [NSMutableArray array]; _fanItems = [NSMutableArray array]; _fanOffsets = [NSMutableArray array];
         [self reloadPrefs]; [self loadHistory];
@@ -660,9 +661,10 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     if (l2 && CFGetTypeID(l2) == CFNumberGetTypeID()) { _layer2 = [(__bridge NSNumber *)l2 integerValue]; CFRelease(l2); }
     CFPropertyListRef l3 = CFPreferencesCopyAppValue((__bridge CFStringRef)kFULayer3Count, (__bridge CFStringRef)kFUSuite);
     if (l3 && CFGetTypeID(l3) == CFNumberGetTypeID()) { _layer3 = [(__bridge NSNumber *)l3 integerValue]; CFRelease(l3); }
-    if (_layer1 < 0) _layer1 = 0; if (_layer1 > 12) _layer1 = 12;
-    if (_layer2 < 0) _layer2 = 0; if (_layer2 > 12) _layer2 = 12;
-    if (_layer3 < 0) _layer3 = 0; if (_layer3 > 12) _layer3 = 12;
+    // v1.3.6：三层上限 8 / 16 / 24（0 = 该层自动按弧长排）
+    if (_layer1 < 0) _layer1 = 0; if (_layer1 > 8)  _layer1 = 8;
+    if (_layer2 < 0) _layer2 = 0; if (_layer2 > 16) _layer2 = 16;
+    if (_layer3 < 0) _layer3 = 0; if (_layer3 > 24) _layer3 = 24;
     // v1.3.3：静默模式（旗标文件存在 = 开；App 心跳与桌面球都据此休眠）
     _silent = [[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"];
     // ---- v1.3.5：吸附模式 / 网页打开方式 / 悬浮球外观 ----
@@ -1299,7 +1301,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
         if (target < 0) target = 2;   // 全部指定仍不够 → 兜底第三层
         CGFloat arc = R[target] * spanMax * (CGFloat)M_PI / 180.0f;
         NSInteger autoCap = MAX(1, (NSInteger)floor(arc / (isz + gap)));
-        if (autoCap > 12) autoCap = 12;   // v1.3.5：每层上限 12（三层合计可放 24 个）
+        if (autoCap > 24) autoCap = 24;   // v1.3.6：自动模式的单层上限同步放宽到 24
         NSInteger space = n - placed;
         NSInteger add = MIN(autoCap, space);
         caps[target] += add; placed += add;

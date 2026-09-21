@@ -26,7 +26,7 @@ static NSString * const kFUBallX       = @"ballX";      // v1.3.5 球中心 X（
 static NSString * const kFUBallTitle   = @"ballTitle";  // v1.3.5 球的文字（默认 URL）
 static NSString * const kFUBallIcon    = @"ballIcon";   // v1.3.5 球的图标（PNG data）
 static NSString * const kFUBallColor   = @"ballColor";  // v1.3.5 球的底色 hex
-static const NSInteger kFUMaxEntries   = 24;   // v1.3.5：上限提到 24（三层自动分层）
+static const NSInteger kFUMaxEntries   = 48;   // v1.3.6：上限 48（三层默认 8/16/24）
 static const NSInteger kFULayer1Max    = 4;    // 第一层（内环）最多 4 个
 static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 个
 
@@ -512,7 +512,7 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
         @{@"t":@"⑨ 装插件(Sileo)", @"c":@"sileo://package/com.example.foo", @"d":@"填 sileo://package/包名 拉起 Sileo 装包"},
         @{@"t":@"⑩ 打开本地文件", @"c":@"file:///var/jb/...", @"d":@"填 file:// 路径打开本地文件（rootless 路径以 /var/jb 开头）"},
         @{@"t":@"⑪ 如何获取URL", @"c":@"在 Safari 打开网页→分享→拷贝 即可得到网址", @"d":@"长按网页链接也可拷贝；把链接粘到地址栏/快捷入口即可"},
-        @{@"t":@"⑫ 多环快捷菜单", @"c":@"设置→快捷URI 添加入口（最多 24 个，按数量自动分三层）", @"d":@"点球展开扇形快捷环：URL 球固定不动；添加几个就排几个，第一层满了自动溢到第二、三层；长按环上图标可就地编辑；拖球时整环跟随"},
+        @{@"t":@"⑫ 多环快捷菜单", @"c":@"设置→快捷URI 添加入口（最多 48 个，默认按第一层8/第二层16/第三层24 分）", @"d":@"点球展开扇形快捷环：URL 球固定不动；添加几个就排几个，第一层满了自动溢到第二、三层；每层数量可在「布局调节」里改（拖到 0 = 该层自动）；长按环上图标可就地编辑；拖球时整环跟随"},
         @{@"t":@"⑬ 布局调节", @"c":@"设置→布局调节（实时预览）", @"d":@"滑杆调位置/图标大小/图标间隔，预览即时变化，手机上同时生效"},
         @{@"t":@"⑭ 支付宝付款码", @"c":@"alipays://platformapi/startapp?appId=20000056", @"d":@"一键拉起支付宝付款码，付款更快"},
         @{@"t":@"⑮ 淘宝", @"c":@"taobao://", @"d":@"拉起手机淘宝；商品页链接前缀换成 taobao:// 可直达商品"},
@@ -946,9 +946,9 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     _preview.iconGap  = [self prefFloat:kFUIconGap dft:56];
     _preview.span     = [self prefFloat:kFUFanSpan dft:180];
     _preview.scale    = [self prefFloat:kFUFanScale dft:100];
-    _preview.layer1   = [self prefInt:kFULayer1Count dft:0];
-    _preview.layer2   = [self prefInt:kFULayer2Count dft:0];
-    _preview.layer3   = [self prefInt:kFULayer3Count dft:0];
+    _preview.layer1   = [self prefInt:kFULayer1Count dft:8];
+    _preview.layer2   = [self prefInt:kFULayer2Count dft:16];
+    _preview.layer3   = [self prefInt:kFULayer3Count dft:24];
     [self loadEntriesForPreview];
     [_scroll addSubview:_preview]; y += _preview.frame.size.height + 6;
     UILabel *pvTip = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 30)];
@@ -994,12 +994,12 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     // ---- v1.3.3：每层数量（0=自动）----
     UILabel *lLab = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 20)];
     lLab.font = [UIFont systemFontOfSize:12]; lLab.textColor = [UIColor secondaryLabelColor];
-    lLab.text = @"每层数量（0 = 自动，按添加的 URL 自动分层）";
+    lLab.text = @"每层数量（默认 8 / 16 / 24，合计最多 48；拖到 0 = 该层自动按弧长排）";
     [_scroll addSubview:lLab]; y += 24;
-    NSInteger pl1 = [self prefInt:kFULayer1Count dft:0], pl2 = [self prefInt:kFULayer2Count dft:0], pl3 = [self prefInt:kFULayer3Count dft:0];
-    _l1s = [self mkSlider:CGRectMake(16, y, w-32, 52) min:0 max:12 val:pl1 label:@"第一层数量" out:&y lout:&_ll1];
-    _l2s = [self mkSlider:CGRectMake(16, y, w-32, 52) min:0 max:12 val:pl2 label:@"第二层数量" out:&y lout:&_ll2];
-    _l3s = [self mkSlider:CGRectMake(16, y, w-32, 52) min:0 max:12 val:pl3 label:@"第三层数量" out:&y lout:&_ll3];
+    NSInteger pl1 = [self prefInt:kFULayer1Count dft:8], pl2 = [self prefInt:kFULayer2Count dft:16], pl3 = [self prefInt:kFULayer3Count dft:24];
+    _l1s = [self mkSlider:CGRectMake(16, y, w-32, 52) min:0 max:8  val:pl1 label:@"第一层数量" out:&y lout:&_ll1];
+    _l2s = [self mkSlider:CGRectMake(16, y, w-32, 52) min:0 max:16 val:pl2 label:@"第二层数量" out:&y lout:&_ll2];
+    _l3s = [self mkSlider:CGRectMake(16, y, w-32, 52) min:0 max:24 val:pl3 label:@"第三层数量" out:&y lout:&_ll3];
     _l1s.tag = 6; _l2s.tag = 7; _l3s.tag = 8;
     for (UISlider *sl in @[_l1s, _l2s, _l3s])
         [sl addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
@@ -1053,17 +1053,17 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
 - (void)reset {
     _sideSeg.selectedSegmentIndex = 0; _modeS.value = 0; [self refreshModeLabel];
     _ss.value = 40; _sg.value = 56; _span.value = 180; _sc.value = 100;
-    _l1s.value = 0; _l2s.value = 0; _l3s.value = 0;
+    _l1s.value = 8; _l2s.value = 16; _l3s.value = 24;
     _ls.text = @"图标大小（当前 40）"; _lg.text = @"图标间隔（当前 56）";
     _lspan.text = @"扇形角度°（当前 180）"; _lsc.text = @"整体距离%（当前 100）";
-    _ll1.text = @"第一层数量（当前 0）"; _ll2.text = @"第二层数量（当前 0）"; _ll3.text = @"第三层数量（当前 0）";
+    _ll1.text = @"第一层数量（当前 8）"; _ll2.text = @"第二层数量（当前 16）"; _ll3.text = @"第三层数量（当前 24）";
     _preview.side = 0; _preview.iconSize = 40; _preview.iconGap = 56;
     _preview.span = 180; _preview.scale = 100;
-    _preview.layer1 = 0; _preview.layer2 = 0; _preview.layer3 = 0;
+    _preview.layer1 = 8; _preview.layer2 = 16; _preview.layer3 = 24;
     [self writeInt:kFUSnapMode value:0];
     [self writeFloat:kFUIconSize value:40]; [self writeFloat:kFUIconGap value:56];
     [self writeFloat:kFUFanSpan value:180]; [self writeFloat:kFUFanScale value:100];
-    [self writeInt:kFULayer1Count value:0]; [self writeInt:kFULayer2Count value:0]; [self writeInt:kFULayer3Count value:0];
+    [self writeInt:kFULayer1Count value:8]; [self writeInt:kFULayer2Count value:16]; [self writeInt:kFULayer3Count value:24];
     [_preview refresh];
 }
 @end
