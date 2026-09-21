@@ -628,110 +628,36 @@ static NSArray *FUColorPalette(void) {
 - (void)cancel { [self.navigationController popViewControllerAnimated:YES]; }
 @end
 
-#pragma mark - 批量添加（多行粘贴）
-// v1.3.8 修 04：一次粘贴多行生成多条入口。每行：只写网址，或「名称 网址」
-// （名称与网址之间用 空格 / 逗号 / 竖线 分隔）。
-@interface FUBulkAddController : UIViewController
-@property (nonatomic, copy) void (^onDone)(NSArray *items);   // @[@{@"url":..,@"name":..}]
-@end
-@implementation FUBulkAddController
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
-    self.title = @"批量添加";
-    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"取消"
-        style:UIBarButtonItemStylePlain target:self action:@selector(cancel)];
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"导入"
-        style:UIBarButtonItemStyleDone target:self action:@selector(doImport)];
-    CGFloat W = self.view.bounds.size.width, H = self.view.bounds.size.height;
-    UILabel *tip = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, W - 32, 34)];
-    tip.numberOfLines = 0; tip.font = [UIFont systemFontOfSize:12];
-    tip.textColor = [UIColor secondaryLabelColor];
-    tip.text = @"每行一条：只写网址，或「名称 网址」（名称与网址之间用空格 / 逗号 / 竖线分隔）。一次最多 48 条。";
-    [self.view addSubview:tip];
-    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(16, 52, W - 32, H - 76)];
-    tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    tv.tag = 9911; tv.font = [UIFont systemFontOfSize:13];
-    tv.layer.borderColor = [UIColor separatorColor].CGColor; tv.layer.borderWidth = 1.0f;
-    tv.layer.cornerRadius = 10.0f;
-    tv.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    tv.autocorrectionType = UITextAutocorrectionTypeNo;
-    tv.keyboardType = UIKeyboardTypeURL;
-    [self.view addSubview:tv];
-    [tv becomeFirstResponder];
-}
-- (void)cancel { [self dismissViewControllerAnimated:YES completion:nil]; }
-- (void)doImport {
-    UITextView *tv = [self.view viewWithTag:9911];
-    NSArray *lines = [tv.text componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-    NSMutableArray *out = [NSMutableArray array];
-    NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
-    NSCharacterSet *sep = [NSCharacterSet characterSetWithCharactersInString:@" \t,，|"];
-    for (NSString *ln in lines) {
-        NSString *s = [ln stringByTrimmingCharactersInSet:ws];
-        if (!s.length) continue;
-        NSString *name = nil, *url = s;
-        NSRange rg = [s rangeOfCharacterFromSet:sep];
-        if (rg.location != NSNotFound) {
-            NSString *a = [[s substringToIndex:rg.location] stringByTrimmingCharactersInSet:ws];
-            NSString *b = [[s substringFromIndex:rg.location + 1] stringByTrimmingCharactersInSet:ws];
-            if (b.length) { name = a; url = b; }
-        }
-        if (!url.length) continue;
-        if (name.length > 8) name = [name substringToIndex:8];
-        NSMutableDictionary *d = [NSMutableDictionary dictionary];
-        d[@"url"] = url;
-        if (name.length) d[@"name"] = name;
-        [out addObject:d];
-    }
-    if (_onDone) _onDone(out);
-    [self dismissViewControllerAnimated:YES completion:nil];
-}
-@end
-
+#pragma mark - URI 列表控制器（v1.3.21：已移除搜索/筛选/全选/批量 按钮栏）
 #pragma mark - URI 列表控制器
-@interface FUUrlListController : UIViewController <UITableViewDelegate, UITableViewDataSource, UISearchBarDelegate>
-@property (nonatomic, strong) NSMutableArray *entries;   // 全部条目
-@property (nonatomic, strong) NSMutableArray *shown;     // 过滤后要显示的下标（NSNumber）
-@property (nonatomic, strong) NSMutableSet   *picked;    // 多选选中的下标（NSNumber）
+@interface FUUrlListController : UIViewController <UITableViewDelegate, UITableViewDataSource>
+@property (nonatomic, strong) NSMutableArray *entries;
+@property (nonatomic, strong) NSMutableArray *shown;     // 要显示的下标（NSNumber）
 @property (nonatomic, strong) UITableView    *tv;
-@property (nonatomic, strong) UISearchBar    *search;
-@property (nonatomic, strong) UIView         *bar;
-@property (nonatomic, strong) UIButton       *bSearch, *bFilter, *bAll, *bBulk;
-@property (nonatomic, assign) BOOL           searchVisible, multiSelect;
-@property (nonatomic, assign) NSInteger      filterMode; // 0全部 1没设图标 2没填名称 3网址重复
-// v1.3.13：按钮条改 Auto Layout（约束布局），不再手算 frame —— 手算在部分机型/进程里会出现
-// 「跑到屏幕外 / 被导航栏压住 / 看得见却按不了」；并补一个空状态提示。
 @property (nonatomic, strong) UILabel        *empty;
-@property (nonatomic, strong) NSLayoutConstraint *searchH;
-@property (nonatomic, assign) BOOL             pendingScrollEnd;   // v1.3.13：返回列表后滚到最新一条
+@property (nonatomic, assign) BOOL             pendingScrollEnd;   // 保存返回后滚到最新一条
 @end
 @implementation FUUrlListController
 - (void)loadEntries {
     CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUURLs, (__bridge CFStringRef)kFUSuite);
     NSArray *arr = nil; if (r) { arr = (__bridge_transfer NSArray *)r; if (![arr isKindOfClass:[NSArray class]]) arr = nil; }
     _entries = (arr.count ? [arr mutableCopy] : [NSMutableArray array]);
-    if (!_picked) _picked = [NSMutableSet set];
-    if (!_shown)  _shown  = [NSMutableArray array];
+    if (!_shown) _shown = [NSMutableArray array];
 }
 - (void)saveEntries {
     CFPreferencesSetAppValue((__bridge CFStringRef)kFUURLs, (__bridge CFPropertyListRef)_entries, (__bridge CFStringRef)kFUSuite);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
     notify_post("com.yzdmm.floatingurl/settingsChanged");
 }
-// v1.3.8 修 04：标题与「添加」按钮始终显示真实数量。
-// （以前只在首次 viewDidLoad 里算一次，添加/编辑返回后数字不动，看着像没加上。）
 - (void)refreshCount {
-    if (_multiSelect) return;   // 多选时右上角是「删除(N)」
     NSUInteger cnt = _entries.count;
     self.title = [NSString stringWithFormat:@"快捷URI (%lu/%ld)", (unsigned long)cnt, (long)kFUMaxEntries];
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
         initWithTitle:[NSString stringWithFormat:@"添加(%lu/%ld)", (unsigned long)cnt, (long)kFUMaxEntries]
                 style:UIBarButtonItemStylePlain target:self action:@selector(addEntry)];
     self.navigationItem.rightBarButtonItem.enabled = (cnt < (NSUInteger)kFUMaxEntries);
+    self.navigationItem.leftBarButtonItem = nil;
 }
-// v1.3.13：加完 / 批量导入后滚到最新一条 —— 新条目原来会落在列表最下面看不见，
-// 用户会误判成「添加了但快捷 URL 不显示」。
 - (void)scrollToLastRow {
     if (_shown.count == 0) return;
     NSInteger row = (NSInteger)_shown.count - 1;
@@ -743,271 +669,48 @@ static NSArray *FUColorPalette(void) {
                            atScrollPosition:UITableViewScrollPositionMiddle animated:YES];
     });
 }
+// v1.3.21：搜索/筛选/批量 已整体移除 → 列表直接显示全部条目（按原顺序）。
 - (void)applyFilter {
-    NSString *q = [_search.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     NSMutableArray *out = [NSMutableArray array];
-    for (NSInteger i = 0; i < (NSInteger)_entries.count; i++) {
-        NSDictionary *e = _entries[i]; if (![e isKindOfClass:[NSDictionary class]]) continue;
-        NSString *u  = [e[kFUEntryURL] isKindOfClass:[NSString class]] ? e[kFUEntryURL] : @"";
-        NSString *ch = [e[kFUEntryChar] isKindOfClass:[NSString class]] ? e[kFUEntryChar] : @"";
-        if (!ch.length && [e[kFUEntryLetter] isKindOfClass:[NSString class]]) ch = e[kFUEntryLetter];
-        BOOL keep = YES;
-        if (q.length) {
-            keep = ([u rangeOfString:q options:NSCaseInsensitiveSearch].location != NSNotFound) ||
-                   ([ch rangeOfString:q options:NSCaseInsensitiveSearch].location != NSNotFound);
-        }
-        if (keep && _filterMode != 0) {
-            if (_filterMode == 1) {
-                NSData *ic = [e[kFUEntryIcon] isKindOfClass:[NSData class]] ? e[kFUEntryIcon] : nil;
-                keep = !(ic.length);
-            } else if (_filterMode == 2) {
-                keep = (ch.length == 0);
-            } else if (_filterMode == 3) {
-                NSInteger dup = 0;
-                for (NSDictionary *o in _entries) {
-                    if (![o isKindOfClass:[NSDictionary class]]) continue;
-                    if ([o[kFUEntryURL] isEqual:u]) dup++;
-                }
-                keep = (dup > 1);
-            }
-        }
-        if (keep) [out addObject:@(i)];
-    }
+    for (NSInteger i = 0; i < (NSInteger)_entries.count; i++) [out addObject:@(i)];
     _shown = out;
     [_tv reloadData];
-    [self updateButtons];
-    // v1.3.13：列表为空时给明确提示（避免「添加了却没显示」的错觉）
     if (_empty) _empty.hidden = (_shown.count > 0);
 }
 - (void)viewDidLoad {
     [super viewDidLoad];
-    // v1.3.19：让**系统**负责导航栏避让 —— 不要再自己手算偏移（1.3.16/1.3.17 都栽在这）。
-    // 官方标准做法：edgesForExtendedLayout = UIRectEdgeNone → UIKit 自动把本 VC 的 view
-    // 布局到导航栏**下方**，于是 self.view 的 y=0 就已经在导航栏之下，子视图按 0 基线直接排即可。
-    // （参考 Apple 官方《Positioning content relative to the safe area》与 edgesForExtendedLayout 文档。）
-    self.edgesForExtendedLayout = UIRectEdgeNone;
-    self.extendedLayoutIncludesOpaqueBars = NO;
+    self.edgesForExtendedLayout = UIRectEdgeNone;      // 让系统把内容排到导航栏下方
     [self loadEntries];
     self.view.backgroundColor = [UIColor systemBackgroundColor];
-    // ---- 1.3.15 修「搜索/筛选/全选/批量 按不了」+ 列表不显示 ----
-    //  1.3.13 把按钮条改成 Auto Layout 约束，但在本 PreferenceLoader 宿主里约束没被布局引擎
-    //  解析，所有子视图 frame 卡在 0,0,0,0 → 按钮点不到、列表也看不见（添加后像「没保存」）。
-    //  改回 frame 布局（与能正常工作的 FULayoutController 同一套）：直接用 self.view.bounds 算
-    //  frame + autoresizingMask，可靠且自适应横竖屏。viewDidLayoutSubviews 会再跑 layoutParts 兜底。
-    CGFloat w = self.view.bounds.size.width;
-    CGFloat H = self.view.bounds.size.height;
-    _bar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 46)];
-    _bar.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    _bar.backgroundColor = [UIColor secondarySystemBackgroundColor];
-    [self.view addSubview:_bar];
-
-    UIStackView *stack = [[UIStackView alloc] initWithFrame:_bar.bounds];
-    stack.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    stack.axis = UILayoutConstraintAxisHorizontal;
-    stack.distribution = UIStackViewDistributionFillEqually;
-    stack.spacing = 0.5;
-    [_bar addSubview:stack];
-
-    NSArray *titles = @[@"🔍 搜索", @"⛃ 筛选", @"☑ 全选", @"＋ 批量"];
-    NSArray *sels   = @[@"toggleSearch", @"showFilter", @"toggleAll", @"bulkAdd"];
-    NSMutableArray *btns = [NSMutableArray array];
-    for (NSInteger i = 0; i < 4; i++) {
-        UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-        b.titleLabel.font = [UIFont systemFontOfSize:14];
-        b.titleLabel.adjustsFontSizeToFitWidth = YES;
-        b.titleLabel.minimumScaleFactor = 0.75;
-        [b setTitle:titles[i] forState:UIControlStateNormal];
-        [b addTarget:self action:NSSelectorFromString(sels[i]) forControlEvents:UIControlEventTouchUpInside];
-        [stack addArrangedSubview:b];
-        [btns addObject:b];
-    }
-    _bSearch = btns[0]; _bFilter = btns[1]; _bAll = btns[2]; _bBulk = btns[3];
-
-    UIView *line = [[UIView alloc] initWithFrame:CGRectMake(0, 45.5, w, 0.5)];
-    line.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    line.backgroundColor = [UIColor separatorColor];
-    [_bar addSubview:line];
-
-    _search = [[UISearchBar alloc] initWithFrame:CGRectMake(0, 46, w, 44)];
-    _search.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    _search.delegate = self; _search.placeholder = @"搜索网址 / 名称";
-    _search.hidden = YES; [self.view addSubview:_search];
-
-    _tv = [[UITableView alloc] initWithFrame:CGRectMake(0, 46, w, H - 46) style:UITableViewStylePlain];
+    _tv = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStylePlain];
     _tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     _tv.delegate = self; _tv.dataSource = self;
     _tv.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
     [self.view addSubview:_tv];
-
-    // 空状态提示：以前列表空就是一片白，用户会以为「加了没保存 / 不显示」
-    _empty = [[UILabel alloc] initWithFrame:CGRectMake(24, H/2.0 - 30, w - 48, 60)];
-    _empty.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin | UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
+    CGFloat H = self.view.bounds.size.height, W = self.view.bounds.size.width;
+    _empty = [[UILabel alloc] initWithFrame:CGRectMake(24, H/2.0 - 30, W - 48, 60)];
+    _empty.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin
+                            | UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
     _empty.numberOfLines = 0; _empty.textAlignment = NSTextAlignmentCenter;
     _empty.font = [UIFont systemFontOfSize:14]; _empty.textColor = [UIColor secondaryLabelColor];
-    _empty.text = @"还没有快捷 URL\n点右上角「添加」，或用上面的「＋ 批量」多行粘贴";
+    _empty.text = @"还没有快捷 URL\n点右上角「添加」新建";
     _empty.hidden = YES;
     [self.view addSubview:_empty];
-
-    // v1.3.15：frame 布局，约束段已移除（见 layoutParts 直接算 frame）
-
     [self refreshCount];
     [self applyFilter];
-    [self layoutParts];
 }
-- (void)layoutParts {
-    // v1.3.16：frame 布局，并把整条按钮栏 + 列表挪到安全区/导航栏之下（top 偏移），
-    // 否则按钮栏钉在 y=0 会被顶部导航栏（返回/添加）盖住 → 看起来「在屏幕外、按不了」。
-    CGFloat w = self.view.bounds.size.width;
-    CGFloat H = self.view.bounds.size.height;
-    CGFloat top = 0, bottom = 0;
-    // v1.3.19：改用「自校正」公式，彻底告别猜高度。
-    //  导航栏下沿在 self.view 坐标系里的真实 y（convertRect:toView: 会自动带上状态栏偏移）：
-    //   · 若宿主忽略了 edgesForExtendedLayout（view 仍是全屏）→ 该值 ≈ 91（刘海）或 64（非刘海）→ 正好用作偏移 ✓
-    //   · 若宿主正常（view 已被排到导航栏下方）       → 该值为**负数**（导航栏在 view 上方）→ 取 0 ✓
-    //  两种情况都对，不需要知道设备机型、也不需要知道状态栏高度。
-    if (self.navigationController && self.navigationController.navigationBar &&
-        !self.navigationController.navigationBarHidden) {
-        UIView *nb = self.navigationController.navigationBar;
-        CGRect nbInSelf = [nb convertRect:nb.bounds toView:self.view];
-        CGFloat nbBottom = CGRectGetMaxY(nbInSelf);
-        if (nbBottom > top) top = nbBottom;
-    }
-    if (@available(iOS 11.0, *)) { bottom = self.view.safeAreaInsets.bottom; }
-    CGFloat sh = _searchVisible ? 44.0f : 0.0f;
-    _bar.frame = CGRectMake(0, top, w, 46);
-    _search.hidden = !_searchVisible;
-    _search.frame = CGRectMake(0, top + 46, w, 44);
-    _tv.frame = CGRectMake(0, top + 46 + sh, w, H - top - 46 - sh - bottom);
-    _empty.frame = CGRectMake(24, top + (H - top)/2.0 - 30, w - 48, 60);
-    [self.view bringSubviewToFront:_bar];   // v1.3.17：保险，确保按钮栏在列表之上不被遮挡
-}
-- (void)viewDidLayoutSubviews { [super viewDidLayoutSubviews]; [self layoutParts]; }
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self loadEntries];
     [self refreshCount];
     [self applyFilter];
-    [self layoutParts];   // v1.3.13：每次进入都重算（安全区/横竖屏变化也不会错位）
-    if (_pendingScrollEnd) { _pendingScrollEnd = NO; [self scrollToLastRow]; }   // 新增的那条滚进视野
-}
-// ---- 一排按钮的动作 ----
-- (void)toggleSearch {
-    _searchVisible = !_searchVisible;
-    if (_searchVisible) {
-        // v1.3.13 修「搜索按不了」：以前是**先** becomeFirstResponder、后 layoutParts，
-        // 那一刻搜索框还是 hidden —— 隐藏视图不可能拿到焦点，键盘永远不弹，看着就是「按了没反应」。
-        // 现在先显示 + 布局，下一拍再抢焦点。
-        [self layoutParts];
-        [_search layoutIfNeeded];
-        __weak FUUrlListController *ws = self;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            FUUrlListController *ss = ws; if (!ss || !ss->_searchVisible) return;
-            [ss->_search becomeFirstResponder];
-        });
-    } else {
-        _search.text = @"";
-        [_search resignFirstResponder];
-        [self layoutParts];
-        [self applyFilter];
-    }
-}
-- (void)showFilter {
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"筛选" message:nil
-        preferredStyle:UIAlertControllerStyleActionSheet];
-    NSArray *names = @[@"全部", @"没设图标", @"没填名称", @"网址重复"];
-    __weak FUUrlListController *ws = self;
-    for (NSInteger i = 0; i < (NSInteger)names.count; i++) {
-        NSString *t = (self.filterMode == i) ? [NSString stringWithFormat:@"✓ %@", names[i]] : names[i];
-        [a addAction:[UIAlertAction actionWithTitle:t style:UIAlertActionStyleDefault handler:^(UIAlertAction *act){
-            ws.filterMode = i;
-            [ws applyFilter];
-        }]];
-    }
-    [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    a.popoverPresentationController.sourceView = _bFilter;
-    a.popoverPresentationController.sourceRect = _bFilter.bounds;
-    [self presentViewController:a animated:YES completion:nil];
-}
-- (void)toggleAll {
-    if (!_multiSelect) { _multiSelect = YES; [_picked removeAllObjects]; }
-    BOOL allIn = (_shown.count > 0);
-    for (NSNumber *n in _shown) { if (![_picked containsObject:n]) { allIn = NO; break; } }
-    if (allIn) [_picked removeAllObjects];
-    else for (NSNumber *n in _shown) [_picked addObject:n];
-    [_tv reloadData];
-    [self updateButtons];
-    [self refreshCount];
-}
-- (void)bulkAdd {
-    if (_entries.count >= (NSUInteger)kFUMaxEntries) return;
-    FUBulkAddController *b = [[FUBulkAddController alloc] init];
-    __weak FUUrlListController *ws = self;
-    b.onDone = ^(NSArray *items) {
-        if (!items.count) return;
-        NSInteger space = kFUMaxEntries - (NSInteger)ws.entries.count;
-        if (space <= 0) return;
-        NSArray *use = (items.count > (NSUInteger)space) ? [items subarrayWithRange:NSMakeRange(0, space)] : items;
-        for (NSDictionary *d in use) {
-            NSMutableDictionary *e = [NSMutableDictionary dictionary];
-            e[kFUEntryURL] = d[@"url"] ?: @"";
-            NSString *nm = d[@"name"];
-            if (nm.length) e[kFUEntryChar] = nm;
-            [ws.entries addObject:e];
-        }
-        [ws saveEntries];
-        [ws refreshCount];
-        [ws applyFilter];
-        [ws scrollToLastRow];   // v1.3.13：批量加完滚到最新一条
-    };
-    UINavigationController *nc = [[UINavigationController alloc] initWithRootViewController:b];
-    [self presentViewController:nc animated:YES completion:nil];
-}
-- (void)deletePicked {
-    if (!_picked.count) return;
-    NSMutableIndexSet *kill = [NSMutableIndexSet indexSet];
-    for (NSNumber *n in _picked) {
-        NSInteger i = n.integerValue;
-        if (i >= 0 && i < (NSInteger)_entries.count) [kill addIndex:(NSUInteger)i];
-    }
-    if (kill.count) [_entries removeObjectsAtIndexes:kill];
-    [_picked removeAllObjects];
-    _multiSelect = NO;
-    [self saveEntries];
-    [_tv reloadData];
-    [self refreshCount];
-    [self applyFilter];
-}
-- (void)exitMulti { _multiSelect = NO; [_picked removeAllObjects]; [_tv reloadData]; [self updateButtons]; [self refreshCount]; }
-- (void)updateButtons {
-    if (_multiSelect) {
-        [_bAll setTitle:[NSString stringWithFormat:@"☑ 已选 %lu", (unsigned long)_picked.count] forState:UIControlStateNormal];
-        self.navigationItem.title = [NSString stringWithFormat:@"多选 (%lu/%ld)", (unsigned long)_picked.count, (long)kFUMaxEntries];
-        self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
-            initWithTitle:[NSString stringWithFormat:@"删除(%lu)", (unsigned long)_picked.count]
-                    style:UIBarButtonItemStylePlain target:self action:@selector(deletePicked)];
-        self.navigationItem.rightBarButtonItem.tintColor = [UIColor systemRedColor];
-        self.navigationItem.rightBarButtonItem.enabled = (_picked.count > 0);
-        self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"退出多选"
-            style:UIBarButtonItemStylePlain target:self action:@selector(exitMulti)];
-    } else {
-        [_bAll setTitle:@"☑ 全选" forState:UIControlStateNormal];
-        self.navigationItem.leftBarButtonItem = nil;
-        [self refreshCount];
-    }
-    NSString *ft = (_filterMode == 0) ? @"⛃ 筛选" : [NSString stringWithFormat:@"⛃ 筛选·%@",
-        (@[@"全部", @"无图标", @"无名称", @"重复"])[_filterMode]];
-    [_bFilter setTitle:ft forState:UIControlStateNormal];
-    [_bFilter setTitleColor:(_filterMode ? [UIColor systemBlueColor] : [UIColor systemBlueColor])
-                  forState:UIControlStateNormal];
+    if (_pendingScrollEnd) { _pendingScrollEnd = NO; [self scrollToLastRow]; }
 }
 - (void)addEntry {
-    if (_multiSelect) return;
-    _pendingScrollEnd = YES;   // v1.3.13：保存返回后把新加的那条滚进视野
+    _pendingScrollEnd = YES;
     FUUrlEditController *ed = [[FUUrlEditController alloc] init]; ed.entries = _entries; ed.index = -1;
     [self.navigationController pushViewController:ed animated:YES];
 }
-- (void)searchBar:(UISearchBar *)sb textDidChange:(NSString *)t { [self applyFilter]; }
-- (void)searchBarSearchButtonClicked:(UISearchBar *)sb { [sb resignFirstResponder]; }
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return _shown.count; }
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
     static NSString *cellId = @"FUUrlCell"; UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:cellId];
@@ -1024,24 +727,13 @@ static NSArray *FUColorPalette(void) {
     c.detailTextLabel.text = u; c.detailTextLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
     NSData *icon = [e[kFUEntryIcon] isKindOfClass:[NSData class]] ? e[kFUEntryIcon] : nil;
     c.imageView.image = icon.length ? [UIImage imageWithData:icon] : nil;
-    if (_multiSelect)
-        c.accessoryType = [_picked containsObject:@(ei)] ? UITableViewCellAccessoryCheckmark
-                                                         : UITableViewCellAccessoryNone;
-    else
-        c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     return c;
 }
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
     if (ip.row >= (NSInteger)_shown.count) return;
     NSInteger ei = [_shown[ip.row] integerValue];
-    if (_multiSelect) {
-        NSNumber *n = @(ei);
-        if ([_picked containsObject:n]) [_picked removeObject:n]; else [_picked addObject:n];
-        [tv reloadRowsAtIndexPaths:@[ip] withRowAnimation:UITableViewRowAnimationNone];
-        [self updateButtons];
-        return;
-    }
     FUUrlEditController *ed = [[FUUrlEditController alloc] init]; ed.entries = _entries; ed.index = ei;
     [self.navigationController pushViewController:ed animated:YES];
 }
