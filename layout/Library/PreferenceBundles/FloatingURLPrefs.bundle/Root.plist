@@ -50,9 +50,9 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
-			<string>快捷URI（多层环）</string>
+			<string>快捷URI（扇形两层）</string>
 			<key>footerText</key>
-			<string>点开悬浮球会按三层展开：URL 球居中不变，内环最多 6 个，外环最多 10 个（共 16 个，有几个显示几个）。网页类入口（http/https）打开是浏览器面板；非网页类（如 weixin://、tel:）直接拉起对应 app（触发方式可在下方「触发方式」里改）。每个入口可自定义图标（从相册选，自动压缩）、1 个字符（汉字或字母），以及网址/scheme。长按环上图标可就地编辑。</string>
+			<string>点开悬浮球会朝屏幕内侧展开半圆扇形：URL 球固定不动，第一层最多 4 个、第二层最多 6 个（共 10 个，加几个排几个，超过 4 个才溢出到第二层）。网页类入口（http/https）打开是浏览器面板；非网页类（如 weixin://、tel:）直接拉起对应 app（触发方式可在下方「触发方式」里改）。每个入口可自定义图标（从相册选，自动压缩）、标签（2 个汉字或 3 个字母），以及网址/scheme。长按扇形图标可就地编辑。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -66,15 +66,15 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
-			<string>布局调节（多层环）</string>
+			<string>布局调节（左/右 + 扇形两层）</string>
 			<key>footerText</key>
-			<string>位置（横向/纵向）：悬浮球默认落点（屏幕百分比）；图标大小、图标间隔：环上快捷图标的尺寸与圈层间距。进「布局实时预览」拖滑杆，预览立即变化，手机上的悬浮球同步生效（改动即存，无需另点保存）。</string>
+			<string>停靠边：悬浮球固定在屏幕左侧或右侧边缘、竖直居中（只有左/右两种，没有横纵坐标）；图标大小、图标间隔：扇形上快捷图标的尺寸与圈层间距。进「布局实时预览」拖滑杆，预览立即变化，手机上的悬浮球同步生效（改动即存，无需另点保存）。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
 			<string>PSButtonCell</string>
 			<key>label</key>
-			<string>布局实时预览（位置/大小/间隔）</string>
+			<string>布局实时预览（左/右 + 大小/间隔）</string>
 			<key>action</key>
 			<string>showLayout</string>
 		</dict>
