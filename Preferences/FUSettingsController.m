@@ -14,6 +14,8 @@ static NSString * const kFUEnabledApps = @"enabledApps";
 static NSString * const kFUSide        = @"side";
 static NSString * const kFUIconSize    = @"iconSize";
 static NSString * const kFUIconGap     = @"iconGap";
+static NSString * const kFUFanSpan     = @"fanSpan";    // v1.3.2 扇形角度 60~180°
+static NSString * const kFUFanScale    = @"fanScale";   // v1.3.2 整体距离 %
 static const NSInteger kFUMaxEntries   = 10;   // v1.3.1：扇形两层（第一层 4 + 第二层 6 = 10）
 static const NSInteger kFULayer1Max    = 4;    // 第一层（内环）最多 4 个
 static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 个
@@ -495,6 +497,7 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
 @interface FUPreviewView : UIView
 @property (nonatomic, assign) NSInteger side;        // 0=右 1=左
 @property (nonatomic, assign) CGFloat iconSize, iconGap;
+@property (nonatomic, assign) CGFloat span, scale;   // v1.3.2 扇形角度 / 整体距离%
 @property (nonatomic, strong) NSArray *entries;
 - (void)refresh;
 @end
@@ -506,42 +509,70 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     // 模拟屏幕底色（深色，像熄屏桌面）
     [self fuFill:[UIColor colorWithRed:0.07 green:0.09 blue:0.12 alpha:1.0] rect:s];
     CGFloat bs = MAX(24.0f, s.size.width * 0.11f);       // 预览里球的直径（对应 40pt 基准）
-    CGFloat scale = bs / 40.0f;
-    CGFloat isz = _iconSize * scale;
-    CGFloat gap = _iconGap * scale;
-    // v1.3.1：球固定停靠左/右边缘（与 tweak 内 placeBallInWindow 一致），无横/纵滑杆。
+    CGFloat k  = bs / 40.0f;                             // 真机 pt → 预览 px 的缩放
+    CGFloat isz = _iconSize * k;
+    CGFloat gap = MAX(4.0f, _iconGap * 0.5f) * k;        // 图标之间至少留的净空隙
+    CGFloat stepR = (_iconSize + _iconGap) * k;          // 相邻圈层的半径差
+    CGFloat kscale = MAX(0.6f, MIN(1.6f, (_scale > 0 ? _scale : 100.0f) / 100.0f));
     CGFloat cx = (_side == 1) ? (bs/2.0f + 6.0f) : (s.size.width - bs/2.0f - 6.0f);
-    CGFloat cy = s.size.height * 0.5f;
-    CGPoint c = CGPointMake(cx, cy);
-    CGFloat R1 = bs/2.0f + isz/2.0f + gap;          // 第一层（内环）半径
-    CGFloat R2 = R1 + isz + gap;                    // 第二层（外环）半径
-    // 扇形朝向屏内的半圆参考弧（屏坐标：0°右 90°下 180°左 270°上）
-    BOOL right = (_side != 1);
-    CGFloat centerA = right ? 180.0f : 0.0f;
-    CGFloat a0ref = centerA - 90.0f, a1ref = centerA + 90.0f;
-    CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:1.0 alpha:0.14].CGColor);
+    CGPoint c = CGPointMake(cx, s.size.height * 0.5f);
+    // ---- v1.3.2：三层半径 + 数量驱动分层 + 贴边自动变形（与 tweak 内 openFan 同一套公式）----
+    CGFloat R[3];
+    R[0] = (bs/2.0f + isz/2.0f + _iconGap * k) * kscale;
+    R[1] = R[0] + stepR * kscale;
+    R[2] = R[1] + stepR * kscale;
+    NSInteger n = (NSInteger)_entries.count;
+    NSInteger caps[3] = {0, 0, 0};
+    NSInteger left = n;
+    CGFloat spanMax = MAX(60.0f, MIN(180.0f, (_span > 0 ? _span : 180.0f)));
+    for (int i = 0; i < 3; i++) {
+        if (left <= 0) break;
+        if (i == 2) { caps[i] = left; break; }        // 最后一层兜底全装下
+        CGFloat arc = R[i] * spanMax * (CGFloat)M_PI / 180.0f;
+        NSInteger cap2 = (NSInteger)floor(arc / (isz + gap));
+        caps[i] = MAX(1, MIN(cap2, 8));
+        if (caps[i] > left) caps[i] = left;
+        left -= caps[i];
+    }
+    CGFloat centerA = (_side != 1) ? 180.0f : 0.0f;    // 屏坐标：0°右 90°下 180°左 270°上
+    // 贴边自动变形：收缩扇形角度，直到所有图标都落在画布内
+    CGFloat span = 60.0f;
+    for (CGFloat sp = spanMax; sp >= 60.0f; sp -= 5.0f) {
+        BOOL ok = YES;
+        for (int layer = 0; layer < 3 && ok; layer++) {
+            NSInteger cnt = caps[layer]; if (cnt <= 0) continue;
+            CGFloat a0 = centerA - sp/2.0f, sp2 = (cnt > 1) ? sp/(CGFloat)(cnt-1) : 0.0f;
+            for (NSInteger i2 = 0; i2 < cnt; i2++) {
+                CGFloat a = (cnt > 1) ? (a0 + sp2*(CGFloat)i2) : centerA;
+                CGFloat rad = a * M_PI / 180.0;
+                CGFloat x = c.x + R[layer]*cos(rad), y = c.y + R[layer]*sin(rad);
+                if (x - isz/2.0f < 4.0f || x + isz/2.0f > s.size.width  - 4.0f ||
+                    y - isz/2.0f < 4.0f || y + isz/2.0f > s.size.height - 4.0f) { ok = NO; break; }
+            }
+        }
+        if (ok) { span = sp; break; }
+    }
+    // 圈层参考弧
+    CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:1.0 alpha:0.13].CGColor);
     CGContextSetLineWidth(ctx, 1.0f);
-    CGContextAddArc(ctx, c.x, c.y, R1, a0ref*M_PI/180.0, a1ref*M_PI/180.0, 0); CGContextStrokePath(ctx);
-    CGContextAddArc(ctx, c.x, c.y, R2, a0ref*M_PI/180.0, a1ref*M_PI/180.0, 0); CGContextStrokePath(ctx);
+    for (int i = 0; i < 3; i++) {
+        if (caps[i] <= 0) continue;
+        CGContextAddArc(ctx, c.x, c.y, R[i], (centerA - span/2.0f)*M_PI/180.0, (centerA + span/2.0f)*M_PI/180.0, 0);
+        CGContextStrokePath(ctx);
+    }
     // 中心球（URL 玻璃球）
     [self fuCircleAt:c size:bs img:nil ch:@"URL" fs:bs*0.24f glass:YES];
-    // 快捷图标：第一层 4 + 第二层 6（有几条显示几条）
-    NSInteger n  = (NSInteger)_entries.count;
-    NSInteger n1 = MIN(n, kFULayer1Max);
-    NSInteger n2 = MIN(MAX(0, n - n1), kFULayer2Max);
-    for (NSInteger layer = 0; layer < 2; layer++) {
-        NSInteger cnt = (layer == 0) ? n1 : n2;
-        if (cnt <= 0) break;
-        CGFloat R = (layer == 0) ? R1 : R2;
-        CGFloat a0 = centerA - 90.0f;
-        CGFloat step = (cnt > 1) ? 180.0f / (CGFloat)(cnt - 1) : 0.0f;
-        for (NSInteger k = 0; k < cnt; k++) {
-            NSInteger idx = (layer == 0) ? k : (kFULayer1Max + k);
-            if (idx >= (NSInteger)n) break;
-            NSDictionary *e = _entries[idx];
-            CGFloat a = (cnt > 1) ? (a0 + step * (CGFloat)k) : centerA;
-            CGFloat rad = a * M_PI / 180.0f;
-            CGPoint p = CGPointMake(c.x + R*cos(rad), c.y + R*sin(rad));
+    // 快捷图标：有几个排几个，第 1 层排满溢到第 2、3 层
+    NSInteger placed = 0;
+    for (NSInteger layer = 0; layer < 3; layer++) {
+        NSInteger cnt = caps[layer]; if (cnt <= 0) continue;
+        CGFloat a0 = centerA - span/2.0f, sp2 = (cnt > 1) ? span/(CGFloat)(cnt-1) : 0.0f;
+        for (NSInteger i2 = 0; i2 < cnt; i2++) {
+            if (placed >= n) break;
+            NSDictionary *e = _entries[placed]; placed++;
+            CGFloat a = (cnt > 1) ? (a0 + sp2*(CGFloat)i2) : centerA;
+            CGFloat rad = a * M_PI / 180.0;
+            CGPoint p = CGPointMake(c.x + R[layer]*cos(rad), c.y + R[layer]*sin(rad));
             NSData *ic = e[@"icon"];
             UIImage *img = ([ic isKindOfClass:[NSData class]] && ic.length) ? [UIImage imageWithData:ic] : nil;
             NSString *ch = e[@"char"] ?: @"";
@@ -592,8 +623,8 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
 @property (nonatomic, strong) UIScrollView *scroll;
 @property (nonatomic, strong) FUPreviewView *preview;
 @property (nonatomic, strong) UISegmentedControl *sideSeg;
-@property (nonatomic, strong) UISlider *ss, *sg;
-@property (nonatomic, strong) UILabel *ls, *lg;
+@property (nonatomic, strong) UISlider *ss, *sg, *span, *sc;
+@property (nonatomic, strong) UILabel *ls, *lg, *lspan, *lsc;
 @end
 @implementation FULayoutController
 - (CGFloat)prefFloat:(NSString *)key dft:(CGFloat)d {
@@ -638,6 +669,8 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     _preview.side     = (NSInteger)[self prefFloat:kFUSide dft:0];
     _preview.iconSize = [self prefFloat:kFUIconSize dft:40];
     _preview.iconGap  = [self prefFloat:kFUIconGap dft:56];
+    _preview.span     = [self prefFloat:kFUFanSpan dft:180];
+    _preview.scale    = [self prefFloat:kFUFanScale dft:100];
     [self loadEntriesForPreview];
     [_scroll addSubview:_preview]; y += _preview.frame.size.height + 6;
     UILabel *pvTip = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 30)];
@@ -655,13 +688,16 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     _sideSeg.selectedSegmentIndex = _preview.side;   // 0=右 1=左
     [_sideSeg addTarget:self action:@selector(sideChanged:) forControlEvents:UIControlEventValueChanged];
     [_scroll addSubview:_sideSeg]; y += 44;
-    // ---- 图标大小 / 间隔 滑杆 ----
+    // ---- 滑杆：图标大小 / 间隔 / 扇形角度 / 整体距离 ----
     CGFloat pis = [self prefFloat:kFUIconSize dft:40], pig = [self prefFloat:kFUIconGap dft:56];
+    CGFloat psp = [self prefFloat:kFUFanSpan dft:180], psc = [self prefFloat:kFUFanScale dft:100];
     _ss = [self mkSlider:CGRectMake(16, y, w-32, 52) min:24 max:64 val:pis label:@"图标大小" out:&y lout:&_ls];
     _sg = [self mkSlider:CGRectMake(16, y, w-32, 52) min:12 max:120 val:pig label:@"图标间隔" out:&y lout:&_lg];
-    _ss.tag = 2; _sg.tag = 3;
-    [_ss addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
-    [_sg addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+    _span = [self mkSlider:CGRectMake(16, y, w-32, 52) min:60 max:180 val:psp label:@"扇形角度°" out:&y lout:&_lspan];
+    _sc = [self mkSlider:CGRectMake(16, y, w-32, 52) min:60 max:160 val:psc label:@"整体距离%" out:&y lout:&_lsc];
+    _ss.tag = 2; _sg.tag = 3; _span.tag = 4; _sc.tag = 5;
+    for (UISlider *sl in @[_ss, _sg, _span, _sc])
+        [sl addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
     y += 12; _scroll.contentSize = CGSizeMake(w, y);
 }
 - (UISlider *)mkSlider:(CGRect)f min:(CGFloat)mn max:(CGFloat)mx val:(CGFloat)v
@@ -686,6 +722,8 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     switch (sl.tag) {
         case 2: key = kFUIconSize; l = _ls; name = @"图标大小"; _preview.iconSize = v; break;
         case 3: key = kFUIconGap;  l = _lg; name = @"图标间隔"; _preview.iconGap = v; break;
+        case 4: key = kFUFanSpan;  l = _lspan; name = @"扇形角度°"; _preview.span = v; break;
+        case 5: key = kFUFanScale; l = _lsc; name = @"整体距离%"; _preview.scale = v; break;
     }
     if (!key) return;
     l.text = [NSString stringWithFormat:@"%@（当前 %.0f）", name, v];
@@ -693,10 +731,13 @@ static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 
     [_preview refresh];
 }
 - (void)reset {
-    _sideSeg.selectedSegmentIndex = 0; _ss.value = 40; _sg.value = 56;
+    _sideSeg.selectedSegmentIndex = 0; _ss.value = 40; _sg.value = 56; _span.value = 180; _sc.value = 100;
     _ls.text = @"图标大小（当前 40）"; _lg.text = @"图标间隔（当前 56）";
+    _lspan.text = @"扇形角度°（当前 180）"; _lsc.text = @"整体距离%（当前 100）";
     _preview.side = 0; _preview.iconSize = 40; _preview.iconGap = 56;
+    _preview.span = 180; _preview.scale = 100;
     [self writeSide:0]; [self writeFloat:kFUIconSize value:40]; [self writeFloat:kFUIconGap value:56];
+    [self writeFloat:kFUFanSpan value:180]; [self writeFloat:kFUFanScale value:100];
     [_preview refresh];
 }
 @end
