@@ -78,7 +78,6 @@ jobs:
           # ---- DEBIAN：control + preinst + postinst(respring) ----
           cp control stage/DEBIAN/control
           sed -i '' "s/^Version:.*/Version: $VERSION/" stage/DEBIAN/control
-          echo "" >> stage/DEBIAN/control
           cp layout/DEBIAN/preinst stage/DEBIAN/preinst
           cp layout/DEBIAN/postinst stage/DEBIAN/postinst
           chmod 755 stage/DEBIAN/preinst stage/DEBIAN/postinst
