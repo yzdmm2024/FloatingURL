@@ -332,7 +332,7 @@ static void fuStartAppHeartbeat(NSString *bid) {
 @end
 
 #pragma mark - 条目编辑器（设置/长按扇形共用：URL+汉字+字母+图标）
-@interface FUEntryEditorViewController : UIViewController <UITextFieldDelegate>
+@interface FUEntryEditorViewController : UIViewController <UITextFieldDelegate, PHPickerViewControllerDelegate>
 @property (nonatomic, assign) NSInteger index;        // -1 = 新增
 @property (nonatomic, copy)   void (^onSaved)(void);
 @property (nonatomic, strong) UITextField *urlField, *labelField;
@@ -476,10 +476,30 @@ static void fuStartAppHeartbeat(NSString *bid) {
     }
 }
 - (void)pickIcon {
-    // v1.3.14：桌面（SpringBoard）里直接弹 PHPickerViewController 会因缺宿主窗口/相册权限把 SpringBoard
-    // 搞崩（安全模式）。改在「设置 → 悬浮URL → 快捷URI」里选图标——那里是正常 App 进程，照片选择器安全。
+    // v1.3.16：恢复桌面长按直接选照片。PHPickerViewController 是系统独立进程、且不需要相册权限
+    // （与 UIImagePickerController 不同），从 overlay 这个 key 窗口/scene 弹出不会崩 SpringBoard。
+    // 任何异常都 @try 兜住并退回「去设置里选」提示，绝不带崩 SpringBoard。
+    @try {
+        if (@available(iOS 14.0, *)) {
+            Class pvClass = NSClassFromString(@"PHPickerViewController");
+            Class cfgClass = NSClassFromString(@"PHPickerConfiguration");
+            Class fltClass = NSClassFromString(@"PHPickerFilter");
+            if (pvClass && cfgClass && fltClass) {
+                PHPickerConfiguration *cfg = [[cfgClass alloc] init];
+                if ([cfg respondsToSelector:@selector(setSelectionLimit:)]) cfg.selectionLimit = 1;
+                if ([cfg respondsToSelector:@selector(setFilter:)]) cfg.filter = [fltClass imagesFilter];
+                PHPickerViewController *pv = [[pvClass alloc] initWithConfiguration:cfg];
+                pv.delegate = (id)self;
+                [self presentViewController:pv animated:YES completion:nil];
+                return;
+            }
+        }
+    } @catch (NSException *e) {
+        NSLog(@"[FloatingURL] pickIcon 异常（已忽略）: %@", e);
+    }
+    // 兜底：任何失败 → 退回「去设置里选」提示
     UIAlertController *a = [UIAlertController alertControllerWithTitle:@"换图标请到「设置」里"
-        message:@"桌面上不能直接选照片（会崩到安全模式）。打开「设置 → 悬浮URL → 快捷URI」，点对应入口的「选择图标」即可。"
+        message:@"桌面暂时无法打开相册选择器。打开「设置 → 悬浮URL → 快捷URI」，点对应入口的「选择图标」即可。"
         preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"知道啦" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:a animated:YES completion:nil];
@@ -1694,10 +1714,14 @@ static void fuInAppWebAckCb(CFNotificationCenterRef center, void *observer,
     NSString *norm = [self normalizeURL:u]; if (!norm.length) return;
     // 确认模式（设置里可开）：不直接触发，先弹输入框+打开按钮，用户点「打开」才执行。
     if (_tapConfirm) { [self showSchemeBox:norm]; return; }
-    if ([self isWebScheme:norm]) [self pushHistory:norm];
-    // v1.3.13：网页类**不再**走桌面内置面板（SpringBoard 里 WKWebView 必白屏、UIWebView 会挂死桌面），
-    // 统一交给 fuOpenExternally：前台 App 的内置浏览器 → 系统浏览器。这就是「网页用不了」的另一个坑：
-    // 设置里如果开着「内置浏览器」开关，点网页只会弹一个白屏面板。
+    // v1.3.16：网页类恢复「内置小窗打开」（与最初版本一致）。SpringBoard 里的 WKWebView 面板在
+    // 正确 makeKey + 延时加载下可正常渲染（中央球用的就是同一套面板），不再强制跳系统浏览器。
+    if ([self isWebScheme:norm]) {
+        [self pushHistory:norm];
+        _url = norm;
+        [self expand];
+        return;
+    }
     [self fuOpenExternally:norm];
 }
 - (void)fanItemLongPressed:(UILongPressGestureRecognizer *)g {

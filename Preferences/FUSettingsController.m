@@ -849,14 +849,19 @@ static NSArray *FUColorPalette(void) {
     [self layoutParts];
 }
 - (void)layoutParts {
-    // v1.3.15：frame 布局，只切「搜索框显隐」+ 重算 _tv/_search 的 frame（不依赖约束引擎）
+    // v1.3.16：frame 布局，并把整条按钮栏 + 列表挪到安全区/导航栏之下（top 偏移），
+    // 否则按钮栏钉在 y=0 会被顶部导航栏（返回/添加）盖住 → 看起来「在屏幕外、按不了」。
     CGFloat w = self.view.bounds.size.width;
     CGFloat H = self.view.bounds.size.height;
+    CGFloat top = 0, bottom = 0;
+    if (@available(iOS 11.0, *)) { top = self.view.safeAreaInsets.top; bottom = self.view.safeAreaInsets.bottom; }
+    if (top < 1) top = 44;   // 兜底：无安全区时给一个导航条高度
     CGFloat sh = _searchVisible ? 44.0f : 0.0f;
+    _bar.frame = CGRectMake(0, top, w, 46);
     _search.hidden = !_searchVisible;
-    _search.frame = CGRectMake(0, 46, w, 44);
-    _tv.frame = CGRectMake(0, 46 + sh, w, H - 46 - sh);
-    _empty.frame = CGRectMake(24, H/2.0 - 30, w - 48, 60);
+    _search.frame = CGRectMake(0, top + 46, w, 44);
+    _tv.frame = CGRectMake(0, top + 46 + sh, w, H - top - 46 - sh - bottom);
+    _empty.frame = CGRectMake(24, top + (H - top)/2.0 - 30, w - 48, 60);
 }
 - (void)viewDidLayoutSubviews { [super viewDidLayoutSubviews]; [self layoutParts]; }
 - (void)viewWillAppear:(BOOL)animated {
