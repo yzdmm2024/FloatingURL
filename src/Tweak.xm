@@ -4,6 +4,7 @@
 #import <objc/message.h>
 #import <math.h>
 #import <notify.h>
+#import <dlfcn.h>
 
 // PhotosUI 在 SDK14.5 下无法以模块方式编译（simd/cmath 缺失），tweak 里不 import 头文件，
 // 改用运行时 NSClassFromString 调用 PHPicker，避免模块构建失败。
@@ -39,6 +40,10 @@ static NSString * const kFUPrefsChanged = @"com.yzdmm.floatingurl/settingsChange
 static NSString * const kFUSyncChanged  = @"com.yzdmm.floatingurl/syncChanged";
 static NSString * const kFUAlivePrefix  = @"com.yzdmm.floatingurl/alive/";  // v1.3.2：+App bundle id（前台心跳）
 static NSString * const kFUGonePrefix   = @"com.yzdmm.floatingurl/gone/";   // v1.3.2：+App bundle id（退到后台）
+// v1.3.12：桌面 → App 进程的「内置浏览器」请求。球归桌面（读得到设置），但桌面渲染不了网页，
+//  所以桌面把 URL 写进目标 App 容器 + 发这个通知，由 App 进程用 SFSafariViewController 显示。
+static NSString * const kFUInAppWebName = @"com.yzdmm.floatingurl/inAppWeb";
+static NSString * const kFUInAppWebFile = @"fu_inapp_web.txt";
 
 static NSString * const kFUURLs        = @"urls";
 static NSString * const kFUEntryURL    = @"url";
@@ -92,6 +97,53 @@ static BOOL fuIsSpringBoard(void) {
 static NSString *fuAliveName(NSString *bid) { return [kFUAlivePrefix stringByAppendingString:bid]; }
 static NSString *fuGoneName(NSString *bid)  { return [kFUGonePrefix  stringByAppendingString:bid]; }
 
+// ---- v1.3.12：App 进程内的「内置浏览器」----
+// 为什么必须由 App 进程来显示网页：SpringBoard 进程里 WKWebView 白屏（WebKit2 内容进程拿不到
+// 桌面沙盒豁免）、UIWebView 会挂死桌面主线程（watchdog 杀 SpringBoard → 无限注销），都是真机实锤；
+// 而 App 进程有网络权限 —— 这正是 1.2.1 能打开网页的原因（那时球在每个 App 进程里）。
+static NSString *fuAppWebFilePath(void) {
+    NSArray *dirs = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
+    if (!dirs.count) return nil;
+    return [(NSString *)dirs.firstObject stringByAppendingPathComponent:kFUInAppWebFile];
+}
+static UIViewController *fuTopViewController(void) {
+    UIApplication *a = UIApplication.sharedApplication;
+    if (!a) return nil;
+    UIWindow *key = nil;
+    for (UIWindow *w in a.windows) { if (w.isKeyWindow) { key = w; break; } }
+    if (!key) { for (UIWindow *w in a.windows) { if (w.windowLevel == UIWindowLevelNormal) { key = w; break; } } }
+    UIViewController *vc = key.rootViewController;
+    while (vc.presentedViewController) { vc = vc.presentedViewController; }
+    return vc;
+}
+static void fuHandleInAppWebRequest(void) {
+    @try {
+        NSString *p = fuAppWebFilePath();
+        if (!p.length) return;
+        NSString *raw = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:NULL];
+        if (!raw.length) return;                       // 没有交接文件 = 不是给我的（只有目标 App 容器里才有）
+        [[NSFileManager defaultManager] removeItemAtPath:p error:NULL];   // 立即删除 = 回执（桌面据此判断「已接住」）
+        NSString *s = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (![s.lowercaseString hasPrefix:@"http"]) s = [@"https://" stringByAppendingString:s];
+        NSURL *u = [NSURL URLWithString:s];
+        UIApplication *a = UIApplication.sharedApplication;
+        if (!u || !a || a.applicationState != UIApplicationStateActive) return;   // 不在前台就不打扰
+        Class sfCls = NSClassFromString(@"SFSafariViewController");
+        if (!sfCls) {   // SafariServices 通常没被 App 加载 → 现场按需加载（只在真正要开网页时，非启动路径）
+            dlopen("/System/Library/Frameworks/SafariServices.framework/SafariServices", RTLD_LAZY);
+            sfCls = NSClassFromString(@"SFSafariViewController");
+        }
+        UIViewController *top = fuTopViewController();
+        if (sfCls && top) {                 // 内置浏览器：不离开当前 App，附带刷新/分享/完成按钮
+            id svc = ((id (*)(id, SEL, id))objc_msgSend)([sfCls alloc], NSSelectorFromString(@"initWithURL:"), u);
+            if (svc) { [top presentViewController:svc animated:YES completion:nil]; return; }
+        }
+        [a openURL:u options:@{} completionHandler:nil];   // 兜底：系统浏览器
+    } @catch (NSException *e) {
+        NSLog(@"[FloatingURL] inAppWeb 异常（已忽略）: %@", e);
+    }
+}
+
 // 非 SpringBoard 进程：只广播前台状态，不建任何 UI、不加载设置。
 static void fuStartAppHeartbeat(NSString *bid) {
     static BOOL started = NO; if (started) return; started = YES;
@@ -116,6 +168,10 @@ static void fuStartAppHeartbeat(NSString *bid) {
                      queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *n){ notify_post(gone.UTF8String); }];
     [nc addObserverForName:UIApplicationWillTerminateNotification object:nil
                      queue:nil usingBlock:^(NSNotification *n){ notify_post(gone.UTF8String); }];
+    // v1.3.12：接收桌面发来的「用内置浏览器打开网页」请求（纯 C 注册，重活在回调里，不碰启动路径的 UI）。
+    static int fuWebToken = 0;
+    notify_register_dispatch(kFUInAppWebName.UTF8String, &fuWebToken,
+                             dispatch_get_main_queue(), ^(int t){ fuHandleInAppWebRequest(); });
 }
 
 #pragma mark - 穿透 window（空白区域把触摸交还给下层窗口）
@@ -481,6 +537,10 @@ static void fuStartAppHeartbeat(NSString *bid) {
 - (NSArray *)fuBlacklist;
 - (void)fuSyncFrontWatches;
 - (void)fuOpenExternally:(NSString *)s;
+- (BOOL)fuHandoffWebToFrontApp:(NSURL *)u;   // v1.3.12：把网页交给前台 App 的内置浏览器
+- (void)fuOpenViaSystem:(NSURL *)u;          // v1.3.12：系统浏览器（FBSSystemService → 失败再兜底）
+- (void)fuOpenViaWorkspace:(NSURL *)u;       // v1.3.12：LSApplicationWorkspace 最后兜底
+- (NSString *)fuWebHandoffPathForBid:(NSString *)bid;
 - (void)triggerEntry:(NSDictionary *)entry;          // v1.3.8：触发一条入口（扇形点击 / 单入口点球共用）
 - (CGFloat)fuAngleToScreenCenter:(CGPoint)c;         // v1.3.8：球心 -> 屏幕中心 的方向角
 @property (nonatomic, strong) UIView      *schemeBox;     // 非网页入口的简单输入框容器
@@ -1537,40 +1597,106 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 // v1.3.8 修 01（卡死 bug）：**绝不能在主线程同步调用** —— openSensitiveURL:withOptions: 会一路同步等
 // FrontBoard 把目标 App 拉起，Safari/微信冷启动时要好几秒，这几秒里 SpringBoard 主线程被占死，
 // 表现就是「点了网页 -> 整机卡住、屏幕动不了」。这里整段丢到后台队列，主线程立刻返回。
+- (NSString *)fuWebHandoffPathForBid:(NSString *)bid {
+    if (!bid.length) return nil;
+    @try {
+        Class proxyCls = NSClassFromString(@"LSApplicationProxy");
+        SEL fSel = NSSelectorFromString(@"applicationProxyForIdentifier:");
+        if (!proxyCls || ![proxyCls respondsToSelector:fSel]) return nil;
+        id proxy = [proxyCls performSelector:fSel withObject:bid];
+        SEL dSel = NSSelectorFromString(@"dataContainerURL");
+        if (!proxy || ![proxy respondsToSelector:dSel]) return nil;
+        id dataURL = [proxy performSelector:dSel];
+        if (![dataURL isKindOfClass:[NSURL class]]) return nil;
+        NSString *caches = [[(NSURL *)dataURL path] stringByAppendingPathComponent:@"Library/Caches"];
+        if (!caches.length) return nil;
+        [[NSFileManager defaultManager] createDirectoryAtPath:caches withIntermediateDirectories:YES attributes:nil error:NULL];
+        return [caches stringByAppendingPathComponent:kFUInAppWebFile];
+    } @catch (NSException *e) { return nil; }
+}
+
+- (BOOL)fuHandoffWebToFrontApp:(NSURL *)u {
+    @try {
+        NSString *bid = [self fuFrontmostBid];
+        if (!bid.length) return NO;                       // 在桌面 → 没有 App 能接手
+        NSString *path = [self fuWebHandoffPathForBid:bid];
+        if (!path.length) return NO;                      // 拿不到容器 → 交给系统浏览器
+        NSString *s = u.absoluteString;
+        if (!s.length) return NO;
+        // 写失败（沙盒限制等）也返回 NO → 自动兜底系统浏览器，绝不出现「点了没反应」
+        if (![s writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]) return NO;
+        notify_post(kFUInAppWebName.UTF8String);
+        return YES;
+    } @catch (NSException *e) { return NO; }
+}
+
+- (void)fuOpenViaWorkspace:(NSURL *)u {
+    @try {
+        Class wsc = NSClassFromString(@"LSApplicationWorkspace");
+        SEL selSensitive = NSSelectorFromString(@"openSensitiveURL:withOptions:");
+        id ws = wsc ? [wsc performSelector:NSSelectorFromString(@"defaultWorkspace")] : nil;
+        if (ws && [ws respondsToSelector:selSensitive]) {
+            [ws performSelector:selSensitive withObject:u withObject:nil];
+        }
+    } @catch (NSException *e) { NSLog(@"[FloatingURL] openViaWorkspace 异常（已忽略）: %@", e); }
+}
+
+- (void)fuOpenViaSystem:(NSURL *)u {
+    @try {
+        __weak FUFloatingManager *wself = self;
+        // ① FBSSystemService：FrontBoard 自家异步 API（不卡主线程）。失败回调里再兜底，避免双开。
+        Class fbsCls = NSClassFromString(@"FBSSystemService");
+        SEL sharedSel = NSSelectorFromString(@"sharedService");
+        SEL openSel = NSSelectorFromString(@"openURL:options:withResultBlock:");
+        if (fbsCls && [fbsCls respondsToSelector:sharedSel]) {
+            id svc = [fbsCls performSelector:sharedSel];
+            if (svc && [svc respondsToSelector:openSel]) {
+                void (^blk)(BOOL, NSError *) = ^(BOOL ok, NSError *err){
+                    if (!ok) {
+                        NSLog(@"[FloatingURL] FBSSystemService 未受理，改走 LSApplicationWorkspace");
+                        [wself fuOpenViaWorkspace:u];
+                    }
+                };
+                ((void (*)(id, SEL, id, id, id))objc_msgSend)(svc, openSel, u, @{}, blk);
+                return;
+            }
+        }
+        // ② 没有 FBSSystemService → LSApplicationWorkspace（主线程同步发一次请求，必定受理）
+        [self fuOpenViaWorkspace:u];
+    } @catch (NSException *e) {
+        NSLog(@"[FloatingURL] fuOpenViaSystem 异常（已忽略）: %@", e);
+    }
+}
+
+// v1.3.12：网页统一入口。
+//   ① 在前台 App 里点 → 交回该 App 进程用「内置浏览器」(SFSafariViewController) 打开
+//      —— 与 1.2.1 体验一致（那时球在 App 进程里，所以网页能渲染）。
+//   ② 在桌面点 / 交不出去 / App 1.1 秒内没接住 → 系统浏览器。
+// 任何一步失败都会继续往下走，绝不会「点了没反应」。
 - (void)fuOpenExternally:(NSString *)s {
     NSURL *u = [NSURL URLWithString:s]; if (!u) return;
-    // v1.3.10：改用 FBSSystemService（FrontBoard 自家的异步 API）：
-    //  · 1.3.7 及以前：主线程同步 openSensitiveURL → 等 Safari 冷启动把整机卡死几秒；
-    //  · 1.3.8：整段丢后台队列 → 真机实测「网页打不开」（该 XPC 在后台线程上下文不可靠）。
-    //  FBSSystemService 既是异步（不卡主线程）又在主线程发起（FrontBoard 必定受理），两头兼得。
+    NSString *scheme = u.scheme.lowercaseString;
+    BOOL isWeb = [scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"];
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
-            Class fbsCls = NSClassFromString(@"FBSSystemService");
-            SEL sharedSel = NSSelectorFromString(@"sharedService");
-            SEL openSel = NSSelectorFromString(@"openURL:options:withResultBlock:");
-            if (fbsCls && [fbsCls respondsToSelector:sharedSel]) {
-                id svc = [fbsCls performSelector:sharedSel];
-                if (svc && [svc respondsToSelector:openSel]) {
-                    void (^blk)(BOOL, NSError *) = ^(BOOL ok, NSError *err){
-                        if (!ok) NSLog(@"[FloatingURL] FBSSystemService openURL 被拒: %@", u);
-                    };
-                    ((void (*)(id, SEL, id, id, id))objc_msgSend)(svc, openSel, u, @{}, blk);
+            if (isWeb) {
+                NSString *path = [self fuWebHandoffPathForBid:[self fuFrontmostBid]];
+                if ([self fuHandoffWebToFrontApp:u]) {
+                    // 回执确认：App 读到交接文件会立刻删除；1.1s 后文件还在 = 没接住 → 系统浏览器
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.1 * NSEC_PER_SEC)),
+                                   dispatch_get_main_queue(), ^{
+                        if (path.length && [[NSFileManager defaultManager] fileExistsAtPath:path]) {
+                            NSLog(@"[FloatingURL] App 未接住网页请求，改用系统浏览器");
+                            [self fuOpenViaSystem:u];
+                        }
+                    });
                     return;
                 }
             }
-            // 兜底1：LSApplicationWorkspace（主线程，仅发出请求的一瞬）
-            Class wsc = NSClassFromString(@"LSApplicationWorkspace");
-            SEL selSensitive = NSSelectorFromString(@"openSensitiveURL:withOptions:");
-            id ws = wsc ? [wsc performSelector:NSSelectorFromString(@"defaultWorkspace")] : nil;
-            if (ws && [ws respondsToSelector:selSensitive]) {
-                [ws performSelector:selSensitive withObject:u withObject:nil];
-                return;
-            }
-            // 兜底2：UIApplication
-            UIApplication *app = UIApplication.sharedApplication;
-            if (app) [app openURL:u options:@{} completionHandler:nil];
+            [self fuOpenViaSystem:u];
         } @catch (NSException *e) {
             NSLog(@"[FloatingURL] fuOpenExternally 异常（已忽略）: %@", e);
+            [self fuOpenViaSystem:u];
         }
     });
 }
