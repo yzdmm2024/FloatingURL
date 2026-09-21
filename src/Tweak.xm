@@ -29,6 +29,7 @@
 static NSString * const kFUSuite        = @"com.yzdmm.floatingurl";
 static NSString * const kFUPrefsChanged = @"com.yzdmm.floatingurl/settingsChanged";
 static NSString * const kFUSyncChanged  = @"com.yzdmm.floatingurl/syncChanged";
+static NSString * const kFUAppAlive     = @"com.yzdmm.floatingurl/appAlive";   // v1.3.1：App 前台存活心跳
 
 static NSString * const kFUURLs        = @"urls";
 static NSString * const kFUEntryURL    = @"url";
@@ -51,6 +52,31 @@ static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
                            CFStringRef name, const void *object, CFDictionaryRef userInfo);
 static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
                           CFStringRef name, const void *object, CFDictionaryRef userInfo);
+
+// ---- v1.3.1 核心修复：悬浮球「单一持有者」----
+// 现状：本 tweak 经 Bundles=com.apple.UIKit 注入到「每个 App 进程」，每个进程各建一份球；
+// SpringBoard 也建一份（桌面兜底）。于是 App 内同时存在两份球：
+//   · 视觉：两个球重叠/交错 → 用户看到「到处都是球、有的 2 个有的 3 个」；
+//   · 黑名单：顶层那份是 SpringBoard 的，_hostBid 恒为 com.apple.springboard，
+//             永远比不中黑名单 → 「黑名单 App 里球还在」；
+//   · 网页：点开的其实是 SpringBoard 那份，WKWebView 在 SpringBoard 里渲染不出内容 → 白屏
+//           （用户实测「QQ 自己那个 URL 能打开网页」＝ App 进程内的那份是好的）；
+//   · 跨进程 sync 还会把 App 里的面板镜像到 SpringBoard → 「残留的 URL」。
+// 方案：非 SpringBoard 进程每秒广播「我在前台」心跳；SpringBoard 收到心跳就让位（隐藏自己的
+//      球并拒绝镜像面板）；3 秒收不到心跳（App 退后台被挂起）→ 桌面球恢复。
+static CFAbsoluteTime fuLastAppAliveTs = 0;
+static BOOL fuIsSpringBoard(void) {
+    return [[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.springboard"];
+}
+static BOOL fuDesktopShouldYield(void) {
+    // SpringBoard 进程 + 3 秒内收到过 App 心跳 → 当前前台是某个 App，桌面球让位。
+    return fuIsSpringBoard() && fuLastAppAliveTs > 0 &&
+           (CFAbsoluteTimeGetCurrent() - fuLastAppAliveTs) < 3.0;
+}
+static void fuAppAliveCallback(CFNotificationCenterRef center, void *observer,
+                               CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    fuLastAppAliveTs = CFAbsoluteTimeGetCurrent();
+}
 
 #pragma mark - 穿透 window（空白区域把触摸交还给下层窗口）
 // 关键：本 window 永远不 makeKey（不当 key → 不吞 App 触摸）；空白命中 window 自身 → 返回 nil 穿透。
@@ -564,10 +590,18 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
                                            userInfo:nil repeats:YES];
         [[NSRunLoop mainRunLoop] addTimer:_pollTimer forMode:NSRunLoopCommonModes];
     }
+    // v1.3.1：SpringBoard 实例监听「App 前台心跳」，收到即让位（避免与 App 内的球重叠）。
+    if (fuIsSpringBoard()) {
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+            fuAppAliveCallback, (__bridge CFStringRef)kFUAppAlive, NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately);
+    }
     [self onBecomeActive];
 }
 - (void)onBecomeActive {
     if (!_didSetup) return;
+    // v1.3.1：非 SpringBoard 进程每秒广播心跳——告诉桌面的兜底球「前台是我的，你让位」。
+    if (!fuIsSpringBoard()) notify_post([kFUAppAlive UTF8String]);
     [self reloadPrefs];
     [self applyVisibility];
 }
@@ -955,7 +989,13 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     BOOL web = [self isWebScheme:norm];
     // 确认模式（设置里可开）：不直接触发，先弹输入框+打开按钮，用户点「打开」才执行。
     if (_tapConfirm) { [self showSchemeBox:norm]; return; }
-    if (web) { _url = norm; [self expand]; }
+    if (web) {
+        // v1.3.1：SpringBoard 兜底实例里的 WKWebView 渲染不出内容（白屏），桌面直接交给系统浏览器。
+        if (fuIsSpringBoard()) {
+            UIApplication *a = UIApplication.sharedApplication; NSURL *nu = [NSURL URLWithString:norm];
+            if (a && nu) [a openURL:nu options:@{} completionHandler:nil];
+        } else { _url = norm; [self expand]; }
+    }
     else {   // 非网页：直接拉起对应 app，不再多一步确认
         UIApplication *app = UIApplication.sharedApplication; NSURL *nu = [NSURL URLWithString:norm];
         if (app && nu) [app openURL:nu options:@{} completionHandler:nil];
@@ -1085,9 +1125,15 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     // v1.3.0 修「黑名单加了球还在 / QQ 残留 URL」：黑名单或总开关命中时直接隐藏整个
     // overlay 窗口（球、环、面板一锅端），比只藏球更彻底——之前只藏 _ball，环/面板
     // 以及某些时序下 re-show 的球都会漏出来，看起来就像「残留了第二个 URL」。
+    // v1.3.1：桌面兜底球门控——前台是某个 App 时，SpringBoard 这份让位（否则叠成 2~3 个球）。
+    if (fuDesktopShouldYield()) hidden = YES;
     if (!_enabled || hidden) {
         _overlay.hidden = YES;
-        _ball.hidden = YES; _panel.hidden = YES; if (_fanOpen) [self closeFan]; return;
+        _ball.hidden = YES; _panel.hidden = YES;
+        // v1.3.1：隐藏时同步复位「展开态」，否则恢复显示时球仍 hidden、面板也 hidden → 屏幕上空无一物。
+        if (_fanOpen) [self closeFan];
+        if (_expanded) { _expanded = NO; [self setInteractive:NO]; }
+        return;
     }
     _overlay.hidden = NO;   // 允许显示：确保窗口一定恢复（含控制中心收起后）
     if (!_expanded && !_fanOpen) { _ball.hidden = NO; _ball.alpha = 0.4f; [_overlay bringSubviewToFront:_ball]; [self setInteractive:NO]; }
@@ -1105,6 +1151,9 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 }
 - (void)applySync {
     if (_applyingRemote) return;
+    // v1.3.1：SpringBoard 兜底实例不要镜像 App 里的面板——那正是「QQ 里残留一个 URL」和
+    // 「点开网页白屏」的来源（镜像面板跑在 SpringBoard 里，WebKit 渲染不出内容、也无法黑名单）。
+    if (fuDesktopShouldYield()) return;
     CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUSync, (__bridge CFStringRef)kFUSuite);
     if (!r) return;
     NSDictionary *d = (__bridge_transfer NSDictionary *)r;
@@ -1189,6 +1238,8 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 // ============================================================
 // 注入入口：Filter = Bundles(com.apple.UIKit)，全 App + 主屏幕。设置进程跳过。
 // 新增「作用 App」限制：勾选后仅指定 App 显示（桌面始终显示）。
+// v1.3.1：球的实际持有者是「前台 App 进程」；SpringBoard 那份只是「桌面兜底」，
+//         一旦收到 App 心跳就让位（详见 fuDesktopShouldYield 注释），从此不会重复成多个球。
 // ============================================================
 %ctor {
     @autoreleasepool {

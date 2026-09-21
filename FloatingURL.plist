@@ -8,7 +8,9 @@
 		     改用 Bundles=com.apple.UIKit：所有 App 都加载 UIKit，等价于全局注入，
 		     这是 MyGestures 等已在你设备上验证生效的全局注入写法。
 		     com.apple.Preferences 在代码层 %ctor 里跳过（避开看门狗）；
-		     com.apple.springboard 由 Tweak.xm 的 INCLUDE_SPRINGBOARD 控制（当前=1，主屏幕也显示）。 -->
+		     com.apple.springboard 由 Tweak.xm 的 INCLUDE_SPRINGBOARD 控制（当前=1）。
+		     v1.3.1 起：SpringBoard 那份只是「桌面兜底」，App 在前台时自动让位，
+		     不会再有「一个 App 里出现 2~3 个球」的重复。 -->
 		<key>Bundles</key>
 		<array>
 			<string>com.apple.UIKit</string>
