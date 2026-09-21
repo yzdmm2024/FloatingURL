@@ -37,14 +37,13 @@ static NSString * const kFUEntryLetter = @"letter";
 static NSString * const kFUEntryIcon   = @"icon";
 static NSString * const kFUSync        = @"sync";
 static NSString * const kFUEnabledApps = @"enabledApps";
-static NSString * const kFUPosX        = @"posX";       // 球默认落点（屏幕宽度百分比 0~100）
-static NSString * const kFUPosY        = @"posY";       // 球默认落点（屏幕高度百分比 0~100）
+static NSString * const kFUSide        = @"side";       // 球停靠边：0=右(默认) 1=左
 static NSString * const kFUIconSize    = @"iconSize";   // 快捷图标尺寸 pt
 static NSString * const kFUIconGap     = @"iconGap";    // 图标/圈层间隔 pt
 
-static const NSInteger kFUMaxEntries = 16;   // v1.3.0：多环布局（第一环 6 + 第二环 10）
-static const NSInteger kFULayer1Max  = 6;    // 第二层（内环）最多 6 个
-static const NSInteger kFULayer2Max  = 10;   // 第三层（外环）最多 10 个
+static const NSInteger kFUMaxEntries = 10;   // v1.3.1：扇形两层（第一层 4 + 第二层 6 = 10）
+static const NSInteger kFULayer1Max  = 4;    // 第一层（内环）最多 4 个
+static const NSInteger kFULayer2Max  = 6;    // 第二层（外环）最多 6 个
 static const CGFloat   kFUButtonSize = 40.0f;   // 悬浮球尺寸
 static const CGFloat   kFUSnapThreshold = 48.0f; // 松手时距边 ≤48pt 才自动吸附（修「不靠近也吸走」）
 
@@ -268,7 +267,13 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
                                               replacementString:(NSString *)s {
     if (tf == _labelField) {
         NSString *next = [tf.text stringByReplacingCharactersInRange:r withString:s];
-        return next.length <= 1;
+        NSInteger cjk = 0, lat = 0;
+        for (NSUInteger i = 0; i < next.length; i++) {
+            unichar c = [next characterAtIndex:i];
+            if (c >= 0x4E00 && c <= 0x9FFF) cjk++;
+            else if (![[NSCharacterSet whitespaceCharacterSet] characterIsMember:c]) lat++;
+        }
+        if (cjk > 2 || lat > 3) return NO;   // v1.3.1：最多 2 汉字 或 3 字母
     }
     return YES;
 }
@@ -321,7 +326,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     NSMutableDictionary *e = [NSMutableDictionary dictionary];
     e[kFUEntryURL] = (_urlField.text.length ? _urlField.text : @"");
     NSString *lab = _labelField.text ?: @"";
-    if (lab.length) e[kFUEntryChar] = [lab substringToIndex:1];
+    if (lab.length) e[kFUEntryChar] = lab;   // v1.3.1：存完整标签（2 汉字 / 3 字母）
     if (_iconData) e[kFUEntryIcon] = _iconData;
 
     CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUURLs,
@@ -393,7 +398,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     NSMutableArray        *_fanOffsets;  // 每个扇形相对球的中心偏移(CGPoint)，拖动球时跟随用
     NSString              *_hostBid;     // 当前宿主 App 的 bundle id（用于「作用 App」网关）
     BOOL                  _interactive;  // 是否已临时当 key（避免重复 rekey）
-    CGFloat               _posX, _posY;      // 球默认落点（0~1 屏幕比例）
+    NSInteger             _side;             // 球停靠边 0=右 1=左
     CGFloat               _iconSize;         // 快捷图标尺寸
     CGFloat               _iconGap;          // 图标/圈层间隔
     NSTimer               *_pollTimer;       // 每秒兜底重判黑名单/开关（修黑名单不生效）
@@ -409,7 +414,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     if (self = [super init]) {
         _enabled  = YES; _url = @"https://www.apple.com";
         _winW = 340; _winH = 480; _expanded = NO; _didSetup = NO; _fanOpen = NO;
-        _posX = 0.92f; _posY = 0.45f; _iconSize = 40.0f; _iconGap = 56.0f;
+        _side = 0; _iconSize = 40.0f; _iconGap = 56.0f;   // v1.3.1：球默认停靠右侧
         _history = [NSMutableArray array]; _fanItems = [NSMutableArray array]; _fanOffsets = [NSMutableArray array];
         [self reloadPrefs]; [self loadHistory];
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
@@ -460,17 +465,14 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     if (_winH < 280) _winH = 280; if (_winH > 900) _winH = 900;
     CFPropertyListRef barRef = CFPreferencesCopyAppValue(CFSTR("barAtBottom"), (__bridge CFStringRef)kFUSuite);
     if (barRef) { _barAtBottom = [(__bridge NSNumber *)barRef boolValue]; CFRelease(barRef); }
-    // v1.3.0 布局滑杆：位置(X/Y 百分比)、图标大小、图标间隔
-    CFPropertyListRef pxRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUPosX, (__bridge CFStringRef)kFUSuite);
-    if (pxRef && CFGetTypeID(pxRef) == CFNumberGetTypeID()) { _posX = [(__bridge NSNumber *)pxRef floatValue] / 100.0f; CFRelease(pxRef); }
-    CFPropertyListRef pyRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUPosY, (__bridge CFStringRef)kFUSuite);
-    if (pyRef && CFGetTypeID(pyRef) == CFNumberGetTypeID()) { _posY = [(__bridge NSNumber *)pyRef floatValue] / 100.0f; CFRelease(pyRef); }
+    // v1.3.1 布局：停靠边(side) + 图标大小 + 图标间隔（位置不再用 X/Y 滑杆，球固定在左/右边）
+    CFPropertyListRef sdRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUSide, (__bridge CFStringRef)kFUSuite);
+    if (sdRef && CFGetTypeID(sdRef) == CFNumberGetTypeID()) { _side = [(__bridge NSNumber *)sdRef integerValue]; CFRelease(sdRef); }
     CFPropertyListRef isRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUIconSize, (__bridge CFStringRef)kFUSuite);
     if (isRef && CFGetTypeID(isRef) == CFNumberGetTypeID()) { _iconSize = [(__bridge NSNumber *)isRef floatValue]; CFRelease(isRef); }
     CFPropertyListRef igRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUIconGap, (__bridge CFStringRef)kFUSuite);
     if (igRef && CFGetTypeID(igRef) == CFNumberGetTypeID()) { _iconGap = [(__bridge NSNumber *)igRef floatValue]; CFRelease(igRef); }
-    if (_posX < 0) _posX = 0; if (_posX > 1) _posX = 1;
-    if (_posY < 0) _posY = 0; if (_posY > 1) _posY = 1;
+    if (_side != 0) _side = 1;
     if (_iconSize < 24) _iconSize = 24; if (_iconSize > 64) _iconSize = 64;
     if (_iconGap  < 12) _iconGap  = 12; if (_iconGap  > 120) _iconGap = 120;
     [self loadEntries];
@@ -725,10 +727,11 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 }
 - (void)placeBallInWindow:(UIWindow *)w {
     if (!_ball || !w) return;
-    // v1.3.0：默认落点由设置滑杆（posX/posY，屏幕百分比）决定。
+    // v1.3.1：球固定在左/右边（side），竖向往中；拖球仍可临时移动（松手按吸附逻辑归位）。
     CGFloat bw = w.bounds.size.width, bh = w.bounds.size.height;
-    _ball.frame = CGRectMake(_posX * bw - kFUButtonSize/2.0f, _posY * bh - kFUButtonSize/2.0f,
-                             kFUButtonSize, kFUButtonSize);
+    CGFloat x = (_side == 1) ? 4.0f : (bw - kFUButtonSize - 4.0f);
+    CGFloat y = bh * 0.45f - kFUButtonSize/2.0f;
+    _ball.frame = CGRectMake(x, MAX(2, MIN(bh - kFUButtonSize - 2, y)), kFUButtonSize, kFUButtonSize);
     _ball.alpha = 0.4f;   // 初始即半透明待机（拖动/点击会临时变实心）
 }
 - (void)layoutPanel {
@@ -861,7 +864,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     [self layoutPanel];
 }
 
-#pragma mark - 多环快捷菜单（v1.3.0：球居中，内环 6 个 + 外环 10 个；长按可编辑）
+#pragma mark - 扇形快捷菜单（v1.3.1：球固定在左/右边，朝屏幕内展开半圆扇形；第一层 4 + 第二层 6）
 - (void)openFan {
     if (_fanOpen || _entries.count < 1) return;   // 0 个入口不弹（loadEntries 至少兜底 1 个）
     _fanOpen = YES; _ball.alpha = 1.0f;           // 展开期间球保持实心可见
@@ -871,23 +874,26 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     CGPoint c = CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame));
     CGFloat isz = _iconSize;                      // 图标尺寸（设置滑杆）
     CGFloat gap = _iconGap;                       // 图标/圈层间隔（设置滑杆）
-    CGFloat R1 = kFUButtonSize/2.0f + isz/2.0f + gap;   // 第二层（内环）半径
-    CGFloat R2 = R1 + isz + gap;                        // 第三层（外环）半径
+    CGFloat R1 = kFUButtonSize/2.0f + isz/2.0f + gap;   // 第一层（内环）半径
+    CGFloat R2 = R1 + isz + gap;                        // 第二层（外环）半径
     NSInteger n  = _entries.count;
-    NSInteger n1 = MIN(n, kFULayer1Max);                // 内环最多 6 个
-    NSInteger n2 = MIN(n - n1, kFULayer2Max);           // 外环最多 10 个
+    NSInteger n1 = MIN(n, kFULayer1Max);                // 第一层最多 4 个
+    NSInteger n2 = MIN(n - n1, kFULayer2Max);           // 第二层最多 6 个（n>4 才出现）
+    BOOL right = (_side != 1);                    // side=0 右侧 → 朝左展开；side=1 左侧 → 朝右展开
+    CGFloat centerA = right ? 180.0f : 0.0f;      // 扇形朝向的圆心角（屏坐标：0°右 90°下 180°左 270°上）
     [_fanOffsets removeAllObjects];
-    // 逐环均匀 360° 分布：内环从正上方起排，外环错开半个步长（蜂窝状更好看、更不挤）。
+    // 逐层在「朝屏幕内的半圆」上均布：第一层 4 个、第二层 6 个（用户加几个排几个）。
     for (NSInteger layer = 0; layer < 2; layer++) {
         NSInteger cnt = (layer == 0) ? n1 : n2;
         if (cnt <= 0) break;
         CGFloat R = (layer == 0) ? R1 : R2;
-        CGFloat step = 360.0f / (CGFloat)cnt;
-        CGFloat a0 = -90.0f + ((layer == 1) ? step/2.0f : 0.0f);
+        CGFloat a0 = centerA - 90.0f;             // 半圆起角（圆心角 ±90°）
+        CGFloat step = (cnt > 1) ? 180.0f / (CGFloat)(cnt - 1) : 0.0f;
         for (NSInteger k = 0; k < cnt; k++) {
             NSInteger idx = (layer == 0) ? k : (kFULayer1Max + k);
             if (idx >= (NSInteger)n) break;
-            CGFloat rad = (a0 + step * (CGFloat)k) * M_PI / 180.0f;
+            CGFloat a = (cnt > 1) ? (a0 + step * (CGFloat)k) : centerA;
+            CGFloat rad = a * M_PI / 180.0f;
             CGFloat x = c.x + R * cos(rad), y = c.y + R * sin(rad);
             UIButton *it = [self buildFanItem:_entries[idx] index:idx size:isz];
             CGRect target = CGRectMake(x - isz/2.0f, y - isz/2.0f, isz, isz);
@@ -921,23 +927,18 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
         it.contentHorizontalAlignment = UIControlContentHorizontalAlignmentFill;
         it.contentVerticalAlignment   = UIControlContentVerticalAlignmentFill;
     } else {
-        // 无自定义图标：默认外观与悬浮球一致——毛玻璃 + 白色描边。
-        it.backgroundColor = [UIColor clearColor];
-        UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:
-            [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterial]];
-        blur.frame = it.bounds;
-        blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        blur.layer.cornerRadius = isz/2.0f; blur.clipsToBounds = YES;
-        blur.layer.borderWidth = 0.8f; blur.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.55].CGColor;
-        blur.userInteractionEnabled = NO;   // 关键：否则毛玻璃会拦截触摸，导致「无图标时点不动」
-        [it addSubview:blur];
+        // v1.3.1：无图标入口用「区分色」（蓝）实心圆，避免和 URL 玻璃球撞脸、看不出区别。
+        it.backgroundColor = [UIColor colorWithRed:0.20f green:0.52f blue:0.90f alpha:0.92f];
     }
     UILabel *lab = [[UILabel alloc] initWithFrame:it.bounds];
     lab.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    lab.textAlignment = NSTextAlignmentCenter; lab.textColor = img ? [UIColor whiteColor] : [UIColor labelColor];
-    NSString *ch = entry[kFUEntryChar] ?: @""; NSString *lt = entry[kFUEntryLetter] ?: @"";
-    lab.numberOfLines = 0; lab.font = [UIFont boldSystemFontOfSize:img ? isz*0.26f : isz*0.42f];
-    lab.text = img ? [NSString stringWithFormat:@"%@\n%@", ch, lt] : ch;
+    lab.textAlignment = NSTextAlignmentCenter; lab.textColor = [UIColor whiteColor];
+    NSString *ch = entry[kFUEntryChar] ?: @"";   // 现可存 2 汉字 / 3 字母
+    lab.numberOfLines = 0;
+    CGFloat fs = isz * 0.42f;
+    if (ch.length >= 3) fs = isz * 0.26f; else if (ch.length == 2) fs = isz * 0.32f;
+    lab.font = [UIFont boldSystemFontOfSize:fs];
+    lab.text = ch;
     if (img) lab.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
     [it addSubview:lab];
     [it addTarget:self action:@selector(fanItemTapped:) forControlEvents:UIControlEventTouchUpInside];
@@ -1075,7 +1076,11 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     if (_hostBid.length) {
         CFPropertyListRef arr = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUEnabledApps, (__bridge CFStringRef)kFUSuite);
         NSArray *list = nil; if (arr) list = (__bridge_transfer NSArray *)arr;
-        if ([list isKindOfClass:[NSArray class]] && [list containsObject:_hostBid]) hidden = YES;
+        if ([list isKindOfClass:[NSArray class]]) {
+            for (id b in list) if ([b isKindOfClass:[NSString class]] &&
+                [b caseInsensitiveCompare:_hostBid] == NSOrderedSame) { hidden = YES; break; }
+        }
+        NSLog(@"[FloatingURL] blacklist check host=%@ list=%@ -> hidden=%d", _hostBid, list, hidden);
     }
     // v1.3.0 修「黑名单加了球还在 / QQ 残留 URL」：黑名单或总开关命中时直接隐藏整个
     // overlay 窗口（球、环、面板一锅端），比只藏球更彻底——之前只藏 _ball，环/面板

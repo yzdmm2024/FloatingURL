@@ -11,11 +11,10 @@ static NSString * const kFUEntryLetter = @"letter";
 static NSString * const kFUEntryIcon   = @"icon";
 static NSString * const kFUURLs        = @"urls";
 static NSString * const kFUEnabledApps = @"enabledApps";
-static NSString * const kFUPosX        = @"posX";
-static NSString * const kFUPosY        = @"posY";
+static NSString * const kFUSide        = @"side";
 static NSString * const kFUIconSize    = @"iconSize";
 static NSString * const kFUIconGap     = @"iconGap";
-static const NSInteger kFUMaxEntries   = 16;   // v1.3.0：内环 6 + 外环 10
+static const NSInteger kFUMaxEntries   = 10;   // v1.3.1：第一层 4 + 第二层 6
 
 #pragma mark - 方形裁剪控制器
 @interface FUCropVC : UIViewController <UIScrollViewDelegate>
@@ -149,7 +148,14 @@ static const NSInteger kFUMaxEntries   = 16;   // v1.3.0：内环 6 + 外环 10
 }
 - (BOOL)textField:(UITextField *)tf shouldChangeCharactersInRange:(NSRange)r replacementString:(NSString *)s {
     if (tf == _labelField) {
-        NSString *next = [tf.text stringByReplacingCharactersInRange:r withString:s]; return next.length <= 1;
+        NSString *next = [tf.text stringByReplacingCharactersInRange:r withString:s];
+        NSInteger cjk = 0, lat = 0;
+        for (NSUInteger i = 0; i < next.length; i++) {
+            unichar c = [next characterAtIndex:i];
+            if (c >= 0x4E00 && c <= 0x9FFF) cjk++;
+            else if (![[NSCharacterSet whitespaceCharacterSet] characterIsMember:c]) lat++;
+        }
+        if (cjk > 2 || lat > 3) return NO;   // v1.3.1：最多 2 汉字 或 3 字母
     } return YES;
 }
 - (void)refreshIcon:(NSData *)d {
@@ -182,7 +188,7 @@ static const NSInteger kFUMaxEntries   = 16;   // v1.3.0：内环 6 + 外环 10
     NSMutableDictionary *e = [NSMutableDictionary dictionary];
     e[kFUEntryURL] = (_urlField.text.length ? _urlField.text : @"");
     NSString *lab = _labelField.text ?: @"";
-    if (lab.length) e[kFUEntryChar] = [lab substringToIndex:1];
+    if (lab.length) e[kFUEntryChar] = lab;   // v1.3.1：存完整标签（2 汉字 / 3 字母）
     if (_iconData) e[kFUEntryIcon] = _iconData;
     CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUURLs, (__bridge CFStringRef)kFUSuite);
     NSMutableArray *arr = nil; if (r) { NSArray *a = (__bridge_transfer NSArray *)r; arr = [a mutableCopy]; }
@@ -485,7 +491,8 @@ static const NSInteger kFUMaxEntries   = 16;   // v1.3.0：内环 6 + 外环 10
 
 #pragma mark - 布局实时预览画布（与 tweak 内环形公式完全一致）
 @interface FUPreviewView : UIView
-@property (nonatomic, assign) CGFloat posX, posY, iconSize, iconGap;   // posX/posY: 0~100
+@property (nonatomic, assign) NSInteger side;        // 0=右 1=左
+@property (nonatomic, assign) CGFloat iconSize, iconGap;
 @property (nonatomic, strong) NSArray *entries;
 - (void)refresh;
 @end
@@ -500,35 +507,44 @@ static const NSInteger kFUMaxEntries   = 16;   // v1.3.0：内环 6 + 外环 10
     CGFloat scale = bs / 40.0f;
     CGFloat isz = _iconSize * scale;
     CGFloat gap = _iconGap * scale;
-    CGPoint c = CGPointMake(_posX / 100.0f * s.size.width, _posY / 100.0f * s.size.height);
-    CGFloat R1 = bs/2.0f + isz/2.0f + gap;
-    CGFloat R2 = R1 + isz + gap;
-    // 圈层参考虚线
+    // v1.3.1：球固定停靠左/右边缘（与 tweak 内 placeBallInWindow 一致），无横/纵滑杆。
+    CGFloat cx = (_side == 1) ? (bs/2.0f + 6.0f) : (s.size.width - bs/2.0f - 6.0f);
+    CGFloat cy = s.size.height * 0.5f;
+    CGPoint c = CGPointMake(cx, cy);
+    CGFloat R1 = bs/2.0f + isz/2.0f + gap;          // 第一层（内环）半径
+    CGFloat R2 = R1 + isz + gap;                    // 第二层（外环）半径
+    // 扇形朝向屏内的半圆参考弧（屏坐标：0°右 90°下 180°左 270°上）
+    BOOL right = (_side != 1);
+    CGFloat centerA = right ? 180.0f : 0.0f;
+    CGFloat a0ref = centerA - 90.0f, a1ref = centerA + 90.0f;
     CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:1.0 alpha:0.14].CGColor);
     CGContextSetLineWidth(ctx, 1.0f);
-    CGContextAddArc(ctx, c.x, c.y, R1, 0, M_PI*2, 0); CGContextStrokePath(ctx);
-    CGContextAddArc(ctx, c.x, c.y, R2, 0, M_PI*2, 0); CGContextStrokePath(ctx);
-    // 中心球（URL 不变）
-    [self fuCircleAt:c size:bs img:nil ch:@"URL" fs:bs*0.24f];
-    // 快捷图标：内环 6 + 外环 10（有几条显示几条）
+    CGContextAddArc(ctx, c.x, c.y, R1, a0ref*M_PI/180.0, a1ref*M_PI/180.0, 0); CGContextStrokePath(ctx);
+    CGContextAddArc(ctx, c.x, c.y, R2, a0ref*M_PI/180.0, a1ref*M_PI/180.0, 0); CGContextStrokePath(ctx);
+    // 中心球（URL 玻璃球）
+    [self fuCircleAt:c size:bs img:nil ch:@"URL" fs:bs*0.24f glass:YES];
+    // 快捷图标：第一层 4 + 第二层 6（有几条显示几条）
     NSInteger n  = (NSInteger)_entries.count;
-    NSInteger n1 = MIN(n, 6), n2 = MIN(MAX(0, n - n1), 10);
+    NSInteger n1 = MIN(n, kFULayer1Max);
+    NSInteger n2 = MIN(MAX(0, n - n1), kFULayer2Max);
     for (NSInteger layer = 0; layer < 2; layer++) {
         NSInteger cnt = (layer == 0) ? n1 : n2;
         if (cnt <= 0) break;
         CGFloat R = (layer == 0) ? R1 : R2;
-        CGFloat step = 360.0f / (CGFloat)cnt;
-        CGFloat a0 = -90.0f + ((layer == 1) ? step/2.0f : 0.0f);
+        CGFloat a0 = centerA - 90.0f;
+        CGFloat step = (cnt > 1) ? 180.0f / (CGFloat)(cnt - 1) : 0.0f;
         for (NSInteger k = 0; k < cnt; k++) {
-            NSInteger idx = (layer == 0) ? k : 6 + k;
-            if (idx >= n) break;
+            NSInteger idx = (layer == 0) ? k : (kFULayer1Max + k);
+            if (idx >= (NSInteger)n) break;
             NSDictionary *e = _entries[idx];
-            CGFloat rad = (a0 + step*(CGFloat)k) * M_PI / 180.0f;
+            CGFloat a = (cnt > 1) ? (a0 + step * (CGFloat)k) : centerA;
+            CGFloat rad = a * M_PI / 180.0f;
             CGPoint p = CGPointMake(c.x + R*cos(rad), c.y + R*sin(rad));
             NSData *ic = e[@"icon"];
             UIImage *img = ([ic isKindOfClass:[NSData class]] && ic.length) ? [UIImage imageWithData:ic] : nil;
             NSString *ch = e[@"char"] ?: @"";
-            [self fuCircleAt:p size:isz img:img ch:ch fs:isz*0.42f];
+            CGFloat fs = isz * 0.42f; if (ch.length >= 3) fs = isz * 0.26f; else if (ch.length == 2) fs = isz * 0.32f;
+            [self fuCircleAt:p size:isz img:img ch:ch fs:fs glass:NO];
         }
     }
 }
@@ -536,20 +552,29 @@ static const NSInteger kFUMaxEntries   = 16;   // v1.3.0：内环 6 + 外环 10
     CGContextSetFillColorWithColor(UIGraphicsGetCurrentContext(), col.CGColor);
     CGContextFillRect(UIGraphicsGetCurrentContext(), r);
 }
-- (void)fuCircleAt:(CGPoint)ctr size:(CGFloat)d img:(UIImage *)img ch:(NSString *)ch fs:(CGFloat)fs {
+- (void)fuCircleAt:(CGPoint)ctr size:(CGFloat)d img:(UIImage *)img ch:(NSString *)ch fs:(CGFloat)fs glass:(BOOL)glass {
     CGContextRef ctx = UIGraphicsGetCurrentContext();
     CGRect r = CGRectMake(ctr.x - d/2.0f, ctr.y - d/2.0f, d, d);
-    CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:1.0 alpha:0.20].CGColor);
-    CGContextFillEllipseInRect(ctx, r);
-    CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:1.0 alpha:0.55].CGColor);
-    CGContextSetLineWidth(ctx, 1.0f);
-    CGContextStrokeEllipseInRect(ctx, r);
+    if (glass) {
+        CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:1.0 alpha:0.20].CGColor);
+        CGContextFillEllipseInRect(ctx, r);
+        CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:1.0 alpha:0.55].CGColor);
+        CGContextSetLineWidth(ctx, 1.0f);
+        CGContextStrokeEllipseInRect(ctx, r);
+    } else {
+        // 无图标入口：区分色（蓝）实心，避免和 URL 玻璃球撞脸
+        CGContextSetFillColorWithColor(ctx, [UIColor colorWithRed:0.20 green:0.52 blue:0.90 alpha:0.92].CGColor);
+        CGContextFillEllipseInRect(ctx, r);
+    }
     if (img) {
         CGContextSaveGState(ctx);
         UIBezierPath *clip = [UIBezierPath bezierPathWithOvalInRect:r];
         [clip addClip];
         [img drawInRect:r];
         CGContextRestoreGState(ctx);
+        CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:1.0 alpha:0.55].CGColor);
+        CGContextSetLineWidth(ctx, 1.0f);
+        CGContextStrokeEllipseInRect(ctx, r);
     } else if (ch.length) {
         NSMutableParagraphStyle *ps = [NSMutableParagraphStyle new]; ps.alignment = NSTextAlignmentCenter;
         [ch drawInRect:r withAttributes:@{
@@ -560,12 +585,13 @@ static const NSInteger kFUMaxEntries   = 16;   // v1.3.0：内环 6 + 外环 10
 }
 @end
 
-#pragma mark - 布局调节器（位置/图标大小/图标间隔 滑杆 + 实时预览，改动即时全局生效）
+#pragma mark - 布局调节器（左/右停靠 + 图标大小/间隔 滑杆 + 实时预览，改动即时全局生效）
 @interface FULayoutController : UIViewController
 @property (nonatomic, strong) UIScrollView *scroll;
 @property (nonatomic, strong) FUPreviewView *preview;
-@property (nonatomic, strong) UISlider *sx, *sy, *ss, *sg;
-@property (nonatomic, strong) UILabel *lx, *ly, *ls, *lg;
+@property (nonatomic, strong) UISegmentedControl *sideSeg;
+@property (nonatomic, strong) UISlider *ss, *sg;
+@property (nonatomic, strong) UILabel *ls, *lg;
 @end
 @implementation FULayoutController
 - (CGFloat)prefFloat:(NSString *)key dft:(CGFloat)d {
@@ -581,6 +607,12 @@ static const NSInteger kFUMaxEntries   = 16;   // v1.3.0：内环 6 + 外环 10
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
     notify_post("com.yzdmm.floatingurl/settingsChanged");
 }
+- (void)writeSide:(NSInteger)v {
+    CFPreferencesSetAppValue((__bridge CFStringRef)kFUSide, (__bridge CFPropertyListRef)[NSNumber numberWithInteger:v],
+        (__bridge CFStringRef)kFUSuite);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
+    notify_post("com.yzdmm.floatingurl/settingsChanged");
+}
 - (void)loadEntriesForPreview {
     CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUURLs, (__bridge CFStringRef)kFUSuite);
     NSArray *arr = nil;
@@ -589,7 +621,7 @@ static const NSInteger kFUMaxEntries   = 16;   // v1.3.0：内环 6 + 外环 10
 }
 - (void)viewDidLoad {
     [super viewDidLoad]; self.view.backgroundColor = [UIColor systemBackgroundColor];
-    self.title = @"布局调节（实时预览）";
+    self.title = @"布局调节";
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"恢复默认"
         style:UIBarButtonItemStylePlain target:self action:@selector(reset)];
     CGFloat w = self.view.bounds.size.width;
@@ -597,12 +629,11 @@ static const NSInteger kFUMaxEntries   = 16;   // v1.3.0：内环 6 + 外环 10
     _scroll.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [self.view addSubview:_scroll];
     __block CGFloat y = 16;
-    // ---- 预览画布：按 iPhone 屏比例（≈1:2.16）----
+    // ---- 预览画布（仅展示扇形排列，尺寸缩小）----
     CGFloat pw = w - 32;
-    _preview = [[FUPreviewView alloc] initWithFrame:CGRectMake(16, y, pw, pw * 2.16f)];
+    _preview = [[FUPreviewView alloc] initWithFrame:CGRectMake(16, y, pw, pw * 1.5f)];
     _preview.layer.cornerRadius = 18; _preview.clipsToBounds = YES;
-    _preview.posX = [self prefFloat:kFUPosX dft:92];
-    _preview.posY = [self prefFloat:kFUPosY dft:45];
+    _preview.side     = (NSInteger)[self prefFloat:kFUSide dft:0];
     _preview.iconSize = [self prefFloat:kFUIconSize dft:40];
     _preview.iconGap  = [self prefFloat:kFUIconGap dft:56];
     [self loadEntriesForPreview];
@@ -610,18 +641,23 @@ static const NSInteger kFUMaxEntries   = 16;   // v1.3.0：内环 6 + 外环 10
     UILabel *pvTip = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 30)];
     pvTip.numberOfLines = 0; pvTip.font = [UIFont systemFontOfSize:11];
     pvTip.textColor = [UIColor tertiaryLabelColor];
-    pvTip.text = @"▲ 实时预览：按你已添加的快捷URI 渲染三层（URL + 内环6 + 外环10）。拖动下方滑杆，预览和手机上的悬浮球都会立刻变化。";
-    [pvTip sizeToFit]; [_scroll addSubview:pvTip]; y += pvTip.frame.size.height + 12;
-    // ---- 滑杆区 ----
-    CGFloat px = [self prefFloat:kFUPosX dft:92], py = [self prefFloat:kFUPosY dft:45];
+    pvTip.text = @"▲ 实时预览：URL 球在左/右边，点开按扇形展开（第一层 4 + 第二层 6）。改下方选项，预览与手机上的球同步变化。";
+    [pvTip sizeToFit]; [_scroll addSubview:pvTip]; y += pvTip.frame.size.height + 16;
+    // ---- 停靠位置（左 / 右）----
+    UILabel *sideLab = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 20)];
+    sideLab.font = [UIFont systemFontOfSize:12]; sideLab.textColor = [UIColor secondaryLabelColor];
+    sideLab.text = @"停靠位置（球在屏幕哪一侧）";
+    [_scroll addSubview:sideLab]; y += 24;
+    _sideSeg = [[UISegmentedControl alloc] initWithItems:@[@"右侧", @"左侧"]];
+    _sideSeg.frame = CGRectMake(16, y, w-32, 32);
+    _sideSeg.selectedSegmentIndex = _preview.side;   // 0=右 1=左
+    [_sideSeg addTarget:self action:@selector(sideChanged:) forControlEvents:UIControlEventValueChanged];
+    [_scroll addSubview:_sideSeg]; y += 44;
+    // ---- 图标大小 / 间隔 滑杆 ----
     CGFloat pis = [self prefFloat:kFUIconSize dft:40], pig = [self prefFloat:kFUIconGap dft:56];
-    _sx = [self mkSlider:CGRectMake(16, y, w-32, 52) min:0 max:100 val:px label:@"位置 · 横向" out:&y lout:&_lx];
-    _sy = [self mkSlider:CGRectMake(16, y, w-32, 52) min:0 max:100 val:py label:@"位置 · 纵向" out:&y lout:&_ly];
     _ss = [self mkSlider:CGRectMake(16, y, w-32, 52) min:24 max:64 val:pis label:@"图标大小" out:&y lout:&_ls];
     _sg = [self mkSlider:CGRectMake(16, y, w-32, 52) min:12 max:120 val:pig label:@"图标间隔" out:&y lout:&_lg];
-    _sx.tag = 0; _sy.tag = 1; _ss.tag = 2; _sg.tag = 3;
-    [_sx addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
-    [_sy addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+    _ss.tag = 2; _sg.tag = 3;
     [_ss addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
     [_sg addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
     y += 12; _scroll.contentSize = CGSizeMake(w, y);
@@ -638,14 +674,16 @@ static const NSInteger kFUMaxEntries   = 16;   // v1.3.0：内环 6 + 外环 10
     *y = f.origin.y + 22 + 34 + 6;
     return sl;
 }
+- (void)sideChanged:(UISegmentedControl *)seg {
+    NSInteger v = seg.selectedSegmentIndex;   // 0=右 1=左
+    [self writeSide:v]; _preview.side = v; [_preview refresh];
+}
 - (void)sliderChanged:(UISlider *)sl {
     CGFloat v = roundf(sl.value);
     NSString *key = nil; UILabel *l = nil; NSString *name = @"";
     switch (sl.tag) {
-        case 0: key = kFUPosX; l = _lx; name = @"位置 · 横向"; _preview.posX = v; break;
-        case 1: key = kFUPosY; l = _ly; name = @"位置 · 纵向"; _preview.posY = v; break;
         case 2: key = kFUIconSize; l = _ls; name = @"图标大小"; _preview.iconSize = v; break;
-        case 3: key = kFUIconGap; l = _lg; name = @"图标间隔"; _preview.iconGap = v; break;
+        case 3: key = kFUIconGap;  l = _lg; name = @"图标间隔"; _preview.iconGap = v; break;
     }
     if (!key) return;
     l.text = [NSString stringWithFormat:@"%@（当前 %.0f）", name, v];
@@ -653,12 +691,10 @@ static const NSInteger kFUMaxEntries   = 16;   // v1.3.0：内环 6 + 外环 10
     [_preview refresh];
 }
 - (void)reset {
-    _sx.value = 92; _sy.value = 45; _ss.value = 40; _sg.value = 56;
-    _lx.text = @"位置 · 横向（当前 92）"; _ly.text = @"位置 · 纵向（当前 45）";
+    _sideSeg.selectedSegmentIndex = 0; _ss.value = 40; _sg.value = 56;
     _ls.text = @"图标大小（当前 40）"; _lg.text = @"图标间隔（当前 56）";
-    _preview.posX = 92; _preview.posY = 45; _preview.iconSize = 40; _preview.iconGap = 56;
-    [self writeFloat:kFUPosX value:92]; [self writeFloat:kFUPosY value:45];
-    [self writeFloat:kFUIconSize value:40]; [self writeFloat:kFUIconGap value:56];
+    _preview.side = 0; _preview.iconSize = 40; _preview.iconGap = 56;
+    [self writeSide:0]; [self writeFloat:kFUIconSize value:40]; [self writeFloat:kFUIconGap value:56];
     [_preview refresh];
 }
 @end
