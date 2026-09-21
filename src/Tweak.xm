@@ -486,13 +486,15 @@ static void fuStartAppHeartbeat(NSString *bid) {
             Class cfgClass = NSClassFromString(@"PHPickerConfiguration");
             Class fltClass = NSClassFromString(@"PHPickerFilter");
             if (pvClass && cfgClass && fltClass) {
-                id cfg = [cfgClass performSelector:@selector(alloc)];
-                cfg = [cfg performSelector:@selector(init)];
+                // NSSelectorFromString 包住 alloc/init/initWithConfiguration: —— 它们是 objc 保留族选择器，
+                // 直接用 @selector 传给 performSelector 会被 clang 当硬错误；动态拿 SEL 即可绕过。
+                id cfg = [cfgClass performSelector:NSSelectorFromString(@"alloc")];
+                cfg = [cfg performSelector:NSSelectorFromString(@"init")];
                 id flt = [fltClass performSelector:@selector(imagesFilter)];
                 [cfg setValue:@(1) forKey:@"selectionLimit"];
                 [cfg setValue:flt forKey:@"filter"];
-                id pv = [pvClass performSelector:@selector(alloc)];
-                pv = [pv performSelector:@selector(initWithConfiguration:) withObject:cfg];
+                id pv = [pvClass performSelector:NSSelectorFromString(@"alloc")];
+                pv = [pv performSelector:NSSelectorFromString(@"initWithConfiguration:") withObject:cfg];
                 [pv setValue:self forKey:@"delegate"];   // self 已声明遵循 PHPickerViewControllerDelegate
                 [self presentViewController:pv animated:YES completion:nil];
                 return;
