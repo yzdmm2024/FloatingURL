@@ -481,6 +481,8 @@ static void fuStartAppHeartbeat(NSString *bid) {
 - (NSArray *)fuBlacklist;
 - (void)fuSyncFrontWatches;
 - (void)fuOpenExternally:(NSString *)s;
+- (void)triggerEntry:(NSDictionary *)entry;          // v1.3.8：触发一条入口（扇形点击 / 单入口点球共用）
+- (CGFloat)fuAngleToScreenCenter:(CGPoint)c;         // v1.3.8：球心 -> 屏幕中心 的方向角
 @property (nonatomic, strong) UIView      *schemeBox;     // 非网页入口的简单输入框容器
 @property (nonatomic, strong) UITextField *schemeField;
 @property (nonatomic, strong) UIButton    *schemeOpenBtn;
@@ -1140,6 +1142,12 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     // v1.3.5 修 06：一个入口都没有（用户把快捷 URL 删光了）→ 什么都不做，
     // 不能再弹出一个默认网页（那既莫名又打不开）。
     if (_entries.count == 0) return;
+    // v1.3.8 修 07：只有一个入口 → 展开扇形毫无意义（就一个图标还占满屏），直接触发它。
+    if (_entries.count == 1) {
+        [self triggerEntry:_entries[0]];
+        _ball.alpha = 0.4f;   // 立刻回到待机半透明
+        return;
+    }
     [self openFan];   // 有入口 → 弹出扇形（几个入口排几个）
 }
 - (void)panBall:(UIPanGestureRecognizer *)g {
@@ -1243,27 +1251,57 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 //   · 每层能放几个 = 该半径下的扇形弧长 ÷ (图标 + 最小净空隙)
 //     → **用户加几个入口就排几个**：第 1 层放满自动溢到第 2、3 层；
 //   · 球靠近上/下边缘时，扇形角度逐档收缩，直到所有图标都留在屏内（遇到屏幕边自动变形）。
-- (CGFloat)fuFittingSpanForCenter:(CGFloat)center radii:(const CGFloat *)R caps:(const NSInteger *)caps
-                            icon:(CGFloat)isz margin:(CGFloat)m maxSpan:(CGFloat)spanMax {
-    CGRect sc = _overlay.bounds;
-    CGPoint c = CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame));
-    for (CGFloat sp = spanMax; sp >= 60.0f; sp -= 5.0f) {
-        BOOL ok = YES;
-        for (int layer = 0; layer < 3 && ok; layer++) {
-            NSInteger cnt = caps[layer]; if (cnt <= 0) continue;
-            CGFloat a0 = center - sp/2.0f;
-            CGFloat sp2 = (cnt > 1) ? sp / (CGFloat)(cnt - 1) : 0.0f;
-            for (NSInteger k = 0; k < cnt; k++) {
-                CGFloat a = (cnt > 1) ? (a0 + sp2 * (CGFloat)k) : center;
-                CGFloat rad = a * (CGFloat)M_PI / 180.0f;
-                CGFloat x = c.x + R[layer] * cosf(rad), y = c.y + R[layer] * sinf(rad);
-                if (x - isz/2.0f < m || x + isz/2.0f > sc.size.width  - m ||
-                    y - isz/2.0f < m || y + isz/2.0f > sc.size.height - m) { ok = NO; break; }
-            }
+// v1.3.8 修 02：球心 -> 屏幕中心 的方向角（屏坐标：0°=右，90°=下，180°/-180°=左，-90°=上）。
+// 球停在左下角时约 -45°（朝右上）、右下角约 -135°（朝左上）、左上角约 45°（朝右下）……
+// 这样扇形永远朝屏幕内侧展开，而不是死板地只朝左/右。
+- (CGFloat)fuAngleToScreenCenter:(CGPoint)c {
+    CGRect s = _overlay ? _overlay.bounds : [UIScreen mainScreen].bounds;
+    CGFloat dx = s.size.width  / 2.0f - c.x;
+    CGFloat dy = s.size.height / 2.0f - c.y;
+    if (fabs(dx) < 1.0f && fabs(dy) < 1.0f) return 0.0f;   // 球正好在屏幕中心：默认朝右
+    return atan2f(dy, dx) * 180.0f / (CGFloat)M_PI;
+}
+// v1.3.8 修 02：给定扇形角度是否可用。
+//   checkFit=YES 时还检查「所有图标都在屏内」；
+//   两种模式都会检查「同层相邻图标的弧距 >= 图标直径」——收缩角度会让弧距变小，一旦会挤到一起就不能再收了。
+- (BOOL)fuSpanOK:(CGFloat)sp center:(CGFloat)centerA radii:(const CGFloat *)R
+            caps:(const NSInteger *)caps icon:(CGFloat)isz margin:(CGFloat)m
+          screen:(CGRect)sc ball:(CGPoint)c checkFit:(BOOL)checkFit {
+    for (int layer = 0; layer < 3; layer++) {
+        NSInteger cnt = caps[layer]; if (cnt <= 0) continue;
+        CGFloat sp2 = (cnt > 1) ? sp / (CGFloat)(cnt - 1) : 0.0f;
+        if (cnt > 1) {
+            CGFloat arcStep = sp2 * (CGFloat)M_PI / 180.0f * R[layer];
+            if (arcStep < isz * 1.02f) return NO;      // 会重叠 → 这个角度不可用
         }
-        if (ok) return sp;
+        if (!checkFit) continue;
+        CGFloat a0 = centerA - sp / 2.0f;
+        for (NSInteger k = 0; k < cnt; k++) {
+            CGFloat a = (cnt > 1) ? (a0 + sp2 * (CGFloat)k) : centerA;
+            CGFloat rad = a * (CGFloat)M_PI / 180.0f;
+            CGFloat x = c.x + R[layer] * cosf(rad), y = c.y + R[layer] * sinf(rad);
+            if (x - isz/2.0f < m || x + isz/2.0f > sc.size.width  - m ||
+                y - isz/2.0f < m || y + isz/2.0f > sc.size.height - m) return NO;
+        }
     }
-    return 60.0f;
+    return YES;
+}
+// v1.3.8 修 02：在给定中心角下，求「所有图标都在屏内、且同层不重叠」的最大扇形角度。
+// 从用户设定角度起每 5° 收缩一次；一旦再收缩就会让图标挤到一起，就停止收缩（交给整体平移兜底）。
+- (CGFloat)fuFittingSpanForCenter:(CGFloat)centerA radii:(const CGFloat *)R caps:(const NSInteger *)caps
+                            icon:(CGFloat)isz margin:(CGFloat)m maxSpan:(CGFloat)spanMax {
+    CGRect sc = _overlay ? _overlay.bounds : [UIScreen mainScreen].bounds;
+    CGPoint c = CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame));
+    CGFloat sp = spanMax;
+    while (sp > 45.0f) {
+        if ([self fuSpanOK:sp center:centerA radii:R caps:caps icon:isz margin:m screen:sc ball:c checkFit:YES])
+            break;
+        CGFloat next = sp - 5.0f;
+        if (![self fuSpanOK:next center:centerA radii:R caps:caps icon:isz margin:m screen:sc ball:c checkFit:NO])
+            break;   // 再收就会重叠 → 保持当前角度
+        sp = next;
+    }
+    return sp;
 }
 - (void)openFan {
     if (_fanOpen || _entries.count < 1) return;   // 0 个入口不弹（loadEntries 至少兜底 1 个）
@@ -1308,12 +1346,13 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
         li = target + 1;
         if (li >= 3 && placed < n) { caps[2] += (n - placed); placed = n; }
     }
-    // v1.3.5 修 03：扇形朝向按球的**实际位置**自动判定左右（不再依赖设置里手选的边）。
-    // 屏坐标：0°=右 90°=下 180°=左 270°=上。球在左半屏 → centerA=0°（朝屏幕内侧右方展开）；
-    // 球在右半屏 → centerA=180°（朝屏幕内侧左方展开）。
-    NSInteger ballSide = [self fuBallSide];
-    CGFloat centerA = (ballSide == 1) ? 0.0f : 180.0f;
-    CGFloat span = spanMax;   // v1.3.3：不再靠“缩小角度”避免重叠，而是整体平移到屏内（见下方 fit）
+    // v1.3.8 修 02：扇形朝向 = 从球心指向**屏幕中心**的方向角（不再只分左右）。
+    // 球在左中 → 0°(朝右)；右中 → 180°(朝左)；左上角 → ≈45°(朝右下)；右下角 → ≈-135°(朝左上)……
+    // 球停在四角或上下边时，扇形自动朝屏幕内侧展开。
+    CGFloat centerA = [self fuAngleToScreenCenter:c];
+    // v1.3.8 修 02：角度自适应——从用户设定角度起逐档收缩，直到所有图标都在屏内；
+    // （收缩会让同层弧距变小 → 一旦会挤到一起就停止收缩，改由下方「整体平移」兜底。）
+    CGFloat span = [self fuFittingSpanForCenter:centerA radii:R caps:caps icon:isz margin:6.0f maxSpan:spanMax];
     // 3) 先按理想角度摆好（不裁剪），收集所有图标中心
     NSMutableArray *pts = [NSMutableArray array];
     placed = 0;
@@ -1430,12 +1469,16 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 - (void)fanItemTapped:(UIButton *)sender {
     NSInteger idx = sender.tag; if (idx < 0 || idx >= (NSInteger)_entries.count) { [self closeFan]; return; }
     NSDictionary *entry = _entries[idx]; [self closeFan];
-    NSString *u = entry[kFUEntryURL]; if (!u.length) return;
-    NSString *norm = [self normalizeURL:u];
-    BOOL web = [self isWebScheme:norm];
+    [self triggerEntry:entry];
+}
+// v1.3.8 修 07：把「触发一条入口」抽成独立方法，扇形图标点击与「只有 1 个入口时点球」共用同一套逻辑。
+- (void)triggerEntry:(NSDictionary *)entry {
+    if (![entry isKindOfClass:[NSDictionary class]]) return;
+    NSString *u = entry[kFUEntryURL]; if (![u isKindOfClass:[NSString class]] || !u.length) return;
+    NSString *norm = [self normalizeURL:u]; if (!norm.length) return;
     // 确认模式（设置里可开）：不直接触发，先弹输入框+打开按钮，用户点「打开」才执行。
     if (_tapConfirm) { [self showSchemeBox:norm]; return; }
-    if (web) {
+    if ([self isWebScheme:norm]) {
         [self pushHistory:norm];
         if (_webMode == 1) {
             // 内置面板（实验）：SpringBoard 进程里 WKWebView 常白屏，默认不用；设置里可开。
@@ -1488,19 +1531,31 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 }
 
 // v1.3.2：跨进程打开 URL。SpringBoard 里 UIApplication.openURL 不稳，优先用 LSApplicationWorkspace。
+// v1.3.8 修 01（卡死 bug）：**绝不能在主线程同步调用** —— openSensitiveURL:withOptions: 会一路同步等
+// FrontBoard 把目标 App 拉起，Safari/微信冷启动时要好几秒，这几秒里 SpringBoard 主线程被占死，
+// 表现就是「点了网页 -> 整机卡住、屏幕动不了」。这里整段丢到后台队列，主线程立刻返回。
 - (void)fuOpenExternally:(NSString *)s {
     NSURL *u = [NSURL URLWithString:s]; if (!u) return;
-    Class wsc = NSClassFromString(@"LSApplicationWorkspace");
-    id ws = wsc ? [wsc performSelector:NSSelectorFromString(@"defaultWorkspace")] : nil;
-    SEL selSensitive = NSSelectorFromString(@"openSensitiveURL:withOptions:");
-    if (ws && [ws respondsToSelector:selSensitive]) {
-        [ws performSelector:selSensitive withObject:u withObject:nil];
-        return;
-    }
-    SEL selOpen = NSSelectorFromString(@"openURL:");
-    if (ws && [ws respondsToSelector:selOpen]) { [ws performSelector:selOpen withObject:u]; return; }
-    UIApplication *app = UIApplication.sharedApplication;
-    if (app) [app openURL:u options:@{} completionHandler:nil];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        @try {
+            Class wsc = NSClassFromString(@"LSApplicationWorkspace");
+            id ws = wsc ? [wsc performSelector:NSSelectorFromString(@"defaultWorkspace")] : nil;
+            SEL selSensitive = NSSelectorFromString(@"openSensitiveURL:withOptions:");
+            if (ws && [ws respondsToSelector:selSensitive]) {
+                [ws performSelector:selSensitive withObject:u withObject:nil];
+                return;
+            }
+            SEL selOpen = NSSelectorFromString(@"openURL:");
+            if (ws && [ws respondsToSelector:selOpen]) { [ws performSelector:selOpen withObject:u]; return; }
+        } @catch (NSException *e) {
+            NSLog(@"[FloatingURL] fuOpenExternally 异常（已忽略）: %@", e);
+        }
+        // 兜底路径必须在主线程走 UIApplication
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIApplication *app = UIApplication.sharedApplication;
+            if (app) [app openURL:u options:@{} completionHandler:nil];
+        });
+    });
 }
 
 #pragma mark - 展开 / 收起 面板

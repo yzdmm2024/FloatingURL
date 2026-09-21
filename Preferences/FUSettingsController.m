@@ -1,6 +1,7 @@
 #import <Preferences/Preferences.h>
 #import <notify.h>
 #import <PhotosUI/PhotosUI.h>
+#import <QuartzCore/QuartzCore.h>   // v1.3.8：裁剪页取景框用 CAShapeLayer/kCAFillRuleEvenOdd
 
 // LSApplicationWorkspace / LSApplicationProxy 为私有 API，不能直接引用类（会生成链接符号导致链接失败）。
 // 改用 NSClassFromString + performSelector 在运行时取，避免链接私有框架。
@@ -27,8 +28,8 @@ static NSString * const kFUBallTitle   = @"ballTitle";  // v1.3.5 球的文字�
 static NSString * const kFUBallIcon    = @"ballIcon";   // v1.3.5 球的图标（PNG data）
 static NSString * const kFUBallColor   = @"ballColor";  // v1.3.5 球的底色 hex
 static const NSInteger kFUMaxEntries   = 48;   // v1.3.6：上限 48（三层默认 8/16/24）
-static const NSInteger kFULayer1Max    = 4;    // 第一层（内环）最多 4 个
-static const NSInteger kFULayer2Max    = 6;    // 第二层（外环）最多 6 个
+// v1.3.8：删掉 1.3.2 / 1.3.3 遗留的 kFULayer1Max / kFULayer2Max（早已不再使用，
+//           各层上限统一由「布局调节」页的 8 / 16 / 24 控制）。
 
 // ===== v1.3.7 统一调色板：48 色（够 48 个入口各用一色），末尾空串 = 默认（入口=默认蓝 / 球=玻璃） =====
 static NSArray *FUColorPalette(void) {
@@ -50,13 +51,24 @@ static NSArray *FUColorPalette(void) {
 }
 
 #pragma mark - 方形裁剪控制器
+// v1.3.8 修 05：以前是「盲裁」——图片铺满整屏，没有任何提示，用户根本不知道最终会取哪一块。
+// 现在：屏幕正中固定一个正方形取景框（外部压暗 + 白描边 + 四角标记），图片可拖动/双指缩放到框内，
+// 框内所见即所得；确定后按框内区域裁剪。
 @interface FUCropVC : UIViewController <UIScrollViewDelegate>
 @property (nonatomic, strong) UIImage *image;
 @property (nonatomic, copy)   void (^onCropped)(NSData *png);
 @property (nonatomic, strong) UIScrollView *scroll;
 @property (nonatomic, strong) UIImageView  *imgView;
+@property (nonatomic, strong) CAShapeLayer *maskLayer;
+@property (nonatomic, strong) CAShapeLayer *frameLayer;
+@property (nonatomic, assign) BOOL didInit;
 @end
 @implementation FUCropVC
+// 取景框边长（正方形，屏幕正中）
+- (CGFloat)fuCropSide {
+    CGFloat m = MIN(self.view.bounds.size.width, self.view.bounds.size.height);
+    return MAX(120.0f, m - 84.0f);
+}
 - (void)viewDidLoad {
     [super viewDidLoad]; self.view.backgroundColor = [UIColor blackColor]; self.title = @"调整裁剪";
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"确定"
@@ -66,35 +78,95 @@ static NSArray *FUColorPalette(void) {
     _scroll = [[UIScrollView alloc] initWithFrame:self.view.bounds];
     _scroll.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     _scroll.delegate = self; _scroll.bounces = NO; _scroll.backgroundColor = [UIColor blackColor];
+    _scroll.showsVerticalScrollIndicator = NO; _scroll.showsHorizontalScrollIndicator = NO;
+    if (@available(iOS 11.0, *)) _scroll.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
     [self.view addSubview:_scroll];
-    _imgView = [[UIImageView alloc] initWithImage:_image]; _imgView.contentMode = UIViewContentModeScaleAspectFit;
+    _imgView = [[UIImageView alloc] initWithImage:_image];
+    _imgView.contentMode = UIViewContentModeScaleAspectFit;
     [_scroll addSubview:_imgView];
-    CGFloat side = MIN(self.view.bounds.size.width, self.view.bounds.size.height) - 40;
+    // 取景框覆盖层（不接收触摸，触摸要透给下面的 scroll 拖动图片）
+    UIView *ov = [[UIView alloc] initWithFrame:self.view.bounds];
+    ov.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    ov.userInteractionEnabled = NO; ov.backgroundColor = [UIColor clearColor];
+    _maskLayer = [CAShapeLayer layer];
+    _maskLayer.fillRule  = kCAFillRuleEvenOdd;                       // 外框挖空中间的取景框
+    _maskLayer.fillColor = [UIColor colorWithWhite:0.0 alpha:0.62].CGColor;
+    [ov.layer addSublayer:_maskLayer];
+    _frameLayer = [CAShapeLayer layer];
+    _frameLayer.fillColor   = [UIColor clearColor].CGColor;
+    _frameLayer.strokeColor = [UIColor colorWithWhite:1.0 alpha:0.9].CGColor;
+    _frameLayer.lineWidth   = 2.0f;
+    [ov.layer addSublayer:_frameLayer];
+    [self.view addSubview:ov];
+    UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 40)];
+    hint.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    hint.tag = 9917; hint.numberOfLines = 0; hint.textAlignment = NSTextAlignmentCenter;
+    hint.font = [UIFont systemFontOfSize:12]; hint.textColor = [UIColor colorWithWhite:1.0 alpha:0.85];
+    hint.text = @"拖动 / 双指缩放到框中 —— 白色方框内就是图标内容";
+    [self.view addSubview:hint];
+}
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    CGFloat W = self.view.bounds.size.width, H = self.view.bounds.size.height;
+    UILabel *hint = [self.view viewWithTag:9917];
+    hint.frame = CGRectMake(0, H - 52.0f, W, 40);
+    CGFloat side = [self fuCropSide];
+    CGRect box = CGRectMake((W - side)/2.0f, (H - side)/2.0f, side, side);
+    UIBezierPath *outer = [UIBezierPath bezierPathWithRect:CGRectMake(0, 0, W, H)];
+    [outer appendPath:[UIBezierPath bezierPathWithRect:box]];
+    _maskLayer.frame  = self.view.bounds; _maskLayer.path  = outer.CGPath;
+    _frameLayer.frame = self.view.bounds; _frameLayer.path = [UIBezierPath bezierPathWithRect:box].CGPath;
+    if (!_didInit && W > 1 && H > 1) { _didInit = YES; [self fuApplyInitialZoom]; }
+}
+- (void)fuApplyInitialZoom {
+    CGFloat side = [self fuCropSide];
     CGFloat z = side / MIN(_image.size.width, _image.size.height);
-    _scroll.minimumZoomScale = z * 0.5; _scroll.maximumZoomScale = z * 4.0; _scroll.zoomScale = z;
-    [self layoutContent]; [self centerContent];
-}
-- (void)layoutContent {
-    CGFloat z = _scroll.zoomScale; CGSize s = CGSizeMake(_image.size.width * z, _image.size.height * z);
+    _scroll.minimumZoomScale = z * 0.5f; _scroll.maximumZoomScale = z * 6.0f;
+    _scroll.zoomScale = z;
+    CGSize s = CGSizeMake(_image.size.width * z, _image.size.height * z);
     _imgView.frame = CGRectMake(0, 0, s.width, s.height); _scroll.contentSize = s;
+    [self fuCenterContent];
 }
-- (void)centerContent {
-    CGFloat side = MIN(self.view.bounds.size.width, self.view.bounds.size.height) - 40;
-    _scroll.contentOffset = CGPointMake(MAX(0, (_scroll.contentSize.width - side)/2.0),
-                                        MAX(0, (_scroll.contentSize.height - side)/2.0));
+// 用 contentInset 让「内容中心」能滚到「取景框中心」（两者都在屏幕正中）
+- (void)fuCenterContent {
+    CGFloat W = self.view.bounds.size.width, H = self.view.bounds.size.height;
+    CGFloat side = [self fuCropSide];
+    CGFloat ix = MAX(0, (W - side)/2.0f), iy = MAX(0, (H - side)/2.0f);
+    _scroll.contentInset = UIEdgeInsetsMake(iy, ix, iy, ix);
+    CGFloat ox = _scroll.contentSize.width  / 2.0f - W / 2.0f;
+    CGFloat oy = _scroll.contentSize.height / 2.0f - H / 2.0f;
+    CGFloat minX = -ix, maxX = _scroll.contentSize.width  - W + ix;
+    CGFloat minY = -iy, maxY = _scroll.contentSize.height - H + iy;
+    if (maxX < minX) maxX = minX;
+    if (maxY < minY) maxY = minY;
+    ox = MAX(minX, MIN(maxX, ox)); oy = MAX(minY, MIN(maxY, oy));
+    _scroll.contentOffset = CGPointMake(ox, oy);
 }
 - (UIView *)viewForZoomingInScrollView:(UIScrollView *)sv { return _imgView; }
-- (void)scrollViewDidZoom:(UIScrollView *)sv { [self centerContent]; }
+- (void)scrollViewDidZoom:(UIScrollView *)sv {
+    CGSize s = CGSizeMake(_imgView.frame.size.width, _imgView.frame.size.height);
+    if (s.width > 1 && s.height > 1) _scroll.contentSize = s;
+    [self fuCenterContent];
+}
 - (void)done {
-    CGFloat side = MIN(self.view.bounds.size.width, self.view.bounds.size.height) - 40;
-    CGFloat z = _scroll.zoomScale;
-    CGRect imgRect = CGRectMake(_scroll.contentOffset.x / z, _scroll.contentOffset.y / z, side / z, side / z);
+    CGFloat side = [self fuCropSide];
+    CGFloat z = _scroll.zoomScale; if (z <= 0.001f) z = 1.0f;
+    CGFloat W = self.view.bounds.size.width, H = self.view.bounds.size.height;
+    if (W < 2 || H < 2) { [self cancel]; return; }
+    // 取景框左上角(屏幕坐标) -> 内容坐标 -> 原图像素坐标
+    CGFloat cx = _scroll.contentOffset.x + (W - side)/2.0f;
+    CGFloat cy = _scroll.contentOffset.y + (H - side)/2.0f;
+    CGRect imgRect = CGRectMake(cx / z, cy / z, side / z, side / z);
+    if (imgRect.size.width  > _image.size.width)  imgRect.size.width  = _image.size.width;
+    if (imgRect.size.height > _image.size.height) imgRect.size.height = _image.size.height;
+    imgRect.origin.x = MAX(0, MIN(_image.size.width  - imgRect.size.width,  imgRect.origin.x));
+    imgRect.origin.y = MAX(0, MIN(_image.size.height - imgRect.size.height, imgRect.origin.y));
     CGImageRef cg = CGImageCreateWithImageInRect(_image.CGImage, imgRect);
     UIImage *sq = cg ? [UIImage imageWithCGImage:cg] : nil; if (cg) CGImageRelease(cg);
     NSData *out = nil;
     if (sq) {
-        CGFloat max = 120.0; CGFloat s = MIN(1.0, max / MAX(sq.size.width, sq.size.height));
-        CGSize ts = CGSizeMake(sq.size.width * s, sq.size.height * s);
+        CGFloat max = 144.0; CGFloat s = MIN(1.0, max / MAX(sq.size.width, sq.size.height));
+        CGSize ts = CGSizeMake(MAX(1.0, sq.size.width * s), MAX(1.0, sq.size.height * s));
         UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:ts];
         UIImage *small = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx){ [sq drawInRect:CGRectMake(0,0,ts.width,ts.height)]; }];
         out = UIImagePNGRepresentation(small);
@@ -539,12 +611,15 @@ static NSArray *FUColorPalette(void) {
         (__bridge CFPropertyListRef)t, (__bridge CFStringRef)kFUSuite);
     else CFPreferencesSetAppValue((__bridge CFStringRef)kFUBallTitle,
         (__bridge CFPropertyListRef)@"URL", (__bridge CFStringRef)kFUSuite);
-    if (_iconData) CFPreferencesSetAppValue((__bridge CFStringRef)kFUBallIcon,
-        (__bridge CFPropertyListRef)_iconData, (__bridge CFStringRef)kFUSuite);
-    else CFPreferencesSetAppValue((__bridge CFStringRef)kFUBallIcon, NULL, (__bridge CFStringRef)kFUSuite);
-    if (_colorHex.length) CFPreferencesSetAppValue((__bridge CFStringRef)kFUBallColor,
-        (__bridge CFPropertyListRef)_colorHex, (__bridge CFStringRef)kFUSuite);
-    else CFPreferencesSetAppValue((__bridge CFStringRef)kFUBallColor, NULL, (__bridge CFStringRef)kFUSuite);
+    // v1.3.8 修 05：**不要用 NULL「删键」**！
+    // 设置页跑在「设置」进程里，而球在 SpringBoard 进程里画。删键后 SpringBoard 的 CFPreferences
+    // 缓存里可能仍留着旧值 → 症状正是「删了图标，球上照片还在 / 设了颜色没变化」。
+    // 改成写「空值」：图标写空 NSData、颜色写空字符串，tweak 侧读到 length==0 即视为「未设置」，
+    // 任何缓存状态下都能立刻刷新。
+    CFPreferencesSetAppValue((__bridge CFStringRef)kFUBallIcon,
+        (__bridge CFPropertyListRef)(_iconData.length ? _iconData : [NSData data]), (__bridge CFStringRef)kFUSuite);
+    CFPreferencesSetAppValue((__bridge CFStringRef)kFUBallColor,
+        (__bridge CFPropertyListRef)(_colorHex.length ? _colorHex : @""), (__bridge CFStringRef)kFUSuite);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
     notify_post("com.yzdmm.floatingurl/settingsChanged");
     [self.navigationController popViewControllerAnimated:YES];
@@ -552,60 +627,338 @@ static NSArray *FUColorPalette(void) {
 - (void)cancel { [self.navigationController popViewControllerAnimated:YES]; }
 @end
 
+#pragma mark - 批量添加（多行粘贴）
+// v1.3.8 修 04：一次粘贴多行生成多条入口。每行：只写网址，或「名称 网址」
+// （名称与网址之间用 空格 / 逗号 / 竖线 分隔）。
+@interface FUBulkAddController : UIViewController
+@property (nonatomic, copy) void (^onDone)(NSArray *items);   // @[@{@"url":..,@"name":..}]
+@end
+@implementation FUBulkAddController
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.title = @"批量添加";
+    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"取消"
+        style:UIBarButtonItemStylePlain target:self action:@selector(cancel)];
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"导入"
+        style:UIBarButtonItemStyleDone target:self action:@selector(doImport)];
+    CGFloat W = self.view.bounds.size.width, H = self.view.bounds.size.height;
+    UILabel *tip = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, W - 32, 34)];
+    tip.numberOfLines = 0; tip.font = [UIFont systemFontOfSize:12];
+    tip.textColor = [UIColor secondaryLabelColor];
+    tip.text = @"每行一条：只写网址，或「名称 网址」（名称与网址之间用空格 / 逗号 / 竖线分隔）。一次最多 48 条。";
+    [self.view addSubview:tip];
+    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(16, 52, W - 32, H - 76)];
+    tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    tv.tag = 9911; tv.font = [UIFont systemFontOfSize:13];
+    tv.layer.borderColor = [UIColor separatorColor].CGColor; tv.layer.borderWidth = 1.0f;
+    tv.layer.cornerRadius = 10.0f;
+    tv.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    tv.autocorrectionType = UITextAutocorrectionTypeNo;
+    tv.keyboardType = UIKeyboardTypeURL;
+    [self.view addSubview:tv];
+    [tv becomeFirstResponder];
+}
+- (void)cancel { [self dismissViewControllerAnimated:YES completion:nil]; }
+- (void)doImport {
+    UITextView *tv = [self.view viewWithTag:9911];
+    NSArray *lines = [tv.text componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+    NSMutableArray *out = [NSMutableArray array];
+    NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+    NSCharacterSet *sep = [NSCharacterSet characterSetWithCharactersInString:@" \t,，|"];
+    for (NSString *ln in lines) {
+        NSString *s = [ln stringByTrimmingCharactersInSet:ws];
+        if (!s.length) continue;
+        NSString *name = nil, *url = s;
+        NSRange rg = [s rangeOfCharacterFromSet:sep];
+        if (rg.location != NSNotFound) {
+            NSString *a = [[s substringToIndex:rg.location] stringByTrimmingCharactersInSet:ws];
+            NSString *b = [[s substringFromIndex:rg.location + 1] stringByTrimmingCharactersInSet:ws];
+            if (b.length) { name = a; url = b; }
+        }
+        if (!url.length) continue;
+        if (name.length > 8) name = [name substringToIndex:8];
+        NSMutableDictionary *d = [NSMutableDictionary dictionary];
+        d[@"url"] = url;
+        if (name.length) d[@"name"] = name;
+        [out addObject:d];
+    }
+    if (_onDone) _onDone(out);
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+@end
+
 #pragma mark - URI 列表控制器
-@interface FUUrlListController : UIViewController <UITableViewDelegate, UITableViewDataSource>
-@property (nonatomic, strong) NSMutableArray *entries;
-@property (nonatomic, strong) UITableView *tv;
+@interface FUUrlListController : UIViewController <UITableViewDelegate, UITableViewDataSource, UISearchBarDelegate>
+@property (nonatomic, strong) NSMutableArray *entries;   // 全部条目
+@property (nonatomic, strong) NSMutableArray *shown;     // 过滤后要显示的下标（NSNumber）
+@property (nonatomic, strong) NSMutableSet   *picked;    // 多选选中的下标（NSNumber）
+@property (nonatomic, strong) UITableView    *tv;
+@property (nonatomic, strong) UISearchBar    *search;
+@property (nonatomic, strong) UIView         *bar;
+@property (nonatomic, strong) UIButton       *bSearch, *bFilter, *bAll, *bBulk;
+@property (nonatomic, assign) BOOL           searchVisible, multiSelect;
+@property (nonatomic, assign) NSInteger      filterMode; // 0全部 1没设图标 2没填名称 3网址重复
 @end
 @implementation FUUrlListController
 - (void)loadEntries {
     CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUURLs, (__bridge CFStringRef)kFUSuite);
     NSArray *arr = nil; if (r) { arr = (__bridge_transfer NSArray *)r; if (![arr isKindOfClass:[NSArray class]]) arr = nil; }
-    _entries = arr.count ? [arr mutableCopy] : [NSMutableArray array];
+    _entries = (arr.count ? [arr mutableCopy] : [NSMutableArray array]);
+    if (!_picked) _picked = [NSMutableSet set];
+    if (!_shown)  _shown  = [NSMutableArray array];
+}
+- (void)saveEntries {
+    CFPreferencesSetAppValue((__bridge CFStringRef)kFUURLs, (__bridge CFPropertyListRef)_entries, (__bridge CFStringRef)kFUSuite);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
+    notify_post("com.yzdmm.floatingurl/settingsChanged");
+}
+// v1.3.8 修 04：标题与「添加」按钮始终显示真实数量。
+// （以前只在首次 viewDidLoad 里算一次，添加/编辑返回后数字不动，看着像没加上。）
+- (void)refreshCount {
+    if (_multiSelect) return;   // 多选时右上角是「删除(N)」
+    NSUInteger cnt = _entries.count;
+    self.title = [NSString stringWithFormat:@"快捷URI (%lu/%ld)", (unsigned long)cnt, (long)kFUMaxEntries];
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
+        initWithTitle:[NSString stringWithFormat:@"添加(%lu/%ld)", (unsigned long)cnt, (long)kFUMaxEntries]
+                style:UIBarButtonItemStylePlain target:self action:@selector(addEntry)];
+    self.navigationItem.rightBarButtonItem.enabled = (cnt < (NSUInteger)kFUMaxEntries);
+}
+- (void)applyFilter {
+    NSString *q = [_search.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSInteger i = 0; i < (NSInteger)_entries.count; i++) {
+        NSDictionary *e = _entries[i]; if (![e isKindOfClass:[NSDictionary class]]) continue;
+        NSString *u  = [e[kFUEntryURL] isKindOfClass:[NSString class]] ? e[kFUEntryURL] : @"";
+        NSString *ch = [e[kFUEntryChar] isKindOfClass:[NSString class]] ? e[kFUEntryChar] : @"";
+        if (!ch.length && [e[kFUEntryLetter] isKindOfClass:[NSString class]]) ch = e[kFUEntryLetter];
+        BOOL keep = YES;
+        if (q.length) {
+            keep = ([u rangeOfString:q options:NSCaseInsensitiveSearch].location != NSNotFound) ||
+                   ([ch rangeOfString:q options:NSCaseInsensitiveSearch].location != NSNotFound);
+        }
+        if (keep && _filterMode != 0) {
+            if (_filterMode == 1) {
+                NSData *ic = [e[kFUEntryIcon] isKindOfClass:[NSData class]] ? e[kFUEntryIcon] : nil;
+                keep = !(ic.length);
+            } else if (_filterMode == 2) {
+                keep = (ch.length == 0);
+            } else if (_filterMode == 3) {
+                NSInteger dup = 0;
+                for (NSDictionary *o in _entries) {
+                    if (![o isKindOfClass:[NSDictionary class]]) continue;
+                    if ([o[kFUEntryURL] isEqual:u]) dup++;
+                }
+                keep = (dup > 1);
+            }
+        }
+        if (keep) [out addObject:@(i)];
+    }
+    _shown = out;
+    [_tv reloadData];
+    [self updateButtons];
 }
 - (void)viewDidLoad {
-    [super viewDidLoad]; self.title = @"快捷URI"; [self loadEntries];
+    [super viewDidLoad];
+    [self loadEntries];
+    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    CGFloat W = self.view.bounds.size.width;
+    // ---- 一排功能按钮（v1.3.8 修 04）----
+    _bar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, W, 46)];
+    _bar.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    _bar.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    [self.view addSubview:_bar];
+    NSArray *titles = @[@"🔍 搜索", @"⛃ 筛选", @"☑ 全选", @"＋ 批量"];
+    NSArray *sels   = @[@"toggleSearch", @"showFilter", @"toggleAll", @"bulkAdd"];
+    CGFloat bw = W / 4.0f;
+    for (NSInteger i = 0; i < 4; i++) {
+        UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+        b.frame = CGRectMake(bw * i, 0, bw, 46);
+        b.titleLabel.font = [UIFont systemFontOfSize:13];
+        [b setTitle:titles[i] forState:UIControlStateNormal];
+        [b addTarget:self action:NSSelectorFromString(sels[i]) forControlEvents:UIControlEventTouchUpInside];
+        [_bar addSubview:b];
+        if (i == 0) _bSearch = b; else if (i == 1) _bFilter = b;
+        else if (i == 2) _bAll = b; else _bBulk = b;
+    }
+    UIView *line = [[UIView alloc] initWithFrame:CGRectMake(0, 45.5f, W, 0.5f)];
+    line.backgroundColor = [UIColor separatorColor]; line.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [_bar addSubview:line];
+    _search = [[UISearchBar alloc] initWithFrame:CGRectMake(0, 46, W, 0)];
+    _search.delegate = self; _search.placeholder = @"搜索网址 / 名称";
+    _search.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    _search.hidden = YES; [self.view addSubview:_search];
     _tv = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStylePlain];
     _tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    _tv.delegate = self; _tv.dataSource = self; [self.view addSubview:_tv];
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
-        initWithTitle:[NSString stringWithFormat:@"添加(%lu/%ld)", (unsigned long)_entries.count, (long)kFUMaxEntries]
-                style:UIBarButtonItemStylePlain target:self action:@selector(addEntry)];
-    self.navigationItem.rightBarButtonItem.enabled = (_entries.count < kFUMaxEntries);
+    _tv.delegate = self; _tv.dataSource = self;
+    [self.view addSubview:_tv];
+    [self layoutParts];
+    [self refreshCount];
+    [self applyFilter];
 }
+- (void)layoutParts {
+    CGFloat W = self.view.bounds.size.width, H = self.view.bounds.size.height;
+    _bar.frame = CGRectMake(0, 0, W, 46);
+    CGFloat y = 46;
+    if (_searchVisible) { _search.hidden = NO; _search.frame = CGRectMake(0, y, W, 44); y += 44; }
+    else { _search.hidden = YES; _search.frame = CGRectMake(0, y, W, 0); }
+    _tv.frame = CGRectMake(0, y, W, MAX(0.0f, H - y));
+}
+- (void)viewDidLayoutSubviews { [super viewDidLayoutSubviews]; [self layoutParts]; }
 - (void)viewWillAppear:(BOOL)animated {
-    [super viewWillAppear:animated]; [self loadEntries];
-    self.navigationItem.rightBarButtonItem.enabled = (_entries.count < kFUMaxEntries); [_tv reloadData];
+    [super viewWillAppear:animated];
+    [self loadEntries];
+    [self refreshCount];
+    [self applyFilter];
+}
+// ---- 一排按钮的动作 ----
+- (void)toggleSearch {
+    _searchVisible = !_searchVisible;
+    if (_searchVisible) [_search becomeFirstResponder];
+    else { _search.text = @""; [_search resignFirstResponder]; [self applyFilter]; }
+    [self layoutParts];
+}
+- (void)showFilter {
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"筛选" message:nil
+        preferredStyle:UIAlertControllerStyleActionSheet];
+    NSArray *names = @[@"全部", @"没设图标", @"没填名称", @"网址重复"];
+    __weak FUUrlListController *ws = self;
+    for (NSInteger i = 0; i < (NSInteger)names.count; i++) {
+        NSString *t = (self.filterMode == i) ? [NSString stringWithFormat:@"✓ %@", names[i]] : names[i];
+        [a addAction:[UIAlertAction actionWithTitle:t style:UIAlertActionStyleDefault handler:^(UIAlertAction *act){
+            ws.filterMode = i;
+            [ws applyFilter];
+        }]];
+    }
+    [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    a.popoverPresentationController.sourceView = _bFilter;
+    a.popoverPresentationController.sourceRect = _bFilter.bounds;
+    [self presentViewController:a animated:YES completion:nil];
+}
+- (void)toggleAll {
+    if (!_multiSelect) { _multiSelect = YES; [_picked removeAllObjects]; }
+    BOOL allIn = (_shown.count > 0);
+    for (NSNumber *n in _shown) { if (![_picked containsObject:n]) { allIn = NO; break; } }
+    if (allIn) [_picked removeAllObjects];
+    else for (NSNumber *n in _shown) [_picked addObject:n];
+    [_tv reloadData];
+    [self updateButtons];
+    [self refreshCount];
+}
+- (void)bulkAdd {
+    if (_entries.count >= (NSUInteger)kFUMaxEntries) return;
+    FUBulkAddController *b = [[FUBulkAddController alloc] init];
+    __weak FUUrlListController *ws = self;
+    b.onDone = ^(NSArray *items) {
+        if (!items.count) return;
+        NSInteger space = kFUMaxEntries - (NSInteger)ws.entries.count;
+        if (space <= 0) return;
+        NSArray *use = (items.count > (NSUInteger)space) ? [items subarrayWithRange:NSMakeRange(0, space)] : items;
+        for (NSDictionary *d in use) {
+            NSMutableDictionary *e = [NSMutableDictionary dictionary];
+            e[kFUEntryURL] = d[@"url"] ?: @"";
+            NSString *nm = d[@"name"];
+            if (nm.length) e[kFUEntryChar] = nm;
+            [ws.entries addObject:e];
+        }
+        [ws saveEntries];
+        [ws refreshCount];
+        [ws applyFilter];
+    };
+    UINavigationController *nc = [[UINavigationController alloc] initWithRootViewController:b];
+    [self presentViewController:nc animated:YES completion:nil];
+}
+- (void)deletePicked {
+    if (!_picked.count) return;
+    NSMutableIndexSet *kill = [NSMutableIndexSet indexSet];
+    for (NSNumber *n in _picked) {
+        NSInteger i = n.integerValue;
+        if (i >= 0 && i < (NSInteger)_entries.count) [kill addIndex:(NSUInteger)i];
+    }
+    if (kill.count) [_entries removeObjectsAtIndexes:kill];
+    [_picked removeAllObjects];
+    _multiSelect = NO;
+    [self saveEntries];
+    [_tv reloadData];
+    [self refreshCount];
+    [self applyFilter];
+}
+- (void)exitMulti { _multiSelect = NO; [_picked removeAllObjects]; [_tv reloadData]; [self updateButtons]; [self refreshCount]; }
+- (void)updateButtons {
+    if (_multiSelect) {
+        [_bAll setTitle:[NSString stringWithFormat:@"☑ 已选 %lu", (unsigned long)_picked.count] forState:UIControlStateNormal];
+        self.navigationItem.title = [NSString stringWithFormat:@"多选 (%lu/%ld)", (unsigned long)_picked.count, (long)kFUMaxEntries];
+        self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
+            initWithTitle:[NSString stringWithFormat:@"删除(%lu)", (unsigned long)_picked.count]
+                    style:UIBarButtonItemStylePlain target:self action:@selector(deletePicked)];
+        self.navigationItem.rightBarButtonItem.tintColor = [UIColor systemRedColor];
+        self.navigationItem.rightBarButtonItem.enabled = (_picked.count > 0);
+        self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"退出多选"
+            style:UIBarButtonItemStylePlain target:self action:@selector(exitMulti)];
+    } else {
+        [_bAll setTitle:@"☑ 全选" forState:UIControlStateNormal];
+        self.navigationItem.leftBarButtonItem = nil;
+        [self refreshCount];
+    }
+    NSString *ft = (_filterMode == 0) ? @"⛃ 筛选" : [NSString stringWithFormat:@"⛃ 筛选·%@",
+        (@[@"全部", @"无图标", @"无名称", @"重复"])[_filterMode]];
+    [_bFilter setTitle:ft forState:UIControlStateNormal];
+    [_bFilter setTitleColor:(_filterMode ? [UIColor systemBlueColor] : [UIColor systemBlueColor])
+                  forState:UIControlStateNormal];
 }
 - (void)addEntry {
+    if (_multiSelect) return;
     FUUrlEditController *ed = [[FUUrlEditController alloc] init]; ed.entries = _entries; ed.index = -1;
     [self.navigationController pushViewController:ed animated:YES];
 }
-- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return _entries.count; }
+- (void)searchBar:(UISearchBar *)sb textDidChange:(NSString *)t { [self applyFilter]; }
+- (void)searchBarSearchButtonClicked:(UISearchBar *)sb { [sb resignFirstResponder]; }
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return _shown.count; }
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
     static NSString *cellId = @"FUUrlCell"; UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:cellId];
     if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:cellId];
-    NSDictionary *e = _entries[ip.row];
-    c.textLabel.text = [NSString stringWithFormat:@"%@ %@  %@", e[kFUEntryChar] ?: @"", e[kFUEntryLetter] ?: @"", e[kFUEntryURL] ?: @""];
+    if (ip.row >= (NSInteger)_shown.count) return c;
+    NSInteger ei = [_shown[ip.row] integerValue];
+    if (ei < 0 || ei >= (NSInteger)_entries.count) return c;
+    NSDictionary *e = _entries[ei];
+    NSString *nm = [e[kFUEntryChar] isKindOfClass:[NSString class]] ? e[kFUEntryChar] : @"";
+    if (!nm.length && [e[kFUEntryLetter] isKindOfClass:[NSString class]]) nm = e[kFUEntryLetter];
+    NSString *u = [e[kFUEntryURL] isKindOfClass:[NSString class]] ? e[kFUEntryURL] : @"";
+    c.textLabel.text = [NSString stringWithFormat:@"%ld. %@  %@", (long)(ip.row + 1), nm, u];
     c.textLabel.font = [UIFont systemFontOfSize:13]; c.textLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    c.detailTextLabel.text = e[kFUEntryURL] ?: @""; c.detailTextLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    NSData *icon = e[kFUEntryIcon]; c.imageView.image = icon.length ? [UIImage imageWithData:icon] : nil;
-    c.accessoryType = UITableViewCellAccessoryDisclosureIndicator; return c;
+    c.detailTextLabel.text = u; c.detailTextLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    NSData *icon = [e[kFUEntryIcon] isKindOfClass:[NSData class]] ? e[kFUEntryIcon] : nil;
+    c.imageView.image = icon.length ? [UIImage imageWithData:icon] : nil;
+    if (_multiSelect)
+        c.accessoryType = [_picked containsObject:@(ei)] ? UITableViewCellAccessoryCheckmark
+                                                         : UITableViewCellAccessoryNone;
+    else
+        c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    return c;
 }
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
-    FUUrlEditController *ed = [[FUUrlEditController alloc] init]; ed.entries = _entries; ed.index = ip.row;
+    if (ip.row >= (NSInteger)_shown.count) return;
+    NSInteger ei = [_shown[ip.row] integerValue];
+    if (_multiSelect) {
+        NSNumber *n = @(ei);
+        if ([_picked containsObject:n]) [_picked removeObject:n]; else [_picked addObject:n];
+        [tv reloadRowsAtIndexPaths:@[ip] withRowAnimation:UITableViewRowAnimationNone];
+        [self updateButtons];
+        return;
+    }
+    FUUrlEditController *ed = [[FUUrlEditController alloc] init]; ed.entries = _entries; ed.index = ei;
     [self.navigationController pushViewController:ed animated:YES];
 }
 - (void)tableView:(UITableView *)tv commitEditingStyle:(UITableViewCellEditingStyle)st forRowAtIndexPath:(NSIndexPath *)ip {
-    if (st == UITableViewCellEditingStyleDelete) {
-        [_entries removeObjectAtIndex:ip.row];
-        CFPreferencesSetAppValue((__bridge CFStringRef)kFUURLs, (__bridge CFPropertyListRef)_entries, (__bridge CFStringRef)kFUSuite);
-        CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
-        notify_post("com.yzdmm.floatingurl/settingsChanged");
-        [tv deleteRowsAtIndexPaths:@[ip] withRowAnimation:UITableViewRowAnimationFade];
-        self.navigationItem.rightBarButtonItem.enabled = (_entries.count < kFUMaxEntries);
-    }
+    if (st != UITableViewCellEditingStyleDelete) return;
+    if (ip.row >= (NSInteger)_shown.count) return;
+    NSInteger ei = [_shown[ip.row] integerValue];
+    if (ei < 0 || ei >= (NSInteger)_entries.count) return;
+    [_entries removeObjectAtIndex:ei];
+    [self saveEntries];
+    [self refreshCount];
+    [self applyFilter];
 }
 @end
 
@@ -873,6 +1226,28 @@ static NSArray *FUColorPalette(void) {
 @end
 @implementation FUPreviewView
 - (void)refresh { [self setNeedsDisplay]; }
+// v1.3.8 修 02/06：预览与 tweak 内 openFan 用**同一套**公式（朝向按球位置、角度自适应收缩）。
+- (BOOL)fuSpanOK:(CGFloat)sp center:(CGFloat)centerA radii:(const CGFloat *)R caps:(const NSInteger *)caps
+            icon:(CGFloat)isz rect:(CGRect)sc ball:(CGPoint)c checkFit:(BOOL)checkFit {
+    for (int layer = 0; layer < 3; layer++) {
+        NSInteger cnt = caps[layer]; if (cnt <= 0) continue;
+        CGFloat sp2 = (cnt > 1) ? sp / (CGFloat)(cnt - 1) : 0.0f;
+        if (cnt > 1) {
+            CGFloat arcStep = sp2 * (CGFloat)M_PI / 180.0f * R[layer];
+            if (arcStep < isz * 1.02f) return NO;
+        }
+        if (!checkFit) continue;
+        CGFloat a0 = centerA - sp / 2.0f;
+        for (NSInteger k = 0; k < cnt; k++) {
+            CGFloat a = (cnt > 1) ? (a0 + sp2 * (CGFloat)k) : centerA;
+            CGFloat rad = a * (CGFloat)M_PI / 180.0f;
+            CGFloat x = c.x + R[layer] * cosf(rad), y = c.y + R[layer] * sinf(rad);
+            if (x - isz/2.0f < 6.0f || x + isz/2.0f > sc.size.width  - 6.0f ||
+                y - isz/2.0f < 6.0f || y + isz/2.0f > sc.size.height - 6.0f) return NO;
+        }
+    }
+    return YES;
+}
 - (void)drawRect:(CGRect)rect {
     CGContextRef ctx = UIGraphicsGetCurrentContext();
     CGRect s = self.bounds;
@@ -899,7 +1274,9 @@ static NSArray *FUColorPalette(void) {
     R[0] = (bs/2.0f + isz/2.0f + _iconGap * k) * kscale;
     R[1] = R[0] + stepR * kscale;
     R[2] = R[1] + stepR * kscale;
-    NSInteger n = (NSInteger)_entries.count;
+    // v1.3.8 修 06：预览固定按「最大 48 个」渲染（真实入口优先，不足的用序号占位），
+    // 一眼就能看出满配时的密度/半径/朝向合不合适，画布也不会大片留空。
+    NSInteger n = 48;
     // v1.3.3：每层数量可指定（0=自动），与 tweak 内 openFan 同套逻辑
     NSInteger want[3] = { _layer1, _layer2, _layer3 };
     NSInteger caps[3] = { 0, 0, 0 };
@@ -918,15 +1295,23 @@ static NSArray *FUColorPalette(void) {
         if (target < 0) target = 2;
         CGFloat arc = R[target] * spanMax * (CGFloat)M_PI / 180.0f;
         NSInteger autoCap = MAX(1, (NSInteger)floor(arc / (isz + gap)));
-        if (autoCap > 8) autoCap = 8;
+        if (autoCap > 24) autoCap = 24;   // v1.3.8：与 tweak 内一致（原来预览卡在 8）
         NSInteger space = n - placed;
         NSInteger add = MIN(autoCap, space);
         caps[target] += add; placed += add;
         li = target + 1;
         if (li >= 3 && placed < n) { caps[2] += (n - placed); placed = n; }
     }
-    CGFloat centerA = (_side != 1) ? 180.0f : 0.0f;    // 屏坐标：0°右 90°下 180°左 270°上
-    CGFloat span = spanMax;                             // v1.3.3：预览用满角度（贴边平移在真机处理）
+    // v1.3.8 修 02：朝向 = 球心指向画布中心（与真机 fuAngleToScreenCenter: 同源）
+    CGFloat centerA = atan2f((s.size.height/2.0f) - c.y, (s.size.width/2.0f) - c.x) * 180.0f / (CGFloat)M_PI;
+    // v1.3.8 修 02：角度自适应收缩，保证预览里图标不会画出画布（真机同一套逻辑）
+    CGFloat span = spanMax;
+    while (span > 45.0f) {
+        if ([self fuSpanOK:span center:centerA radii:R caps:caps icon:isz rect:s ball:c checkFit:YES]) break;
+        CGFloat next = span - 5.0f;
+        if (![self fuSpanOK:next center:centerA radii:R caps:caps icon:isz rect:s ball:c checkFit:NO]) break;
+        span = next;
+    }
     // 圈层参考弧
     CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:1.0 alpha:0.13].CGColor);
     CGContextSetLineWidth(ctx, 1.0f);
@@ -939,22 +1324,31 @@ static NSArray *FUColorPalette(void) {
     [self fuCircleAt:c size:bs img:nil ch:@"URL" fs:bs*0.24f glass:YES];
     // 快捷图标：有几个排几个，第 1 层排满溢到第 2、3 层
     placed = 0;   // 复用上方的 placed（cap 分配已完成，这里重置为绘制起点）
+    NSInteger real = (NSInteger)_entries.count;
     for (NSInteger layer = 0; layer < 3; layer++) {
         NSInteger cnt = caps[layer]; if (cnt <= 0) continue;
         CGFloat a0 = centerA - span/2.0f, sp2 = (cnt > 1) ? span/(CGFloat)(cnt-1) : 0.0f;
         for (NSInteger i2 = 0; i2 < cnt; i2++) {
             if (placed >= n) break;
-            NSDictionary *e = _entries[placed]; placed++;
+            NSDictionary *e = (placed < real) ? _entries[placed] : nil;   // 超出真实条目的用序号占位
+            NSInteger slot = placed; placed++;
             CGFloat a = (cnt > 1) ? (a0 + sp2*(CGFloat)i2) : centerA;
             CGFloat rad = a * M_PI / 180.0;
             CGPoint p = CGPointMake(c.x + R[layer]*cos(rad), c.y + R[layer]*sin(rad));
             NSData *ic = e[@"icon"];
             UIImage *img = ([ic isKindOfClass:[NSData class]] && ic.length) ? [UIImage imageWithData:ic] : nil;
             NSString *ch = e[@"char"] ?: @"";
+            if (!ch.length) ch = e[@"letter"] ?: @"";
+            if (!ch.length && !img) ch = [NSString stringWithFormat:@"%ld", (long)(slot + 1)];
             CGFloat fs = isz * 0.42f; if (ch.length >= 3) fs = isz * 0.26f; else if (ch.length == 2) fs = isz * 0.32f;
             [self fuCircleAt:p size:isz img:img ch:ch fs:fs glass:NO];
         }
     }
+    // 底部小字：说明当前实际条目数（预览固定按 48 个满配画）
+    NSString *cap = [NSString stringWithFormat:@"实际 %ld 个入口 · 预览按最多 48 个满配显示", (long)real];
+    [cap drawInRect:CGRectMake(8, s.size.height - 18.0f, s.size.width - 16.0f, 14.0f) withAttributes:@{
+        NSFontAttributeName: [UIFont systemFontOfSize:9],
+        NSForegroundColorAttributeName: [UIColor colorWithWhite:1.0 alpha:0.45]}];
 }
 - (void)fuFill:(UIColor *)col rect:(CGRect)r {
     CGContextSetFillColorWithColor(UIGraphicsGetCurrentContext(), col.CGColor);
@@ -1002,8 +1396,8 @@ static NSArray *FUColorPalette(void) {
 @property (nonatomic, strong) UILabel *ls, *lg, *lspan, *lsc;
 @property (nonatomic, strong) UISlider *l1s, *l2s, *l3s;   // v1.3.3 每层数量
 @property (nonatomic, strong) UILabel *ll1, *ll2, *ll3;
-@property (nonatomic, strong) UISlider *modeS;                 // v1.3.5 吸附模式（0=自动吸附 1=全屏固定）
-@property (nonatomic, strong) UILabel *lmode;                  // v1.3.5 模式说明
+@property (nonatomic, strong) UISegmentedControl *modeSeg;   // v1.3.8 吸附模式（0=自动吸附 1=全屏固定）
+@property (nonatomic, strong) UILabel *lmode;                  // 模式说明
 @end
 @implementation FULayoutController
 - (CGFloat)prefFloat:(NSString *)key dft:(CGFloat)d {
@@ -1049,15 +1443,17 @@ static NSArray *FUColorPalette(void) {
     self.title = @"布局调节";
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"恢复默认"
         style:UIBarButtonItemStylePlain target:self action:@selector(reset)];
-    CGFloat w = self.view.bounds.size.width;
+    CGFloat w = self.view.bounds.size.width, H = self.view.bounds.size.height;
     _scroll = [[UIScrollView alloc] initWithFrame:self.view.bounds];
     _scroll.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    _scroll.alwaysBounceVertical = YES;
     [self.view addSubview:_scroll];
-    __block CGFloat y = 16;
-    // ---- 预览画布（仅展示扇形排列，尺寸缩小）----
-    CGFloat pw = w - 32;
-    _preview = [[FUPreviewView alloc] initWithFrame:CGRectMake(16, y, pw, pw * 1.5f)];
-    _preview.layer.cornerRadius = 18; _preview.clipsToBounds = YES;
+    // ---- v1.3.8 修 06：预览改矮（按屏高自适应，最多占 1/3 屏），保证下面的调节滑杆也在一屏内。
+    //      以前是 pw*1.5（约 540pt），把整页调节项全部顶到第二屏去了。----
+    CGFloat y = 10, pw = w - 32;
+    CGFloat ph = MIN(pw * 1.06f, H * 0.33f);
+    _preview = [[FUPreviewView alloc] initWithFrame:CGRectMake(16, y, pw, ph)];
+    _preview.layer.cornerRadius = 14; _preview.clipsToBounds = YES;
     _preview.side     = (NSInteger)[self prefFloat:kFUSide dft:0];
     _preview.iconSize = [self prefFloat:kFUIconSize dft:40];
     _preview.iconGap  = [self prefFloat:kFUIconGap dft:56];
@@ -1067,71 +1463,74 @@ static NSArray *FUColorPalette(void) {
     _preview.layer2   = [self prefInt:kFULayer2Count dft:16];
     _preview.layer3   = [self prefInt:kFULayer3Count dft:24];
     [self loadEntriesForPreview];
-    [_scroll addSubview:_preview]; y += _preview.frame.size.height + 6;
-    UILabel *pvTip = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 30)];
-    pvTip.numberOfLines = 0; pvTip.font = [UIFont systemFontOfSize:11];
-    pvTip.textColor = [UIColor tertiaryLabelColor];
-    pvTip.text = @"▲ 实时预览：虚线 = 屏幕中心线。球在中心线左边 → 自动吸左边、扇形朝右展开；在右边 → 吸右边、扇形朝左展开。每层数量可单独设定（0=自动）。";
-    [pvTip sizeToFit]; [_scroll addSubview:pvTip]; y += pvTip.frame.size.height + 16;
-    // ---- v1.3.5 修 02：吸附模式（滑动选择，滑到哪个就是哪个模式）----
-    _lmode = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 20)];
-    _lmode.font = [UIFont systemFontOfSize:12]; _lmode.textColor = [UIColor secondaryLabelColor];
-    [_scroll addSubview:_lmode]; y += 22;
-    _modeS = [[UISlider alloc] initWithFrame:CGRectMake(16, y, w-32, 30)];
-    _modeS.minimumValue = 0; _modeS.maximumValue = 1;
-    _modeS.value = ([self prefInt:kFUSnapMode dft:0] == 1) ? 1.0f : 0.0f;
-    _modeS.continuous = NO; _modeS.tag = 9;
-    [_modeS addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
-    [_scroll addSubview:_modeS]; y += 36;
-    [self refreshModeLabel];
-    // ---- v1.3.5 修 03：真实运行时按「屏幕中心线」自动识别左右；这里只切换预览画哪一侧 ----
-    UILabel *sideLab = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 20)];
+    [_scroll addSubview:_preview]; y += ph + 12;
+    // ---- v1.3.8 修 03：吸附模式改成真正的「分段选择器」：选中的一边蓝色、另一边灰色。
+    //      以前是 0~1 的连续滑杆——手感怪，还能滑到 0.5 这种不左不右的中间值。----
+    UILabel *mLab = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 16)];
+    mLab.font = [UIFont systemFontOfSize:12]; mLab.textColor = [UIColor secondaryLabelColor];
+    mLab.text = @"吸附模式"; [_scroll addSubview:mLab]; y += 18;
+    _modeSeg = [[UISegmentedControl alloc] initWithItems:@[@"自动吸附", @"全屏固定"]];
+    _modeSeg.frame = CGRectMake(16, y, w - 32, 32);
+    _modeSeg.selectedSegmentIndex = ([self prefInt:kFUSnapMode dft:0] == 1) ? 1 : 0;
+    if (@available(iOS 13.0, *)) _modeSeg.selectedSegmentTintColor = [UIColor systemBlueColor];
+    [_modeSeg setTitleTextAttributes:@{NSForegroundColorAttributeName:[UIColor whiteColor]}
+                            forState:UIControlStateSelected];
+    [_modeSeg setTitleTextAttributes:@{NSForegroundColorAttributeName:[UIColor secondaryLabelColor]}
+                            forState:UIControlStateNormal];
+    [_modeSeg addTarget:self action:@selector(modeChanged:) forControlEvents:UIControlEventValueChanged];
+    [_scroll addSubview:_modeSeg]; y += 36;
+    _lmode = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 28)];
+    _lmode.numberOfLines = 0;
+    _lmode.font = [UIFont systemFontOfSize:11]; _lmode.textColor = [UIColor tertiaryLabelColor];
+    [_scroll addSubview:_lmode]; y += 30; [self refreshModeLabel];
+    // ---- 预览方位（真机按球的实际位置自动识别左右，这里只决定预览画哪一侧）----
+    UILabel *sideLab = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 16)];
     sideLab.font = [UIFont systemFontOfSize:12]; sideLab.textColor = [UIColor secondaryLabelColor];
-    sideLab.text = @"预览方位（真实运行时按屏幕中心线自动识别左右）";
-    [_scroll addSubview:sideLab]; y += 24;
+    sideLab.text = @"预览方位（真机按球的实际位置自动识别）";
+    [_scroll addSubview:sideLab]; y += 18;
     _sideSeg = [[UISegmentedControl alloc] initWithItems:@[@"球在右侧", @"球在左侧"]];
     _sideSeg.frame = CGRectMake(16, y, w-32, 32);
     CGFloat pbx = [self prefFloat:kFUBallX dft:0.92f];
     _sideSeg.selectedSegmentIndex = (pbx < 0.5f) ? 1 : 0;   // 跟随球当前实际位置
     _preview.side = _sideSeg.selectedSegmentIndex;
     [_sideSeg addTarget:self action:@selector(sideChanged:) forControlEvents:UIControlEventValueChanged];
-    [_scroll addSubview:_sideSeg]; y += 44;
-    // ---- 滑杆：图标大小 / 间隔 / 扇形角度 / 整体距离 ----
-    y += 4;
+    [_scroll addSubview:_sideSeg]; y += 38;
+    // ---- v1.3.8 修 06：滑杆改「两列紧凑布局」，一行放两根（以前一根占 52pt，8 根就是一屏多）----
+    CGFloat colGap = 12.0f, colW = (w - 32 - colGap) / 2.0f;
+    CGFloat x0 = 16, x1 = 16 + colW + colGap;
     CGFloat pis = [self prefFloat:kFUIconSize dft:40], pig = [self prefFloat:kFUIconGap dft:56];
     CGFloat psp = [self prefFloat:kFUFanSpan dft:180], psc = [self prefFloat:kFUFanScale dft:100];
-    _ss = [self mkSlider:CGRectMake(16, y, w-32, 52) min:24 max:64 val:pis label:@"图标大小" out:&y lout:&_ls];
-    _sg = [self mkSlider:CGRectMake(16, y, w-32, 52) min:12 max:120 val:pig label:@"图标间隔" out:&y lout:&_lg];
-    _span = [self mkSlider:CGRectMake(16, y, w-32, 52) min:60 max:180 val:psp label:@"扇形角度°" out:&y lout:&_lspan];
-    _sc = [self mkSlider:CGRectMake(16, y, w-32, 52) min:60 max:160 val:psc label:@"整体距离%" out:&y lout:&_lsc];
-    _ss.tag = 2; _sg.tag = 3; _span.tag = 4; _sc.tag = 5;
-    for (UISlider *sl in @[_ss, _sg, _span, _sc])
-        [sl addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
-    y += 8;
-    // ---- v1.3.3：每层数量（0=自动）----
-    UILabel *lLab = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 20)];
-    lLab.font = [UIFont systemFontOfSize:12]; lLab.textColor = [UIColor secondaryLabelColor];
-    lLab.text = @"每层数量（默认 8 / 16 / 24，合计最多 48；拖到 0 = 该层自动按弧长排）";
-    [_scroll addSubview:lLab]; y += 24;
+    _ss   = [self mkSliderAt:x0 width:colW y:y min:24 max:64  val:pis label:@"图标大小"  lout:&_ls];
+    _sg   = [self mkSliderAt:x1 width:colW y:y min:12 max:120 val:pig label:@"图标间隔"  lout:&_lg];
+    _ss.tag = 2; _sg.tag = 3; y += 46;
+    _span = [self mkSliderAt:x0 width:colW y:y min:60 max:180 val:psp label:@"扇形角度°" lout:&_lspan];
+    _sc   = [self mkSliderAt:x1 width:colW y:y min:60 max:160 val:psc label:@"整体距离%" lout:&_lsc];
+    _span.tag = 4; _sc.tag = 5; y += 48;
     NSInteger pl1 = [self prefInt:kFULayer1Count dft:8], pl2 = [self prefInt:kFULayer2Count dft:16], pl3 = [self prefInt:kFULayer3Count dft:24];
-    _l1s = [self mkSlider:CGRectMake(16, y, w-32, 52) min:0 max:8  val:pl1 label:@"第一层数量" out:&y lout:&_ll1];
-    _l2s = [self mkSlider:CGRectMake(16, y, w-32, 52) min:0 max:16 val:pl2 label:@"第二层数量" out:&y lout:&_ll2];
-    _l3s = [self mkSlider:CGRectMake(16, y, w-32, 52) min:0 max:24 val:pl3 label:@"第三层数量" out:&y lout:&_ll3];
-    _l1s.tag = 6; _l2s.tag = 7; _l3s.tag = 8;
-    for (UISlider *sl in @[_l1s, _l2s, _l3s])
+    _l1s  = [self mkSliderAt:x0 width:colW y:y min:0 max:8  val:pl1 label:@"第一层" lout:&_ll1];
+    _l2s  = [self mkSliderAt:x1 width:colW y:y min:0 max:16 val:pl2 label:@"第二层" lout:&_ll2];
+    _l1s.tag = 6; _l2s.tag = 7; y += 46;
+    _l3s  = [self mkSliderAt:x0 width:colW y:y min:0 max:24 val:pl3 label:@"第三层" lout:&_ll3];
+    _l3s.tag = 8; y += 48;
+    for (UISlider *sl in @[_ss, _sg, _span, _sc, _l1s, _l2s, _l3s])
         [sl addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
-    y += 12; _scroll.contentSize = CGSizeMake(w, y);
+    UILabel *foot = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 28)];
+    foot.numberOfLines = 0; foot.font = [UIFont systemFontOfSize:10];
+    foot.textColor = [UIColor tertiaryLabelColor];
+    foot.text = @"每层数量 0 = 该层按弧长自动排。改动立即生效，球的位置也会被记住。";
+    [_scroll addSubview:foot]; y += 30;
+    _scroll.contentSize = CGSizeMake(w, y);
 }
-- (UISlider *)mkSlider:(CGRect)f min:(CGFloat)mn max:(CGFloat)mx val:(CGFloat)v
-                label:(NSString *)lab out:(CGFloat *)y lout:(UILabel * __strong *)lout {
-    UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(16, f.origin.y, f.size.width, 20)];
-    l.font = [UIFont systemFontOfSize:12]; l.textColor = [UIColor secondaryLabelColor];
-    l.text = [NSString stringWithFormat:@"%@（当前 %.0f）", lab, v];
-    [_scroll addSubview:l]; *lout = l;
-    UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(16, f.origin.y + 22, f.size.width, 30)];
+// v1.3.8：两列紧凑版滑杆（标签 15pt + 滑杆 30pt）
+- (UISlider *)mkSliderAt:(CGFloat)x width:(CGFloat)cw y:(CGFloat)fy min:(CGFloat)mn max:(CGFloat)mx
+                     val:(CGFloat)v label:(NSString *)lab lout:(UILabel * __strong *)lout {
+    UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(x, fy, cw, 15)];
+    l.font = [UIFont systemFontOfSize:11]; l.textColor = [UIColor secondaryLabelColor];
+    l.text = [NSString stringWithFormat:@"%@ %.0f", lab, v];
+    [_scroll addSubview:l]; if (lout) *lout = l;
+    UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(x, fy + 15, cw, 28)];
     sl.minimumValue = mn; sl.maximumValue = mx; sl.value = v;
     [_scroll addSubview:sl];
-    *y = f.origin.y + 22 + 34 + 6;
     return sl;
 }
 // v1.3.5 修 03：这里只切「预览画哪一侧」（真实运行时球在哪半边就自动按哪半边算，
@@ -1141,9 +1540,15 @@ static NSArray *FUColorPalette(void) {
     [_preview refresh];
 }
 - (void)refreshModeLabel {
-    BOOL fix = (_modeS && _modeS.value >= 0.5f);
-    if (_lmode) _lmode.text = fix ? @"吸附模式：全屏固定（松手停在哪就停哪，不自动吸附）"
-                                  : @"吸附模式：自动吸附（按屏幕中心线：左半屏吸左、右半屏吸右）";
+    BOOL fix = (_modeSeg && _modeSeg.selectedSegmentIndex == 1);
+    if (_lmode) _lmode.text = fix
+        ? @"全屏固定：松手停在哪就停在哪，不自动吸附（扇形仍按球的位置朝屏幕内侧展开）。"
+        : @"自动吸附：按屏幕中心线归位 —— 球在左半屏吸左边、右半屏吸右边（只露一半，点击拉回）。";
+}
+// v1.3.8 修 03：分段选择器回调
+- (void)modeChanged:(UISegmentedControl *)seg {
+    [self writeInt:kFUSnapMode value:(seg.selectedSegmentIndex == 1 ? 1 : 0)];
+    [self refreshModeLabel];
 }
 - (void)sliderChanged:(UISlider *)sl {
     CGFloat v = roundf(sl.value);
@@ -1153,27 +1558,23 @@ static NSArray *FUColorPalette(void) {
         case 3: key = kFUIconGap;  l = _lg; name = @"图标间隔"; _preview.iconGap = v; break;
         case 4: key = kFUFanSpan;  l = _lspan; name = @"扇形角度°"; _preview.span = v; break;
         case 5: key = kFUFanScale; l = _lsc; name = @"整体距离%"; _preview.scale = v; break;
-        case 6: key = kFULayer1Count; l = _ll1; name = @"第一层数量"; _preview.layer1 = (NSInteger)v; break;
-        case 7: key = kFULayer2Count; l = _ll2; name = @"第二层数量"; _preview.layer2 = (NSInteger)v; break;
-        case 8: key = kFULayer3Count; l = _ll3; name = @"第三层数量"; _preview.layer3 = (NSInteger)v; break;
-        case 9:
-            [self writeInt:kFUSnapMode value:(v >= 1.0f ? 1 : 0)];
-            [self refreshModeLabel];
-            return;
+        case 6: key = kFULayer1Count; l = _ll1; name = @"第一层"; _preview.layer1 = (NSInteger)v; break;
+        case 7: key = kFULayer2Count; l = _ll2; name = @"第二层"; _preview.layer2 = (NSInteger)v; break;
+        case 8: key = kFULayer3Count; l = _ll3; name = @"第三层"; _preview.layer3 = (NSInteger)v; break;
     }
     if (!key) return;
-    l.text = [NSString stringWithFormat:@"%@（当前 %.0f）", name, v];
+    l.text = [NSString stringWithFormat:@"%@ %.0f", name, v];
     if (sl.tag >= 6) [self writeInt:key value:(NSInteger)v];
     else [self writeFloat:key value:v];
     [_preview refresh];
 }
 - (void)reset {
-    _sideSeg.selectedSegmentIndex = 0; _modeS.value = 0; [self refreshModeLabel];
+    _sideSeg.selectedSegmentIndex = 0; _modeSeg.selectedSegmentIndex = 0; [self refreshModeLabel];
     _ss.value = 40; _sg.value = 56; _span.value = 180; _sc.value = 100;
     _l1s.value = 8; _l2s.value = 16; _l3s.value = 24;
-    _ls.text = @"图标大小（当前 40）"; _lg.text = @"图标间隔（当前 56）";
-    _lspan.text = @"扇形角度°（当前 180）"; _lsc.text = @"整体距离%（当前 100）";
-    _ll1.text = @"第一层数量（当前 8）"; _ll2.text = @"第二层数量（当前 16）"; _ll3.text = @"第三层数量（当前 24）";
+    _ls.text = @"图标大小 40"; _lg.text = @"图标间隔 56";
+    _lspan.text = @"扇形角度° 180"; _lsc.text = @"整体距离% 100";
+    _ll1.text = @"第一层 8"; _ll2.text = @"第二层 16"; _ll3.text = @"第三层 24";
     _preview.side = 0; _preview.iconSize = 40; _preview.iconGap = 56;
     _preview.span = 180; _preview.scale = 100;
     _preview.layer1 = 8; _preview.layer2 = 16; _preview.layer3 = 24;
