@@ -781,6 +781,12 @@ static NSArray *FUColorPalette(void) {
 }
 - (void)viewDidLoad {
     [super viewDidLoad];
+    // v1.3.19：让**系统**负责导航栏避让 —— 不要再自己手算偏移（1.3.16/1.3.17 都栽在这）。
+    // 官方标准做法：edgesForExtendedLayout = UIRectEdgeNone → UIKit 自动把本 VC 的 view
+    // 布局到导航栏**下方**，于是 self.view 的 y=0 就已经在导航栏之下，子视图按 0 基线直接排即可。
+    // （参考 Apple 官方《Positioning content relative to the safe area》与 edgesForExtendedLayout 文档。）
+    self.edgesForExtendedLayout = UIRectEdgeNone;
+    self.extendedLayoutIncludesOpaqueBars = NO;
     [self loadEntries];
     self.view.backgroundColor = [UIColor systemBackgroundColor];
     // ---- 1.3.15 修「搜索/筛选/全选/批量 按不了」+ 列表不显示 ----
@@ -854,12 +860,11 @@ static NSArray *FUColorPalette(void) {
     CGFloat w = self.view.bounds.size.width;
     CGFloat H = self.view.bounds.size.height;
     CGFloat top = 0, bottom = 0;
-    if (@available(iOS 11.0, *)) { top = self.view.safeAreaInsets.top; bottom = self.view.safeAreaInsets.bottom; }
-    // v1.3.18：本 PreferenceLoader 宿主里 safeAreaInsets 实测返回 0（不可靠）。之前用
-    // `convertRect:fromView:nil` 把导航栏 frame 当窗口坐标换算，在刘海屏上只得到导航条自身高度(44)，
-    // 漏掉了状态栏高度，导致按钮栏被半透明导航栏整条压住——看得见、摸不着。
-    // 正确做法：用 `convertRect:toView:` 把导航栏自身的 bounds 映射到本视图坐标系（自动含状态栏偏移），
-    // 取「安全区 / 导航栏真实下沿」二者较大值，保证按钮栏一定落在导航栏之下、可点。
+    // v1.3.19：改用「自校正」公式，彻底告别猜高度。
+    //  导航栏下沿在 self.view 坐标系里的真实 y（convertRect:toView: 会自动带上状态栏偏移）：
+    //   · 若宿主忽略了 edgesForExtendedLayout（view 仍是全屏）→ 该值 ≈ 91（刘海）或 64（非刘海）→ 正好用作偏移 ✓
+    //   · 若宿主正常（view 已被排到导航栏下方）       → 该值为**负数**（导航栏在 view 上方）→ 取 0 ✓
+    //  两种情况都对，不需要知道设备机型、也不需要知道状态栏高度。
     if (self.navigationController && self.navigationController.navigationBar &&
         !self.navigationController.navigationBarHidden) {
         UIView *nb = self.navigationController.navigationBar;
@@ -867,13 +872,7 @@ static NSArray *FUColorPalette(void) {
         CGFloat nbBottom = CGRectGetMaxY(nbInSelf);
         if (nbBottom > top) top = nbBottom;
     }
-    // 兜底：若上面都没拿到（理论上不会），按 状态栏 + 导航条 估算。
-    if (top < 1) {
-        CGFloat sbh = 20;
-        if (@available(iOS 11.0, *)) { sbh = UIApplication.sharedApplication.statusBarFrame.size.height; }
-        if (sbh < 1) sbh = 20;
-        top = sbh + 44;
-    }
+    if (@available(iOS 11.0, *)) { bottom = self.view.safeAreaInsets.bottom; }
     CGFloat sh = _searchVisible ? 44.0f : 0.0f;
     _bar.frame = CGRectMake(0, top, w, 46);
     _search.hidden = !_searchVisible;
