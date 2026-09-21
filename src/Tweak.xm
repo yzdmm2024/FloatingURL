@@ -44,6 +44,12 @@ static NSString * const kFUGonePrefix   = @"com.yzdmm.floatingurl/gone/";   // v
 //  所以桌面把 URL 写进目标 App 容器 + 发这个通知，由 App 进程用 SFSafariViewController 显示。
 static NSString * const kFUInAppWebName = @"com.yzdmm.floatingurl/inAppWeb";
 static NSString * const kFUInAppWebFile = @"fu_inapp_web.txt";
+// v1.3.13：App 真正弹出内置浏览器后的「回执」。桌面据此判断要不要兜底系统浏览器 ——
+// 修 1.3.12 的漏洞：App 只删了交接文件却没弹出浏览器时，桌面以为已接住 → 结果什么都不开。
+static NSString * const kFUInAppWebAck  = @"com.yzdmm.floatingurl/inAppWebAck";
+// v1.3.13：备用信箱。桌面写目标 App 容器常被沙盒拒绝，写不进去就改投这里；
+// App 端两处都看，读不到就静默跳过（无副作用）。
+static NSString * const kFUWebMailboxMedia = @"/var/mobile/Media/FloatingURL_incoming.txt";
 
 static NSString * const kFUURLs        = @"urls";
 static NSString * const kFUEntryURL    = @"url";
@@ -671,6 +677,14 @@ static void fuFrontGoneCb(CFNotificationCenterRef center, void *observer,
     NSString             *_frontBid;         // v1.3.2 当前前台 App 的 bundle id（来自 Darwin 心跳）
     CFAbsoluteTime        _frontBidTs;       // 心跳时间戳（>3s 视为过期）
     NSMutableSet         *_frontWatched;     // 已注册通知监听的黑名单 bundle id
+    // ---- v1.3.13 ----
+    NSInteger             _snapGen;          // 吸附延时：代号（每次重排 +1，让排队中的旧延时块失效）
+    BOOL                  _snapPending;      // 有待吸附（扇形/面板开着时先挂起）
+    NSTimeInterval        _snapDelay;        // 松手后「完整悬浮图标」停留秒数（默认 3，0=立即吸附）
+    BOOL                  _webAckPending;    // 正在等 App 的内置浏览器回执（没有就兜底系统浏览器）
+    NSData               *_ballIconShown;    // 球外观缓存（避免每秒轮询重复解码图片）
+    NSString             *_ballShownTitle;
+    NSString             *_ballShownColor;
 }
 
 + (instancetype)shared {
