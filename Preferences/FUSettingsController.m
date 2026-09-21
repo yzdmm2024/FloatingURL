@@ -25,7 +25,9 @@ static NSString * const kFUSilent      = @"silent";     // v1.3.3 静默模式
 static NSString * const kFUSnapMode    = @"snapMode";   // v1.3.5 0=自动吸附 1=全屏固定
 static NSString * const kFUBallX       = @"ballX";      // v1.3.5 球中心 X（归一化）
 static NSString * const kFUBallTitle   = @"ballTitle";  // v1.3.5 球的文字（默认 URL）
-static NSString * const kFUBallIcon    = @"ballIcon";   // v1.3.5 球的图标（PNG data）
+static NSString * const kFUBallIcon    = @"ballIcon";   // v1.3.5 球的图标（PNG data，v1.3.28 起仅作旧数据兜底）
+static NSString * const kFUBallIconL   = @"ballIconLeft";  // v1.3.28 左半屏图标
+static NSString * const kFUBallIconR   = @"ballIconRight"; // v1.3.28 右半屏图标
 static NSString * const kFUBallColor   = @"ballColor";  // v1.3.5 球的底色 hex
 static NSString * const kFUSnapDelay   = @"snapDelay";  // v1.3.13 吸附延时秒（松手后完整图标停留时长，默认 3）
 static NSString * const kFUFanAutoHide = @"fanAutoHide"; // v1.3.21 扇形闲置多少秒自动收回（0=不自动收，默认 5）
@@ -418,8 +420,11 @@ static NSArray *FUColorPalette(void) {
 #pragma mark - v1.3.5 悬浮球外观编辑（名称 / 图标 / 底色）
 @interface FUBallEditController : UIViewController <PHPickerViewControllerDelegate, UITextFieldDelegate, UIColorPickerViewControllerDelegate>
 @property (nonatomic, strong) UITextField *nameField;
-@property (nonatomic, strong) UIButton    *iconButton;
-@property (nonatomic, strong) NSData      *iconData;
+@property (nonatomic, strong) UIButton    *iconButtonL;   // v1.3.28 左半屏图标按钮
+@property (nonatomic, strong) UIButton    *iconButtonR;   // v1.3.28 右半屏图标按钮
+@property (nonatomic, strong) NSData      *iconDataL;     // v1.3.28 左半屏图标
+@property (nonatomic, strong) NSData      *iconDataR;     // v1.3.28 右半屏图标
+@property (nonatomic, assign) NSInteger   pickSide;       // v1.3.28 当前正在选哪一侧（0=左 1=右）
 @property (nonatomic, copy)   NSString    *colorHex;
 @property (nonatomic, strong) NSMutableArray *colorButtons;
 @property (nonatomic, strong) NSArray     *colorPresets;
@@ -441,8 +446,17 @@ static NSArray *FUColorPalette(void) {
     CFPropertyListRef bt = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallTitle, (__bridge CFStringRef)kFUSuite);
     NSString *curTitle = nil;
     if (bt) { curTitle = (__bridge_transfer NSString *)bt; if (![curTitle isKindOfClass:[NSString class]]) curTitle = nil; }
-    CFPropertyListRef bi = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallIcon, (__bridge CFStringRef)kFUSuite);
-    if (bi) { _iconData = (__bridge_transfer NSData *)bi; if (![_iconData isKindOfClass:[NSData class]]) _iconData = nil; }
+    // v1.3.28：读取左右图标；若新键都没写过（老用户），用旧 ballIcon 兜底（两侧同图）。
+    CFPropertyListRef bl = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallIconL, (__bridge CFStringRef)kFUSuite);
+    if (bl) { _iconDataL = (__bridge_transfer NSData *)bl; if (![_iconDataL isKindOfClass:[NSData class]]) _iconDataL = nil; }
+    CFPropertyListRef br = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallIconR, (__bridge CFStringRef)kFUSuite);
+    if (br) { _iconDataR = (__bridge_transfer NSData *)br; if (![_iconDataR isKindOfClass:[NSData class]]) _iconDataR = nil; }
+    if (!_iconDataL && !_iconDataR) {   // 新键都没写过 → 旧数据兜底
+        CFPropertyListRef bo = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallIcon, (__bridge CFStringRef)kFUSuite);
+        NSData *legacy = nil;
+        if (bo) { legacy = (__bridge_transfer NSData *)bo; if (![legacy isKindOfClass:[NSData class]]) legacy = nil; }
+        _iconDataL = legacy; _iconDataR = legacy;
+    }
     CFPropertyListRef bc = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallColor, (__bridge CFStringRef)kFUSuite);
     if (bc) { _colorHex = (__bridge_transfer NSString *)bc; if (![_colorHex isKindOfClass:[NSString class]]) _colorHex = nil; }
     // 名称
@@ -458,25 +472,38 @@ static NSArray *FUColorPalette(void) {
     _nameField.autocapitalizationType = UITextAutocapitalizationTypeNone;
     _nameField.delegate = self;
     [scroll addSubview:_nameField]; y += 40 + 18;
-    // 图标
-    UILabel *il = [[UILabel alloc] initWithFrame:CGRectMake(pad, y, w, 18)];
-    il.font = [UIFont systemFontOfSize:12]; il.textColor = [UIColor secondaryLabelColor];
-    il.text = @"悬浮球图标（从相册选取，方形裁剪；设了图标就盖住文字）"; [scroll addSubview:il]; y += 22;
-    CGFloat sq = 150;
-    _iconButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    _iconButton.frame = CGRectMake((w - sq)/2.0 + pad, y, sq, sq);
-    _iconButton.layer.cornerRadius = 14; _iconButton.layer.borderWidth = 1.5;
-    _iconButton.layer.borderColor = [UIColor separatorColor].CGColor; _iconButton.clipsToBounds = YES;
-    _iconButton.titleLabel.textAlignment = NSTextAlignmentCenter;
-    _iconButton.titleLabel.numberOfLines = 0; _iconButton.titleLabel.font = [UIFont systemFontOfSize:13];
-    [_iconButton setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal];
-    [_iconButton addTarget:self action:@selector(pickIcon) forControlEvents:UIControlEventTouchUpInside];
-    [scroll addSubview:_iconButton]; y += sq + 8;
-    UIButton *clear = [UIButton buttonWithType:UIButtonTypeSystem];
-    clear.frame = CGRectMake(pad, y, w, 40);
-    [clear setTitle:@"清除图标（用名称/底色显示）" forState:UIControlStateNormal];
-    [clear addTarget:self action:@selector(clearIcon) forControlEvents:UIControlEventTouchUpInside];
-    [scroll addSubview:clear]; y += 40 + 16;
+    // 图标：左半屏 / 右半屏 各一个（任一侧没设就镜像另一侧）
+    CGFloat sq = 130;
+    NSArray *titles = @[@"左半屏图标（球在屏幕左边时用）", @"右半屏图标（球在屏幕右边时用）"];
+    NSArray *clears = @[@"清除左图标（用名称/底色）", @"清除右图标（用名称/底色）"];
+    for (NSInteger s = 0; s < 2; s++) {
+        UILabel *il = [[UILabel alloc] initWithFrame:CGRectMake(pad, y, w, 18)];
+        il.font = [UIFont systemFontOfSize:12]; il.textColor = [UIColor secondaryLabelColor];
+        il.text = titles[s]; [scroll addSubview:il]; y += 22;
+        UIButton *ib = [UIButton buttonWithType:UIButtonTypeSystem];
+        ib.frame = CGRectMake((w - sq)/2.0 + pad, y, sq, sq);
+        ib.layer.cornerRadius = 14; ib.layer.borderWidth = 1.5;
+        ib.layer.borderColor = [UIColor separatorColor].CGColor; ib.clipsToBounds = YES;
+        ib.titleLabel.textAlignment = NSTextAlignmentCenter;
+        ib.titleLabel.numberOfLines = 0; ib.titleLabel.font = [UIFont systemFontOfSize:13];
+        [ib setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal];
+        ib.tag = 700 + s;   // 700=左 701=右
+        [ib addTarget:self action:@selector(pickIcon:) forControlEvents:UIControlEventTouchUpInside];
+        [scroll addSubview:ib];
+        if (s == 0) _iconButtonL = ib; else _iconButtonR = ib;
+        y += sq + 8;
+        UIButton *clear = [UIButton buttonWithType:UIButtonTypeSystem];
+        clear.frame = CGRectMake(pad, y, w, 40);
+        [clear setTitle:clears[s] forState:UIControlStateNormal];
+        clear.tag = 710 + s;   // 710=清左 711=清右
+        [clear addTarget:self action:@selector(clearIcon:) forControlEvents:UIControlEventTouchUpInside];
+        [scroll addSubview:clear]; y += 40 + 16;
+    }
+    UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(pad, y, w, 40)];
+    hint.font = [UIFont systemFontOfSize:11]; hint.textColor = [UIColor tertiaryLabelColor];
+    hint.numberOfLines = 0;
+    hint.text = @"两侧都设就各用各的；只设一侧，另一侧会自动镜像这一侧（保证左右都有图）。都不设则显示名称。";
+    [scroll addSubview:hint]; y += 44;
     // 底色
     UILabel *cl = [[UILabel alloc] initWithFrame:CGRectMake(pad, y, w, 18)];
     cl.font = [UIFont systemFontOfSize:12]; cl.textColor = [UIColor secondaryLabelColor];
@@ -510,7 +537,7 @@ static NSArray *FUColorPalette(void) {
     [_customColorButton addTarget:self action:@selector(pickCustomColor) forControlEvents:UIControlEventTouchUpInside];
     [scroll addSubview:_customColorButton]; y += 38 + 16;
     scroll.contentSize = CGSizeMake(self.view.bounds.size.width, y);
-    [self refreshIcon:_iconData]; [self refreshColor];
+    [self refreshIcon:_iconDataL side:0]; [self refreshIcon:_iconDataR side:1]; [self refreshColor];
 }
 - (BOOL)textField:(UITextField *)tf shouldChangeCharactersInRange:(NSRange)r replacementString:(NSString *)s {
     if (tf == _nameField) {
@@ -518,14 +545,16 @@ static NSArray *FUColorPalette(void) {
         if (next.length > 8) return NO;
     } return YES;
 }
-- (void)refreshIcon:(NSData *)d {
+- (void)refreshIcon:(NSData *)d side:(NSInteger)s {
+    UIButton *b = (s == 0) ? _iconButtonL : _iconButtonR;
+    NSString *ph = (s == 0) ? @"选左图标\n（从相册，方形裁剪）" : @"选右图标\n（从相册，方形裁剪）";
     UIImage *img = d.length ? [UIImage imageWithData:d] : nil;
-    if (img) { [_iconButton setImage:[img imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal] forState:UIControlStateNormal];
-        _iconButton.imageView.contentMode = UIViewContentModeScaleAspectFill; [_iconButton setTitle:nil forState:UIControlStateNormal]; }
-    else { [_iconButton setImage:nil forState:UIControlStateNormal];
-        [_iconButton setTitle:@"选择图标\n（从相册，方形裁剪）" forState:UIControlStateNormal]; }
+    if (img) { [b setImage:[img imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal] forState:UIControlStateNormal];
+        b.imageView.contentMode = UIViewContentModeScaleAspectFill; [b setTitle:nil forState:UIControlStateNormal]; }
+    else { [b setImage:nil forState:UIControlStateNormal]; [b setTitle:ph forState:UIControlStateNormal]; }
 }
-- (void)pickIcon {
+- (void)pickIcon:(UIButton *)sender {
+    _pickSide = (sender.tag == 701) ? 1 : 0;
     PHPickerConfiguration *cfg = [[PHPickerConfiguration alloc] init];
     cfg.selectionLimit = 1; cfg.filter = [PHPickerFilter imagesFilter];
     PHPickerViewController *p = [[PHPickerViewController alloc] initWithConfiguration:cfg]; p.delegate = self;
@@ -537,13 +566,20 @@ static NSArray *FUColorPalette(void) {
                                  completionHandler:^(__kindof id obj, NSError *err){
         if ([obj isKindOfClass:[UIImage class]]) dispatch_async(dispatch_get_main_queue(), ^{
             FUCropVC *crop = [[FUCropVC alloc] init]; crop.image = obj;
-            crop.onCropped = ^(NSData *png){ self.iconData = png; [self refreshIcon:png]; };
+            crop.onCropped = ^(NSData *png){
+                if (self.pickSide == 0) { self.iconDataL = png; [self refreshIcon:png side:0]; }
+                else { self.iconDataR = png; [self refreshIcon:png side:1]; }
+            };
             UINavigationController *nc = [[UINavigationController alloc] initWithRootViewController:crop];
             [self presentViewController:nc animated:YES completion:nil];
         });
     }];
 }
-- (void)clearIcon { _iconData = nil; [self refreshIcon:nil]; }
+- (void)clearIcon:(UIButton *)sender {
+    NSInteger s = (sender.tag == 711) ? 1 : 0;   // 710=清左 711=清右
+    if (s == 0) { _iconDataL = nil; [self refreshIcon:nil side:0]; }
+    else { _iconDataR = nil; [self refreshIcon:nil side:1]; }
+}
 #pragma mark v1.3.7 任意色（系统取色器，iOS 14+）
 - (void)pickCustomColor {
     if (@available(iOS 14.0, *)) {
@@ -621,8 +657,11 @@ static NSArray *FUColorPalette(void) {
     // 缓存里可能仍留着旧值 → 症状正是「删了图标，球上照片还在 / 设了颜色没变化」。
     // 改成写「空值」：图标写空 NSData、颜色写空字符串，tweak 侧读到 length==0 即视为「未设置」，
     // 任何缓存状态下都能立刻刷新。
-    CFPreferencesSetAppValue((__bridge CFStringRef)kFUBallIcon,
-        (__bridge CFPropertyListRef)(_iconData.length ? _iconData : [NSData data]), (__bridge CFStringRef)kFUSuite);
+    // v1.3.28：左右图标分开存；任一侧没设就写空 NSData（tweak 侧会镜像另一侧 / 回退旧值）。
+    CFPreferencesSetAppValue((__bridge CFStringRef)kFUBallIconL,
+        (__bridge CFPropertyListRef)(_iconDataL.length ? _iconDataL : [NSData data]), (__bridge CFStringRef)kFUSuite);
+    CFPreferencesSetAppValue((__bridge CFStringRef)kFUBallIconR,
+        (__bridge CFPropertyListRef)(_iconDataR.length ? _iconDataR : [NSData data]), (__bridge CFStringRef)kFUSuite);
     CFPreferencesSetAppValue((__bridge CFStringRef)kFUBallColor,
         (__bridge CFPropertyListRef)(_colorHex.length ? _colorHex : @""), (__bridge CFStringRef)kFUSuite);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);

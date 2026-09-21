@@ -110,27 +110,13 @@
 			<key>label</key>
 			<string>悬浮球外观</string>
 			<key>footerText</key>
-			<string>自定义悬浮球：名称（默认 URL）、图标（从相册方形裁剪）、底色（48 色 + 任意色，不设则为玻璃质感）。不选图标时底色生效。</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>default</key>
-			<true/>
-			<key>defaults</key>
-			<string>com.yzdmm.floatingurl</string>
-			<key>key</key>
-			<string>iconAutoMirror</string>
-			<key>label</key>
-			<string>图标自动区分左右（跟着球走）</string>
-			<key>PostNotification</key>
-			<string>com.yzdmm.floatingurl/settingsChanged</string>
+			<string>自定义悬浮球：名称（默认 URL）、左/右图标（从相册方形裁剪，任一侧没设会自动镜像另一侧）、底色（48 色 + 任意色，不设则为玻璃质感）。不选图标时底色生效。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
 			<string>PSButtonCell</string>
 			<key>label</key>
-			<string>自定义悬浮球（名称 / 图标 / 颜色）</string>
+			<string>自定义悬浮球（名称 / 左图标 / 右图标 / 颜色）</string>
 			<key>action</key>
 			<string>showBallEdit</string>
 		</dict>
