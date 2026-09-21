@@ -4,7 +4,6 @@
 #import <objc/message.h>
 #import <math.h>
 #import <notify.h>
-#import <dlfcn.h>
 
 // PhotosUI 在 SDK14.5 下无法以模块方式编译（simd/cmath 缺失），tweak 里不 import 头文件，
 // 改用运行时 NSClassFromString 调用 PHPicker，避免模块构建失败。
@@ -470,7 +469,7 @@ static void fuStartAppHeartbeat(NSString *bid) {
 
 #pragma mark - 浮动管理器
 @interface FUFloatingManager : NSObject <WKNavigationDelegate, UITextFieldDelegate,
-                                         UITableViewDataSource, UITableViewDelegate, UIWebViewDelegate>
+                                         UITableViewDataSource, UITableViewDelegate>
 + (instancetype)shared;
 - (void)reloadPrefs;
 - (void)setupWhenHostReady;
@@ -734,22 +733,9 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     // v1.3.4 热修：全程 respondsToSelector 守卫 + @try/@catch 兜底。
     // 任何私有 API 缺失 / KVC 异常都只返回 nil，绝不抛异常——否则会带崩 SpringBoard → 安全模式。
     @try {
-        // v1.3.10 首选：SpringBoardServices 的 C 函数 —— 不走 ObjC 消息发送/转发，
-        // 从根上杜绝 doesNotRecognizeSelector 崩 SpringBoard（真机崩溃日志显示旧路径曾经
-        // ___forwarding___ 抛未识别选择器 → 桌面崩溃进安全模式）。
-        void *fuSBSh = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_LAZY);
-        if (fuSBSh) {
-            CFStringRef (*fuCopyFront)(void) =
-                (CFStringRef (*)(void))dlsym(fuSBSh, "SBSCopyFrontmostApplicationDisplayIdentifier");
-            if (fuCopyFront) {
-                CFStringRef fuCF = fuCopyFront();
-                if (fuCF) {
-                    NSString *fuB = (__bridge_transfer NSString *)fuCF;
-                    return (fuB.length && ![fuB isEqualToString:@"com.apple.springboard"]) ? fuB : nil;
-                }
-            }
-        }
         NSString *bid = nil;
+        // v1.3.11：回滚 1.3.10 的 dlopen/dlsym 实验 —— 虽然它大概率无害，但它在桌面启动路径上，
+        // 且无法用 @try 兜底（C 函数段错误拦截不了）。回到 1.3.9 守卫式 ObjC 路径（真机长期稳定）。
         // 首选：SBApplicationController（iOS 13+ 稳定存在），取前台 App 的 bundle id。
         Class ctrl = NSClassFromString(@"SBApplicationController");
         SEL sharedSel = NSSelectorFromString(@"sharedInstance");
@@ -1004,32 +990,25 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     _historyTable.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [_panel addSubview:_historyTable];
 
-    // v1.3.10：SpringBoard 进程里 WKWebView(WebKit2) 的 Web 内容进程拿不到桌面沙盒豁免 → 必白屏。
-    // 改用 UIWebView（老 WebKit1，**进程内渲染**，不需要 WebContent 子进程）—— 桌面里唯一能出内容的 WebView。
-    // UIWebView 在系统里仍存在（只是废弃）；若未来真被移除，回退 WKWebView 分支。
-    Class fuUIWV = NSClassFromString(@"UIWebView");
-    if (fuUIWV) {
-        UIWebView *fuLW = [[fuUIWV alloc] initWithFrame:CGRectZero];
-        fuLW.delegate = self;                     // UIWebViewDelegate（非正式协议，方法在下面实现）
-        fuLW.scalesPageToFit = YES;
-        fuLW.opaque = YES; fuLW.backgroundColor = [UIColor systemBackgroundColor];
-        fuLW.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        _webView = (WKWebView *)fuLW;             // -w 抑制类型告警；选择器运行时按名分发
-    } else {
-        WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];
-        static WKProcessPool *fuPool = nil;
-        static dispatch_once_t oncePool;
-        dispatch_once(&oncePool, ^{ fuPool = [[WKProcessPool alloc] init]; });
-        cfg.processPool = fuPool;
-        cfg.allowsAirPlayForMediaPlayback = YES;
-        WKWebView *fuWK = [[WKWebView alloc] initWithFrame:CGRectZero configuration:cfg];
-        fuWK.navigationDelegate = self;
-        fuWK.allowsBackForwardNavigationGestures = YES;
-        fuWK.opaque = YES; fuWK.backgroundColor = [UIColor systemBackgroundColor];
-        fuWK.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        _webView = fuWK;
-    }
+    WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];
+    // ★ 关键：独立悬浮窗里的 WKWebView 白屏，常见根因是 Web 内容进程在「非 App 主窗口」里启停不稳。
+    //   复用同一个 WKProcessPool，让 Web 进程持久稳定，杜绝白屏。
+    static WKProcessPool *fuPool = nil;
+    static dispatch_once_t oncePool;
+    dispatch_once(&oncePool, ^{ fuPool = [[WKProcessPool alloc] init]; });
+    cfg.processPool = fuPool;
+    cfg.allowsAirPlayForMediaPlayback = YES;
+    _webView = [[WKWebView alloc] initWithFrame:CGRectZero configuration:cfg];
+    _webView.navigationDelegate = self;
+    _webView.allowsBackForwardNavigationGestures = YES;
+    // v1.3.0 修「只有网址没有网页内容(白屏)」：透明 WKWebView 在独立 window 里
+    // 合成路径异常 → 改回不透明 + 实底色，内容进程稳定渲染。
+    _webView.opaque = YES; _webView.backgroundColor = [UIColor systemBackgroundColor];
+    _webView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     _webView.scrollView.bounces = YES; [_panel addSubview:_webView];
+    // v1.3.11 血泪教训：绝对不要在 SpringBoard 里创建 UIWebView(WebKit1) —— 它会拉起 WebThread
+    // 挂死桌面主线程，watchdog 每 60~120s 杀一次 SpringBoard → 无限 respring 循环（真机复现）。
+    // 桌面内置网页面板暂不可行；webMode 打开时桌面点击仍走系统浏览器。
 
     _spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
     _spinner.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin |
@@ -1784,25 +1763,6 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     if (!_webErrorLabel) return;
     _webErrorLabel.text = [NSString stringWithFormat:@"⚠️ 网页无法加载\n%@", msg ?: @"(无详细信息)"];
     _webErrorLabel.hidden = NO;
-}
-#pragma mark - UIWebViewDelegate（v1.3.10：SpringBoard 内置面板用）
-- (void)webViewDidStartLoad:(UIWebView *)wv {
-    [_spinner startAnimating]; if (_webErrorLabel) _webErrorLabel.hidden = YES;
-}
-- (void)webViewDidFinishLoad:(UIWebView *)wv {
-    [_spinner stopAnimating];
-    NSString *cur = wv.request.mainDocumentURL.absoluteString;
-    if (cur.length && _expanded) { _url = cur; _urlField.text = cur; [self pushHistory:cur]; }
-    [self applyWebZoom];
-}
-- (void)webView:(UIWebView *)wv didFailLoadWithError:(NSError *)error {
-    [_spinner stopAnimating];
-    if (error.code == NSURLErrorUnsupportedURL) {   // 非网页 scheme → 交给系统打开
-        NSString *fuU = wv.request.mainDocumentURL.absoluteString;
-        if (fuU.length) [self fuOpenExternally:fuU];
-        return;
-    }
-    [self showWebError:[error localizedDescription]];
 }
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction
                                                    decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
