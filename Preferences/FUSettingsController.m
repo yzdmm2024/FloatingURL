@@ -798,8 +798,11 @@ static NSArray *FUColorPalette(void) {
 }
 - (void)layoutParts {
     CGFloat W = self.view.bounds.size.width, H = self.view.bounds.size.height;
-    _bar.frame = CGRectMake(0, 0, W, 46);
-    CGFloat y = 46;
+    // v1.3.10：整体下移「安全区顶部」（导航栏+状态栏）—— 之前按钮条写死 y=0 被导航栏盖住，
+    // 看起来就是「搜索/筛选/全选/批量 全在屏幕外面」。
+    CGFloat top = self.view.safeAreaInsets.top;
+    _bar.frame = CGRectMake(0, top, W, 46);
+    CGFloat y = top + 46;
     if (_searchVisible) { _search.hidden = NO; _search.frame = CGRectMake(0, y, W, 44); y += 44; }
     else { _search.hidden = YES; _search.frame = CGRectMake(0, y, W, 0); }
     _tv.frame = CGRectMake(0, y, W, MAX(0.0f, H - y));

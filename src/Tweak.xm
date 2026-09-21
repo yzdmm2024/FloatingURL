@@ -4,6 +4,7 @@
 #import <objc/message.h>
 #import <math.h>
 #import <notify.h>
+#import <dlfcn.h>
 
 // PhotosUI 在 SDK14.5 下无法以模块方式编译（simd/cmath 缺失），tweak 里不 import 头文件，
 // 改用运行时 NSClassFromString 调用 PHPicker，避免模块构建失败。
@@ -733,6 +734,21 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     // v1.3.4 热修：全程 respondsToSelector 守卫 + @try/@catch 兜底。
     // 任何私有 API 缺失 / KVC 异常都只返回 nil，绝不抛异常——否则会带崩 SpringBoard → 安全模式。
     @try {
+        // v1.3.10 首选：SpringBoardServices 的 C 函数 —— 不走 ObjC 消息发送/转发，
+        // 从根上杜绝 doesNotRecognizeSelector 崩 SpringBoard（真机崩溃日志显示旧路径曾经
+        // ___forwarding___ 抛未识别选择器 → 桌面崩溃进安全模式）。
+        void *fuSBSh = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_LAZY);
+        if (fuSBSh) {
+            CFStringRef (*fuCopyFront)(void) =
+                (CFStringRef (*)(void))dlsym(fuSBSh, "SBSCopyFrontmostApplicationDisplayIdentifier");
+            if (fuCopyFront) {
+                CFStringRef fuCF = fuCopyFront();
+                if (fuCF) {
+                    NSString *fuB = (__bridge_transfer NSString *)fuCF;
+                    return (fuB.length && ![fuB isEqualToString:@"com.apple.springboard"]) ? fuB : nil;
+                }
+            }
+        }
         NSString *bid = nil;
         // 首选：SBApplicationController（iOS 13+ 稳定存在），取前台 App 的 bundle id。
         Class ctrl = NSClassFromString(@"SBApplicationController");
@@ -988,21 +1004,31 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     _historyTable.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [_panel addSubview:_historyTable];
 
-    WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];
-    // ★ 关键：独立悬浮窗里的 WKWebView 白屏，常见根因是 Web 内容进程在「非 App 主窗口」里启停不稳。
-    //   复用同一个 WKProcessPool，让 Web 进程持久稳定，杜绝白屏。
-    static WKProcessPool *fuPool = nil;
-    static dispatch_once_t oncePool;
-    dispatch_once(&oncePool, ^{ fuPool = [[WKProcessPool alloc] init]; });
-    cfg.processPool = fuPool;
-    cfg.allowsAirPlayForMediaPlayback = YES;
-    _webView = [[WKWebView alloc] initWithFrame:CGRectZero configuration:cfg];
-    _webView.navigationDelegate = self;
-    _webView.allowsBackForwardNavigationGestures = YES;
-    // v1.3.0 修「只有网址没有网页内容(白屏)」：透明 WKWebView 在独立 window 里
-    // 合成路径异常 → 改回不透明 + 实底色，内容进程稳定渲染。
-    _webView.opaque = YES; _webView.backgroundColor = [UIColor systemBackgroundColor];
-    _webView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    // v1.3.10：SpringBoard 进程里 WKWebView(WebKit2) 的 Web 内容进程拿不到桌面沙盒豁免 → 必白屏。
+    // 改用 UIWebView（老 WebKit1，**进程内渲染**，不需要 WebContent 子进程）—— 桌面里唯一能出内容的 WebView。
+    // UIWebView 在系统里仍存在（只是废弃）；若未来真被移除，回退 WKWebView 分支。
+    Class fuUIWV = NSClassFromString(@"UIWebView");
+    if (fuUIWV) {
+        UIWebView *fuLW = [[fuUIWV alloc] initWithFrame:CGRectZero];
+        fuLW.delegate = self;                     // UIWebViewDelegate（非正式协议，方法在下面实现）
+        fuLW.scalesPageToFit = YES;
+        fuLW.opaque = YES; fuLW.backgroundColor = [UIColor systemBackgroundColor];
+        fuLW.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        _webView = (WKWebView *)fuLW;             // -w 抑制类型告警；选择器运行时按名分发
+    } else {
+        WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];
+        static WKProcessPool *fuPool = nil;
+        static dispatch_once_t oncePool;
+        dispatch_once(&oncePool, ^{ fuPool = [[WKProcessPool alloc] init]; });
+        cfg.processPool = fuPool;
+        cfg.allowsAirPlayForMediaPlayback = YES;
+        WKWebView *fuWK = [[WKWebView alloc] initWithFrame:CGRectZero configuration:cfg];
+        fuWK.navigationDelegate = self;
+        fuWK.allowsBackForwardNavigationGestures = YES;
+        fuWK.opaque = YES; fuWK.backgroundColor = [UIColor systemBackgroundColor];
+        fuWK.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        _webView = fuWK;
+    }
     _webView.scrollView.bounces = YES; [_panel addSubview:_webView];
 
     _spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
@@ -1254,9 +1280,8 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 //   · 每层能放几个 = 该半径下的扇形弧长 ÷ (图标 + 最小净空隙)
 //     → **用户加几个入口就排几个**：第 1 层放满自动溢到第 2、3 层；
 //   · 球靠近上/下边缘时，扇形角度逐档收缩，直到所有图标都留在屏内（遇到屏幕边自动变形）。
-// v1.3.8 修 02：球心 -> 屏幕中心 的方向角（屏坐标：0°=右，90°=下，180°/-180°=左，-90°=上）。
-// 球停在左下角时约 -45°（朝右上）、右下角约 -135°（朝左上）、左上角约 45°（朝右下）……
-// 这样扇形永远朝屏幕内侧展开，而不是死板地只朝左/右。
+// v1.3.10：朝向回归「屏幕中心线分左右」（球在左→扇形朝右、在右→朝左），永远围绕悬浮球；
+// 只有四角/上下边导致展示不全时，才由「角度收缩 + 整体平移」自动变形（fuAngleToScreenCenter 保留备用）。
 - (CGFloat)fuAngleToScreenCenter:(CGPoint)c {
     CGRect s = _overlay ? _overlay.bounds : [UIScreen mainScreen].bounds;
     CGFloat dx = s.size.width  / 2.0f - c.x;
@@ -1323,54 +1348,50 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     R[0] = (kFUButtonSize/2.0f + isz/2.0f + _iconGap) * scale;
     R[1] = R[0] + stepR * scale;
     R[2] = R[1] + stepR * scale;
-    // 2) 每层数量：用户可指定（0=自动）。先按指定值分配，剩余再自动填充到未指定层 / 兜底第三层。
+    // 2) 每圈容量（v1.3.10 重做）：容量 = 弧长 ÷ (图标+净空隙) → 同圈永不挤叠。
+    //    用户指定的每层数量只作该圈「上限」（0=自动），放不下的自动溢到下一圈，
+    //    第三圈满了继续往外动态加圈 —— 条目再多（到48）扇形也始终围绕悬浮球。
+    //    （1.3.6 的「塞满指定层」把 27 条挤进 3 圈，真机实测图标叠成一团。）
     NSInteger n = (NSInteger)_entries.count;
     NSInteger want[3] = { _layer1, _layer2, _layer3 };
-    NSInteger caps[3] = { 0, 0, 0 };
-    NSInteger placed = 0;
-    for (int i = 0; i < 3; i++) {
-        if (want[i] > 0) {
-            NSInteger c2 = MIN(want[i], n - placed);
-            if (c2 > 0) { caps[i] = c2; placed += c2; }
+    NSInteger caps[3] = { 0, 0, 0 };   // 预估每圈容量（仅供下面「角度收缩」检查用）
+    CGFloat spanMax = MAX(60.0f, MIN(180.0f, _fanSpan));
+    {
+        CGFloat spanRad0 = spanMax * (CGFloat)M_PI / 180.0f;
+        NSInteger placed2 = 0;
+        for (int i = 0; i < 3 && placed2 < n; i++) {
+            NSInteger capArc = MAX(1, (NSInteger)floor(R[i] * spanRad0 / (isz + gap)));
+            if (want[i] > 0) capArc = MIN(capArc, want[i]);
+            NSInteger add = MIN(capArc, n - placed2);
+            caps[i] = add; placed2 += add;
         }
     }
-    CGFloat spanMax = MAX(60.0f, MIN(180.0f, _fanSpan));
-    NSInteger li = 0;
-    while (placed < n) {
-        NSInteger target = -1;
-        for (int i = li; i < 3; i++) { if (want[i] == 0) { target = i; break; } }
-        if (target < 0) target = 2;   // 全部指定仍不够 → 兜底第三层
-        CGFloat arc = R[target] * spanMax * (CGFloat)M_PI / 180.0f;
-        NSInteger autoCap = MAX(1, (NSInteger)floor(arc / (isz + gap)));
-        if (autoCap > 24) autoCap = 24;   // v1.3.6：自动模式的单层上限同步放宽到 24
-        NSInteger space = n - placed;
-        NSInteger add = MIN(autoCap, space);
-        caps[target] += add; placed += add;
-        li = target + 1;
-        if (li >= 3 && placed < n) { caps[2] += (n - placed); placed = n; }
-    }
-    // v1.3.8 修 02：扇形朝向 = 从球心指向**屏幕中心**的方向角（不再只分左右）。
-    // 球在左中 → 0°(朝右)；右中 → 180°(朝左)；左上角 → ≈45°(朝右下)；右下角 → ≈-135°(朝左上)……
-    // 球停在四角或上下边时，扇形自动朝屏幕内侧展开。
-    CGFloat centerA = [self fuAngleToScreenCenter:c];
+    // v1.3.10：朝向回归「按屏幕中心线分左右」—— 球在左→扇形朝右、在右→朝左，始终围绕悬浮球。
+    // （1.3.8 的「球心指向屏幕中心」让球在四角/上下边时扇形乱指，真机反馈：除角落外都应围绕球。）
+    CGFloat centerA = [self fuBallSide] ? 0.0f : 180.0f;
     // v1.3.8 修 02：角度自适应——从用户设定角度起逐档收缩，直到所有图标都在屏内；
     // （收缩会让同层弧距变小 → 一旦会挤到一起就停止收缩，改由下方「整体平移」兜底。）
     CGFloat span = [self fuFittingSpanForCenter:centerA radii:R caps:caps icon:isz margin:6.0f maxSpan:spanMax];
-    // 3) 先按理想角度摆好（不裁剪），收集所有图标中心
+    // 3) 摆点（v1.3.10 重做）：用**最终** span 重算每圈容量；第三圈满了继续动态加圈（最多 8 圈）
     NSMutableArray *pts = [NSMutableArray array];
-    placed = 0;
-    for (NSInteger layer = 0; layer < 3; layer++) {
-        NSInteger cnt = caps[layer];
-        if (cnt <= 0) continue;
-        CGFloat a0  = centerA - span/2.0f;
-        CGFloat sp2 = (cnt > 1) ? span / (CGFloat)(cnt - 1) : 0.0f;
-        for (NSInteger k = 0; k < cnt; k++) {
-            if (placed >= n) break;
-            placed++;
-            CGFloat a = (cnt > 1) ? (a0 + sp2 * (CGFloat)k) : centerA;
-            CGFloat rad = a * (CGFloat)M_PI / 180.0f;
-            CGPoint p = CGPointMake(c.x + R[layer] * cosf(rad), c.y + R[layer] * sinf(rad));
-            [pts addObject:[NSValue valueWithCGPoint:p]];
+    {
+        CGFloat spanRad = span * (CGFloat)M_PI / 180.0f;
+        NSInteger placed2 = 0;
+        for (NSInteger ring = 0; ring < 8 && placed2 < n; ring++) {
+            CGFloat Rcur = (ring < 3) ? R[ring] : (R[2] + stepR * scale * (CGFloat)(ring - 2));
+            NSInteger capArc = MAX(1, (NSInteger)floor(Rcur * spanRad / (isz + gap)));
+            if (ring < 3 && want[ring] > 0) capArc = MIN(capArc, want[ring]);
+            NSInteger add = MIN(capArc, n - placed2);
+            if (add <= 0) break;
+            CGFloat a0  = centerA - span/2.0f;
+            CGFloat sp2 = (add > 1) ? span / (CGFloat)(add - 1) : 0.0f;
+            for (NSInteger k = 0; k < add; k++) {
+                CGFloat a = (add > 1) ? (a0 + sp2 * (CGFloat)k) : centerA;
+                CGFloat rad = a * (CGFloat)M_PI / 180.0f;
+                CGPoint p = CGPointMake(c.x + Rcur * cosf(rad), c.y + Rcur * sinf(rad));
+                [pts addObject:[NSValue valueWithCGPoint:p]];
+            }
+            placed2 += add;
         }
     }
     // 4) v1.3.3 贴边自适应：若整体超出屏幕，则整体平移（保持间距，绝不重叠），直到刚好在屏内。
@@ -1397,7 +1418,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     }
     // 5) 正式摆放（带轻微 clamp 兜底 + 缩放动画）
     [_fanOffsets removeAllObjects];
-    placed = 0;
+    NSInteger placed = 0;
     for (NSValue *v in pts) {
         NSInteger idx = placed; placed++;
         CGPoint p = v.CGPointValue;
@@ -1539,25 +1560,39 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 // 表现就是「点了网页 -> 整机卡住、屏幕动不了」。这里整段丢到后台队列，主线程立刻返回。
 - (void)fuOpenExternally:(NSString *)s {
     NSURL *u = [NSURL URLWithString:s]; if (!u) return;
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+    // v1.3.10：改用 FBSSystemService（FrontBoard 自家的异步 API）：
+    //  · 1.3.7 及以前：主线程同步 openSensitiveURL → 等 Safari 冷启动把整机卡死几秒；
+    //  · 1.3.8：整段丢后台队列 → 真机实测「网页打不开」（该 XPC 在后台线程上下文不可靠）。
+    //  FBSSystemService 既是异步（不卡主线程）又在主线程发起（FrontBoard 必定受理），两头兼得。
+    dispatch_async(dispatch_get_main_queue(), ^{
         @try {
+            Class fbsCls = NSClassFromString(@"FBSSystemService");
+            SEL sharedSel = NSSelectorFromString(@"sharedService");
+            SEL openSel = NSSelectorFromString(@"openURL:options:withResultBlock:");
+            if (fbsCls && [fbsCls respondsToSelector:sharedSel]) {
+                id svc = [fbsCls performSelector:sharedSel];
+                if (svc && [svc respondsToSelector:openSel]) {
+                    void (^blk)(BOOL, NSError *) = ^(BOOL ok, NSError *err){
+                        if (!ok) NSLog(@"[FloatingURL] FBSSystemService openURL 被拒: %@", u);
+                    };
+                    ((void (*)(id, SEL, id, id, id))objc_msgSend)(svc, openSel, u, @{}, blk);
+                    return;
+                }
+            }
+            // 兜底1：LSApplicationWorkspace（主线程，仅发出请求的一瞬）
             Class wsc = NSClassFromString(@"LSApplicationWorkspace");
-            id ws = wsc ? [wsc performSelector:NSSelectorFromString(@"defaultWorkspace")] : nil;
             SEL selSensitive = NSSelectorFromString(@"openSensitiveURL:withOptions:");
+            id ws = wsc ? [wsc performSelector:NSSelectorFromString(@"defaultWorkspace")] : nil;
             if (ws && [ws respondsToSelector:selSensitive]) {
                 [ws performSelector:selSensitive withObject:u withObject:nil];
                 return;
             }
-            SEL selOpen = NSSelectorFromString(@"openURL:");
-            if (ws && [ws respondsToSelector:selOpen]) { [ws performSelector:selOpen withObject:u]; return; }
+            // 兜底2：UIApplication
+            UIApplication *app = UIApplication.sharedApplication;
+            if (app) [app openURL:u options:@{} completionHandler:nil];
         } @catch (NSException *e) {
             NSLog(@"[FloatingURL] fuOpenExternally 异常（已忽略）: %@", e);
         }
-        // 兜底路径必须在主线程走 UIApplication
-        dispatch_async(dispatch_get_main_queue(), ^{
-            UIApplication *app = UIApplication.sharedApplication;
-            if (app) [app openURL:u options:@{} completionHandler:nil];
-        });
     });
 }
 
@@ -1749,6 +1784,25 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     if (!_webErrorLabel) return;
     _webErrorLabel.text = [NSString stringWithFormat:@"⚠️ 网页无法加载\n%@", msg ?: @"(无详细信息)"];
     _webErrorLabel.hidden = NO;
+}
+#pragma mark - UIWebViewDelegate（v1.3.10：SpringBoard 内置面板用）
+- (void)webViewDidStartLoad:(UIWebView *)wv {
+    [_spinner startAnimating]; if (_webErrorLabel) _webErrorLabel.hidden = YES;
+}
+- (void)webViewDidFinishLoad:(UIWebView *)wv {
+    [_spinner stopAnimating];
+    NSString *cur = wv.request.mainDocumentURL.absoluteString;
+    if (cur.length && _expanded) { _url = cur; _urlField.text = cur; [self pushHistory:cur]; }
+    [self applyWebZoom];
+}
+- (void)webView:(UIWebView *)wv didFailLoadWithError:(NSError *)error {
+    [_spinner stopAnimating];
+    if (error.code == NSURLErrorUnsupportedURL) {   // 非网页 scheme → 交给系统打开
+        NSString *fuU = wv.request.mainDocumentURL.absoluteString;
+        if (fuU.length) [self fuOpenExternally:fuU];
+        return;
+    }
+    [self showWebError:[error localizedDescription]];
 }
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction
                                                    decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
