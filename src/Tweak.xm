@@ -361,6 +361,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     UITableView           *_historyTable;
     WKWebView             *_webView;
     UIActivityIndicatorView *_spinner;
+    UILabel               *_webErrorLabel;   // 网页加载失败时显示原因（否则白屏无提示）
 
     BOOL                  _expanded;
     BOOL                  _didSetup;
@@ -635,8 +636,17 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     [_panel addSubview:_historyTable];
 
     WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];
+    // ★ 关键：独立悬浮窗里的 WKWebView 白屏，常见根因是 Web 内容进程在「非 App 主窗口」里启停不稳。
+    //   复用同一个 WKProcessPool，让 Web 进程持久稳定，杜绝白屏。
+    static WKProcessPool *fuPool = nil;
+    static dispatch_once_t oncePool;
+    dispatch_once(&oncePool, ^{ fuPool = [[WKProcessPool alloc] init]; });
+    cfg.processPool = fuPool;
+    cfg.allowsAirPlayForMediaPlayback = YES;
     _webView = [[WKWebView alloc] initWithFrame:CGRectZero configuration:cfg];
     _webView.navigationDelegate = self;
+    _webView.allowsBackForwardNavigationGestures = YES;
+    _webView.opaque = NO; _webView.backgroundColor = [UIColor clearColor];
     _webView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     _webView.scrollView.bounces = YES; [_panel addSubview:_webView];
 
@@ -644,6 +654,17 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     _spinner.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin |
                                 UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
     [_webView addSubview:_spinner];
+
+    // 网页加载失败时显示原因（白屏无提示太难排查）；叠在 webView 之上、工具条之下。
+    _webErrorLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _webErrorLabel.hidden = YES; _webErrorLabel.numberOfLines = 0;
+    _webErrorLabel.textAlignment = NSTextAlignmentCenter;
+    _webErrorLabel.font = [UIFont systemFontOfSize:12];
+    _webErrorLabel.textColor = [UIColor systemRedColor];
+    _webErrorLabel.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    _webErrorLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [_panel addSubview:_webErrorLabel];
+    [_panel bringSubviewToFront:_bar];   // 保证关闭/地址条始终在最上层
 
     // 非网页入口（scheme 类）的简单输入框：仅此模式显示，不显示网页工具条/网页视图。
     _schemeBox = [[UIView alloc] initWithFrame:CGRectZero];
@@ -670,6 +691,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 - (void)placeBallInWindow:(UIWindow *)w {
     if (!_ball || !w) return;
     _ball.frame = CGRectMake(w.bounds.size.width - kFUButtonSize - 4, w.bounds.size.height * 0.45, kFUButtonSize, kFUButtonSize);
+    _ball.alpha = 0.4f;   // 初始即半透明待机（拖动/点击会临时变实心）
 }
 - (void)layoutPanel {
     if (!_panel) return;
@@ -681,6 +703,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     _urlField.frame = CGRectMake(52, 6, b.size.width - 104, 28);
     _reloadBtn.frame = CGRectMake(b.size.width - 48, 0, 44, 40);
     _spinner.center = CGPointMake(webF.size.width/2.0, webF.size.height/2.0);
+    if (_webErrorLabel) _webErrorLabel.frame = webF;   // 覆盖网页区域（不含工具条）
     if (_schemeBox) {
         _schemeBox.frame = CGRectMake(12, 12, b.size.width - 24, b.size.height - 24);
         CGFloat pad = 16; CGRect ib = _schemeBox.bounds;
@@ -702,6 +725,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 
 #pragma mark - 交互
 - (void)ballTapped {
+    _ball.alpha = 1.0f;   // 点击唤醒：变实心，方便使用
     if (_expanded) { [self collapse]; return; }
     if (_fanOpen)  { [self closeFan]; return; }
     // 没有配置任何入口 → 直接展开默认网页；有入口 → 弹出扇形（几个入口排几个）。
@@ -710,7 +734,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 }
 - (void)panBall:(UIPanGestureRecognizer *)g {
     if (!_ball) return;
-    if (g.state == UIGestureRecognizerStateBegan) _ballDragOrigin = _ball.frame.origin;
+    if (g.state == UIGestureRecognizerStateBegan) { _ballDragOrigin = _ball.frame.origin; _ball.alpha = 1.0f; }  // 拖动时变实心
     else if (g.state == UIGestureRecognizerStateChanged) {
         CGPoint t = [g translationInView:_overlay];
         CGRect f = _ball.frame;
@@ -728,6 +752,21 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
             }
         }
     }
+    else if (g.state == UIGestureRecognizerStateEnded) [self snapBallToEdge];   // 松手 → 吸附最近边 + 半透明
+}
+// 松手后自动吸附到离球心最近的屏幕边（仅留 2pt 间距），并进入半透明待机态，利于日常使用。
+- (void)snapBallToEdge {
+    if (!_ball) return;
+    CGRect b = _ball.frame; CGRect s = _overlay.bounds; CGFloat inset = 2.0f;
+    CGFloat cx = CGRectGetMidX(b), cy = CGRectGetMidY(b);
+    CGFloat dl = cx, dr = s.size.width - cx, dt = cy, db = s.size.height - cy;
+    CGFloat m = MIN(MIN(dl, dr), MIN(dt, db));
+    CGRect f = b;
+    if      (m == dl) f.origin.x = inset;
+    else if (m == dr) f.origin.x = s.size.width  - b.size.width  - inset;
+    else if (m == dt) f.origin.y = inset;
+    else              f.origin.y = s.size.height - b.size.height - inset;
+    [UIView animateWithDuration:0.2 animations:^{ _ball.frame = f; _ball.alpha = 0.4f; }];
 }
 - (void)panPanel:(UIPanGestureRecognizer *)g {
     if (!_panel || !_panel.superview) return;
@@ -767,7 +806,8 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 #pragma mark - 扇形菜单（图标尺寸 = 球尺寸；长按可编辑）
 - (void)openFan {
     if (_fanOpen || _entries.count < 1) return;   // 0 个入口不弹（loadEntries 至少兜底 1 个）
-    _fanOpen = YES; [self closeFanItemsAnimated:NO];
+    _fanOpen = YES; _ball.alpha = 1.0f;           // 扇形展开期间球保持实心可见
+    [self closeFanItemsAnimated:NO];
     // 扇形无需键盘，保持非 key（不抢 App 触摸）；触摸经 hitTest 正常命中扇形按钮。
     CGPoint c = CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame));
     BOOL left = (c.x > _overlay.bounds.size.width / 2.0);
@@ -869,6 +909,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 }
 - (void)closeFan {
     _fanOpen = NO; [self closeFanItemsAnimated:YES];
+    if (!_ball.hidden) _ball.alpha = 0.4f;   // 关扇形 → 回到半透明待机
     [self setInteractive:NO];   // 关闭扇形 → 还给 App
 }
 - (void)closeFanItemsAnimated:(BOOL)animated {
@@ -894,10 +935,11 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
         f.origin.x = MAX(0, MIN(s.size.width - f.size.width, f.origin.x));
         f.origin.y = MAX(0, MIN(s.size.height - f.size.height, f.origin.y)); _panel.frame = f; }
     else _panel.frame = CGRectMake((s.size.width-ww)/2.0, (s.size.height-hh)/2.0, ww, hh);
-    _urlField.text = _url; [self layoutPanel]; [self loadURL];
+    _urlField.text = _url; _schemeBox.hidden = YES; _bar.hidden = NO; _webView.hidden = NO;
+    _ball.hidden = YES; _expanded = YES; [self setInteractive:YES];   // 先把 overlay 设为 key，WKWebView 才能正常渲染
     [_overlay bringSubviewToFront:_panel]; _panel.hidden = NO; _historyTable.hidden = YES;
-    _schemeBox.hidden = YES; _bar.hidden = NO; _webView.hidden = NO;   // 网页模式：显示工具条与网页
-    _ball.hidden = YES; _expanded = YES; [self setInteractive:YES];
+    [self layoutPanel]; [_panel layoutIfNeeded]; [_webView layoutIfNeeded];
+    [self loadURL];
     [self writeSync];
 }
 - (void)showSchemeBox:(NSString *)u {
@@ -927,7 +969,8 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 - (void)collapse {
     [_urlField resignFirstResponder]; [_schemeField resignFirstResponder];
     _historyTable.hidden = YES; _panel.hidden = YES;
-    _ball.hidden = !_enabled; _expanded = NO; [self setInteractive:NO]; [self writeSync];
+    _ball.hidden = !_enabled; if (_enabled) _ball.alpha = 0.4f;   // 收起 → 回到半透明待机
+    _expanded = NO; [self setInteractive:NO]; [self writeSync];
 }
 - (void)reload { [self loadURL]; }
 - (void)urlGo {
@@ -958,8 +1001,9 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
         NSArray *list = nil; if (arr) list = (__bridge_transfer NSArray *)arr;
         if ([list isKindOfClass:[NSArray class]] && [list containsObject:_hostBid]) hidden = YES;
     }
+    _overlay.hidden = NO;   // 防御：回到前台/控制中心收起后，确保悬浮窗一定显示
     if (!_enabled || hidden) { _ball.hidden = YES; _panel.hidden = YES; if (_fanOpen) [self closeFan]; return; }
-    if (!_expanded && !_fanOpen) { _ball.hidden = NO; [_overlay bringSubviewToFront:_ball]; [self setInteractive:NO]; }
+    if (!_expanded && !_fanOpen) { _ball.hidden = NO; _ball.alpha = 0.4f; [_overlay bringSubviewToFront:_ball]; [self setInteractive:NO]; }
 }
 
 #pragma mark - 跨 App 轻量同步
@@ -1023,14 +1067,25 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 - (NSString *)tableView:(UITableView *)tv titleForDeleteConfirmationButtonForRowAtIndexPath:(NSIndexPath *)ip { return @"删除"; }
 
 #pragma mark - WKNavigationDelegate
-- (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)nav { [_spinner startAnimating]; }
+- (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)nav {
+    [_spinner startAnimating]; if (_webErrorLabel) _webErrorLabel.hidden = YES;   // 开始新加载 → 清掉旧错误
+}
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)nav {
     [_spinner stopAnimating]; NSString *cur = webView.URL.absoluteString;
     if (cur.length && _expanded) { _url = cur; _urlField.text = cur; [self pushHistory:cur]; }
     [self applyWebZoom];
 }
-- (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)nav withError:(NSError *)error { [_spinner stopAnimating]; }
-- (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)nav withError:(NSError *)error { [_spinner stopAnimating]; }
+- (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)nav withError:(NSError *)error {
+    [_spinner stopAnimating]; [self showWebError:[error localizedDescription]];
+}
+- (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)nav withError:(NSError *)error {
+    [_spinner stopAnimating]; [self showWebError:[error localizedDescription]];
+}
+- (void)showWebError:(NSString *)msg {
+    if (!_webErrorLabel) return;
+    _webErrorLabel.text = [NSString stringWithFormat:@"⚠️ 网页无法加载\n%@", msg ?: @"(无详细信息)"];
+    _webErrorLabel.hidden = NO;
+}
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction
                                                    decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     NSURL *u = navigationAction.request.URL; NSString *scheme = u.scheme.lowercaseString;

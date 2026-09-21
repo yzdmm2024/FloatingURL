@@ -435,6 +435,9 @@ static const NSInteger kFUMaxEntries   = 6;
     CFPreferencesSetAppValue((__bridge CFStringRef)kFUEnabledApps, (__bridge CFPropertyListRef)[_selected copy],
         (__bridge CFStringRef)kFUSuite);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
+    // ★ 关键：黑名单保存后必须发 Darwin 通知，让正在运行的 App（如 QQ）立刻重新读取并隐藏球；
+    //   否则只能等 App 再次进入前台才生效，用户体感就是「加了黑名单球还在」。
+    notify_post("com.yzdmm.floatingurl/settingsChanged");
 }
 - (void)searchBar:(UISearchBar *)sb textDidChange:(NSString *)t { [self applyFilter:t]; }
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return _filtered.count; }
