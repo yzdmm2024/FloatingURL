@@ -11,7 +11,11 @@ static NSString * const kFUEntryLetter = @"letter";
 static NSString * const kFUEntryIcon   = @"icon";
 static NSString * const kFUURLs        = @"urls";
 static NSString * const kFUEnabledApps = @"enabledApps";
-static const NSInteger kFUMaxEntries   = 6;
+static NSString * const kFUPosX        = @"posX";
+static NSString * const kFUPosY        = @"posY";
+static NSString * const kFUIconSize    = @"iconSize";
+static NSString * const kFUIconGap     = @"iconGap";
+static const NSInteger kFUMaxEntries   = 16;   // v1.3.0：内环 6 + 外环 10
 
 #pragma mark - 方形裁剪控制器
 @interface FUCropVC : UIViewController <UIScrollViewDelegate>
@@ -259,17 +263,31 @@ static const NSInteger kFUMaxEntries   = 6;
 - (void)viewDidLoad {
     [super viewDidLoad]; self.title = @"说明书 / 玩法";
     _items = @[
-        @{@"t":@"① 打开网页", @"c":@"https://www.baidu.com", @"d":@"地址栏或扇形入口填网址，点开即加载网页"},
+        @{@"t":@"① 打开网页", @"c":@"https://www.baidu.com", @"d":@"地址栏或快捷入口填网址，点开即加载网页"},
         @{@"t":@"② 跳微信", @"c":@"weixin://", @"d":@"填 weixin:// 直接拉起微信"},
         @{@"t":@"③ 跳支付宝", @"c":@"alipay://", @"d":@"填 alipay:// 拉起支付宝"},
         @{@"t":@"④ 拨号", @"c":@"tel:10086", @"d":@"填 tel:10086 拉起拨号"},
-        @{@"t":@"⑤ 发邮件", @"c":@"mailto:a@b.com", @"d":@"填 mailto: 拉起邮件"},
-        @{@"t":@"⑥ 打开地图", @"c":@"maps://", @"d":@"填 maps:// 拉起地图"},
-        @{@"t":@"⑦ 装插件(Cydia)", @"c":@"cydia://package/com.example.foo", @"d":@"填 cydia://package/包名 拉起 Cydia 装包"},
-        @{@"t":@"⑧ 装插件(Sileo)", @"c":@"sileo://package/com.example.foo", @"d":@"填 sileo://package/包名 拉起 Sileo 装包"},
-        @{@"t":@"⑨ 打开本地文件", @"c":@"file:///var/mobile/Containers/...", @"d":@"填 file:// 路径打开本地文件"},
-        @{@"t":@"⑩ 如何获取URL", @"c":@"在 Safari 打开网页→分享→拷贝 即可得到网址", @"d":@"长按网页链接也可拷贝；把链接粘到地址栏/扇形入口即可"},
-        @{@"t":@"⑪ 扇形菜单", @"c":@"设置→快捷URI 添加多个入口，点球展开扇形", @"d":@"球在右扇形朝左、球在左扇形朝右；长按扇形图标可就地编辑"},
+        @{@"t":@"⑤ 发短信", @"c":@"sms:10086", @"d":@"填 sms:号码 拉起短信（可加 ?&body=预填内容）"},
+        @{@"t":@"⑥ 发邮件", @"c":@"mailto:a@b.com", @"d":@"填 mailto: 拉起邮件"},
+        @{@"t":@"⑦ 打开地图", @"c":@"maps://", @"d":@"填 maps:// 拉起地图导航"},
+        @{@"t":@"⑧ 装插件(Cydia)", @"c":@"cydia://package/com.example.foo", @"d":@"填 cydia://package/包名 拉起 Cydia 装包"},
+        @{@"t":@"⑨ 装插件(Sileo)", @"c":@"sileo://package/com.example.foo", @"d":@"填 sileo://package/包名 拉起 Sileo 装包"},
+        @{@"t":@"⑩ 打开本地文件", @"c":@"file:///var/jb/...", @"d":@"填 file:// 路径打开本地文件（rootless 路径以 /var/jb 开头）"},
+        @{@"t":@"⑪ 如何获取URL", @"c":@"在 Safari 打开网页→分享→拷贝 即可得到网址", @"d":@"长按网页链接也可拷贝；把链接粘到地址栏/快捷入口即可"},
+        @{@"t":@"⑫ 多环快捷菜单", @"c":@"设置→快捷URI 添加入口（内环6+外环10，最多16个）", @"d":@"点球展开三层层叠环：URL 球居中不变；长按环上图标可就地编辑；拖球时整环跟随"},
+        @{@"t":@"⑬ 布局调节", @"c":@"设置→布局调节（实时预览）", @"d":@"滑杆调位置/图标大小/图标间隔，预览即时变化，手机上同时生效"},
+        @{@"t":@"⑭ 支付宝付款码", @"c":@"alipays://platformapi/startapp?appId=20000056", @"d":@"一键拉起支付宝付款码，付款更快"},
+        @{@"t":@"⑮ 淘宝", @"c":@"taobao://", @"d":@"拉起手机淘宝；商品页链接前缀换成 taobao:// 可直达商品"},
+        @{@"t":@"⑯ 京东", @"c":@"openapp.jdmobile://", @"d":@"拉起京东 App"},
+        @{@"t":@"⑰ 拼多多", @"c":@"pinduoduo://", @"d":@"拉起拼多多"},
+        @{@"t":@"⑱ 抖音", @"c":@"snssdk1128://", @"d":@"拉起抖音"},
+        @{@"t":@"⑲ B站", @"c":@"bilibili://", @"d":@"拉起哔哩哔哩；bilibili://video/可直达视频"},
+        @{@"t":@"⑳ 高铁/12306", @"c":@"cn.12306://", @"d":@"拉起铁路12306 查票改签"},
+        @{@"t":@"㉑ 跳系统设置", @"c":@"App-prefs:", @"d":@"填 App-prefs: 打开系统设置；App-prefs:Bluetooth 直达蓝牙等子页"},
+        @{@"t":@"㉒ App Store 应用页", @"c":@"itms-apps://itunes.apple.com/app/id123456", @"d":@"把 id 换成应用 AppID，一键跳应用详情/评分"},
+        @{@"t":@"㉓ 工作门户", @"c":@"把公司 OA / 项目系统网址设为主 URL", @"d":@"悬浮球一键直达工作台，配合窗口大小调节当小窗浏览器用"},
+        @{@"t":@"㉔ 直播监控", @"c":@"监控摄像头/直播流的 http 网页地址", @"d":@"点开即小窗看画面，拖动+双指缩放随意摆位"},
+        @{@"t":@"㉕ 查快递", @"c":@"快递查询网页 + 运单号参数", @"d":@"常用查件页设成快捷入口，收件高峰一键查"},
     ];
     _tv = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleGrouped];
     _tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -465,6 +483,186 @@ static const NSInteger kFUMaxEntries   = 6;
 }
 @end
 
+#pragma mark - 布局实时预览画布（与 tweak 内环形公式完全一致）
+@interface FUPreviewView : UIView
+@property (nonatomic, assign) CGFloat posX, posY, iconSize, iconGap;   // posX/posY: 0~100
+@property (nonatomic, strong) NSArray *entries;
+- (void)refresh;
+@end
+@implementation FUPreviewView
+- (void)refresh { [self setNeedsDisplay]; }
+- (void)drawRect:(CGRect)rect {
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    CGRect s = self.bounds;
+    // 模拟屏幕底色（深色，像熄屏桌面）
+    [self fuFill:[UIColor colorWithRed:0.07 green:0.09 blue:0.12 alpha:1.0] rect:s];
+    CGFloat bs = MAX(24.0f, s.size.width * 0.11f);       // 预览里球的直径（对应 40pt 基准）
+    CGFloat scale = bs / 40.0f;
+    CGFloat isz = _iconSize * scale;
+    CGFloat gap = _iconGap * scale;
+    CGPoint c = CGPointMake(_posX / 100.0f * s.size.width, _posY / 100.0f * s.size.height);
+    CGFloat R1 = bs/2.0f + isz/2.0f + gap;
+    CGFloat R2 = R1 + isz + gap;
+    // 圈层参考虚线
+    CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:1.0 alpha:0.14].CGColor);
+    CGContextSetLineWidth(ctx, 1.0f);
+    CGContextAddArc(ctx, c.x, c.y, R1, 0, M_PI*2, 0); CGContextStrokePath(ctx);
+    CGContextAddArc(ctx, c.x, c.y, R2, 0, M_PI*2, 0); CGContextStrokePath(ctx);
+    // 中心球（URL 不变）
+    [self fuCircleAt:c size:bs img:nil ch:@"URL" fs:bs*0.24f];
+    // 快捷图标：内环 6 + 外环 10（有几条显示几条）
+    NSInteger n  = (NSInteger)_entries.count;
+    NSInteger n1 = MIN(n, 6), n2 = MIN(MAX(0, n - n1), 10);
+    for (NSInteger layer = 0; layer < 2; layer++) {
+        NSInteger cnt = (layer == 0) ? n1 : n2;
+        if (cnt <= 0) break;
+        CGFloat R = (layer == 0) ? R1 : R2;
+        CGFloat step = 360.0f / (CGFloat)cnt;
+        CGFloat a0 = -90.0f + ((layer == 1) ? step/2.0f : 0.0f);
+        for (NSInteger k = 0; k < cnt; k++) {
+            NSInteger idx = (layer == 0) ? k : 6 + k;
+            if (idx >= n) break;
+            NSDictionary *e = _entries[idx];
+            CGFloat rad = (a0 + step*(CGFloat)k) * M_PI / 180.0f;
+            CGPoint p = CGPointMake(c.x + R*cos(rad), c.y + R*sin(rad));
+            NSData *ic = e[@"icon"];
+            UIImage *img = ([ic isKindOfClass:[NSData class]] && ic.length) ? [UIImage imageWithData:ic] : nil;
+            NSString *ch = e[@"char"] ?: @"";
+            [self fuCircleAt:p size:isz img:img ch:ch fs:isz*0.42f];
+        }
+    }
+}
+- (void)fuFill:(UIColor *)col rect:(CGRect)r {
+    CGContextSetFillColorWithColor(UIGraphicsGetCurrentContext(), col.CGColor);
+    CGContextFillRect(UIGraphicsGetCurrentContext(), r);
+}
+- (void)fuCircleAt:(CGPoint)ctr size:(CGFloat)d img:(UIImage *)img ch:(NSString *)ch fs:(CGFloat)fs {
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    CGRect r = CGRectMake(ctr.x - d/2.0f, ctr.y - d/2.0f, d, d);
+    CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:1.0 alpha:0.20].CGColor);
+    CGContextFillEllipseInRect(ctx, r);
+    CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:1.0 alpha:0.55].CGColor);
+    CGContextSetLineWidth(ctx, 1.0f);
+    CGContextStrokeEllipseInRect(ctx, r);
+    if (img) {
+        CGContextSaveGState(ctx);
+        UIBezierPath *clip = [UIBezierPath bezierPathWithOvalInRect:r];
+        [clip addClip];
+        [img drawInRect:r];
+        CGContextRestoreGState(ctx);
+    } else if (ch.length) {
+        NSMutableParagraphStyle *ps = [NSMutableParagraphStyle new]; ps.alignment = NSTextAlignmentCenter;
+        [ch drawInRect:r withAttributes:@{
+            NSFontAttributeName: [UIFont boldSystemFontOfSize:fs],
+            NSForegroundColorAttributeName: [UIColor whiteColor],
+            NSParagraphStyleAttributeName: ps }];
+    }
+}
+@end
+
+#pragma mark - 布局调节器（位置/图标大小/图标间隔 滑杆 + 实时预览，改动即时全局生效）
+@interface FULayoutController : UIViewController
+@property (nonatomic, strong) UIScrollView *scroll;
+@property (nonatomic, strong) FUPreviewView *preview;
+@property (nonatomic, strong) UISlider *sx, *sy, *ss, *sg;
+@property (nonatomic, strong) UILabel *lx, *ly, *ls, *lg;
+@end
+@implementation FULayoutController
+- (CGFloat)prefFloat:(NSString *)key dft:(CGFloat)d {
+    CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)kFUSuite);
+    if (!r) return d;
+    CGFloat v = d;
+    if (CFGetTypeID(r) == CFNumberGetTypeID()) v = [(__bridge NSNumber *)r floatValue];
+    CFRelease(r); return v;
+}
+- (void)writeFloat:(NSString *)key value:(CGFloat)v {
+    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)[NSNumber numberWithFloat:v],
+        (__bridge CFStringRef)kFUSuite);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
+    notify_post("com.yzdmm.floatingurl/settingsChanged");
+}
+- (void)loadEntriesForPreview {
+    CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUURLs, (__bridge CFStringRef)kFUSuite);
+    NSArray *arr = nil;
+    if (r) { arr = (__bridge_transfer NSArray *)r; if (![arr isKindOfClass:[NSArray class]]) arr = nil; }
+    _preview.entries = arr ?: @[];
+}
+- (void)viewDidLoad {
+    [super viewDidLoad]; self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.title = @"布局调节（实时预览）";
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"恢复默认"
+        style:UIBarButtonItemStylePlain target:self action:@selector(reset)];
+    CGFloat w = self.view.bounds.size.width;
+    _scroll = [[UIScrollView alloc] initWithFrame:self.view.bounds];
+    _scroll.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:_scroll];
+    __block CGFloat y = 16;
+    // ---- 预览画布：按 iPhone 屏比例（≈1:2.16）----
+    CGFloat pw = w - 32;
+    _preview = [[FUPreviewView alloc] initWithFrame:CGRectMake(16, y, pw, pw * 2.16f)];
+    _preview.layer.cornerRadius = 18; _preview.clipsToBounds = YES;
+    _preview.posX = [self prefFloat:kFUPosX dft:92];
+    _preview.posY = [self prefFloat:kFUPosY dft:45];
+    _preview.iconSize = [self prefFloat:kFUIconSize dft:40];
+    _preview.iconGap  = [self prefFloat:kFUIconGap dft:56];
+    [self loadEntriesForPreview];
+    [_scroll addSubview:_preview]; y += _preview.frame.size.height + 6;
+    UILabel *pvTip = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 30)];
+    pvTip.numberOfLines = 0; pvTip.font = [UIFont systemFontOfSize:11];
+    pvTip.textColor = [UIColor tertiaryLabelColor];
+    pvTip.text = @"▲ 实时预览：按你已添加的快捷URI 渲染三层（URL + 内环6 + 外环10）。拖动下方滑杆，预览和手机上的悬浮球都会立刻变化。";
+    [pvTip sizeToFit]; [_scroll addSubview:pvTip]; y += pvTip.frame.size.height + 12;
+    // ---- 滑杆区 ----
+    CGFloat px = [self prefFloat:kFUPosX dft:92], py = [self prefFloat:kFUPosY dft:45];
+    CGFloat pis = [self prefFloat:kFUIconSize dft:40], pig = [self prefFloat:kFUIconGap dft:56];
+    _sx = [self mkSlider:CGRectMake(16, y, w-32, 52) min:0 max:100 val:px label:@"位置 · 横向" out:&y lout:&_lx];
+    _sy = [self mkSlider:CGRectMake(16, y, w-32, 52) min:0 max:100 val:py label:@"位置 · 纵向" out:&y lout:&_ly];
+    _ss = [self mkSlider:CGRectMake(16, y, w-32, 52) min:24 max:64 val:pis label:@"图标大小" out:&y lout:&_ls];
+    _sg = [self mkSlider:CGRectMake(16, y, w-32, 52) min:12 max:120 val:pig label:@"图标间隔" out:&y lout:&_lg];
+    _sx.tag = 0; _sy.tag = 1; _ss.tag = 2; _sg.tag = 3;
+    [_sx addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+    [_sy addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+    [_ss addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+    [_sg addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+    y += 12; _scroll.contentSize = CGSizeMake(w, y);
+}
+- (UISlider *)mkSlider:(CGRect)f min:(CGFloat)mn max:(CGFloat)mx val:(CGFloat)v
+                label:(NSString *)lab out:(CGFloat *)y lout:(UILabel * __strong *)lout {
+    UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(16, f.origin.y, f.size.width, 20)];
+    l.font = [UIFont systemFontOfSize:12]; l.textColor = [UIColor secondaryLabelColor];
+    l.text = [NSString stringWithFormat:@"%@（当前 %.0f）", lab, v];
+    [_scroll addSubview:l]; *lout = l;
+    UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(16, f.origin.y + 22, f.size.width, 30)];
+    sl.minimumValue = mn; sl.maximumValue = mx; sl.value = v;
+    [_scroll addSubview:sl];
+    *y = f.origin.y + 22 + 34 + 6;
+    return sl;
+}
+- (void)sliderChanged:(UISlider *)sl {
+    CGFloat v = roundf(sl.value);
+    NSString *key = nil; UILabel *l = nil; NSString *name = @"";
+    switch (sl.tag) {
+        case 0: key = kFUPosX; l = _lx; name = @"位置 · 横向"; _preview.posX = v; break;
+        case 1: key = kFUPosY; l = _ly; name = @"位置 · 纵向"; _preview.posY = v; break;
+        case 2: key = kFUIconSize; l = _ls; name = @"图标大小"; _preview.iconSize = v; break;
+        case 3: key = kFUIconGap; l = _lg; name = @"图标间隔"; _preview.iconGap = v; break;
+    }
+    if (!key) return;
+    l.text = [NSString stringWithFormat:@"%@（当前 %.0f）", name, v];
+    [self writeFloat:key value:v];
+    [_preview refresh];
+}
+- (void)reset {
+    _sx.value = 92; _sy.value = 45; _ss.value = 40; _sg.value = 56;
+    _lx.text = @"位置 · 横向（当前 92）"; _ly.text = @"位置 · 纵向（当前 45）";
+    _ls.text = @"图标大小（当前 40）"; _lg.text = @"图标间隔（当前 56）";
+    _preview.posX = 92; _preview.posY = 45; _preview.iconSize = 40; _preview.iconGap = 56;
+    [self writeFloat:kFUPosX value:92]; [self writeFloat:kFUPosY value:45];
+    [self writeFloat:kFUIconSize value:40]; [self writeFloat:kFUIconGap value:56];
+    [_preview refresh];
+}
+@end
+
 #pragma mark - 主设置控制器
 @interface FUSettingsController : PSListController
 @end
@@ -477,6 +675,8 @@ static const NSInteger kFUMaxEntries   = 6;
     notify_post("com.yzdmm.floatingurl/settingsChanged"); }
 - (void)manageUrls { FUUrlListController *list = [[FUUrlListController alloc] init];
     [self.navigationController pushViewController:list animated:YES]; }
+- (void)showLayout { FULayoutController *lc = [[FULayoutController alloc] init];
+    [self.navigationController pushViewController:lc animated:YES]; }
 - (void)showGuide { FUGuideController *g = [[FUGuideController alloc] init];
     [self.navigationController pushViewController:g animated:YES]; }
 - (void)showAppList { FUAppListController *a = [[FUAppListController alloc] init];

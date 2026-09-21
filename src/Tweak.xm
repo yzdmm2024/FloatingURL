@@ -37,9 +37,16 @@ static NSString * const kFUEntryLetter = @"letter";
 static NSString * const kFUEntryIcon   = @"icon";
 static NSString * const kFUSync        = @"sync";
 static NSString * const kFUEnabledApps = @"enabledApps";
+static NSString * const kFUPosX        = @"posX";       // 球默认落点（屏幕宽度百分比 0~100）
+static NSString * const kFUPosY        = @"posY";       // 球默认落点（屏幕高度百分比 0~100）
+static NSString * const kFUIconSize    = @"iconSize";   // 快捷图标尺寸 pt
+static NSString * const kFUIconGap     = @"iconGap";    // 图标/圈层间隔 pt
 
-static const NSInteger kFUMaxEntries = 6;
-static const CGFloat   kFUButtonSize = 40.0f;   // 悬浮球与扇形图标统一尺寸
+static const NSInteger kFUMaxEntries = 16;   // v1.3.0：多环布局（第一环 6 + 第二环 10）
+static const NSInteger kFULayer1Max  = 6;    // 第二层（内环）最多 6 个
+static const NSInteger kFULayer2Max  = 10;   // 第三层（外环）最多 10 个
+static const CGFloat   kFUButtonSize = 40.0f;   // 悬浮球尺寸
+static const CGFloat   kFUSnapThreshold = 48.0f; // 松手时距边 ≤48pt 才自动吸附（修「不靠近也吸走」）
 
 static void fuPrefsChanged(CFNotificationCenterRef center, void *observer,
                            CFStringRef name, const void *object, CFDictionaryRef userInfo);
@@ -386,6 +393,10 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     NSMutableArray        *_fanOffsets;  // 每个扇形相对球的中心偏移(CGPoint)，拖动球时跟随用
     NSString              *_hostBid;     // 当前宿主 App 的 bundle id（用于「作用 App」网关）
     BOOL                  _interactive;  // 是否已临时当 key（避免重复 rekey）
+    CGFloat               _posX, _posY;      // 球默认落点（0~1 屏幕比例）
+    CGFloat               _iconSize;         // 快捷图标尺寸
+    CGFloat               _iconGap;          // 图标/圈层间隔
+    NSTimer               *_pollTimer;       // 每秒兜底重判黑名单/开关（修黑名单不生效）
 }
 
 + (instancetype)shared {
@@ -398,6 +409,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     if (self = [super init]) {
         _enabled  = YES; _url = @"https://www.apple.com";
         _winW = 340; _winH = 480; _expanded = NO; _didSetup = NO; _fanOpen = NO;
+        _posX = 0.92f; _posY = 0.45f; _iconSize = 40.0f; _iconGap = 56.0f;
         _history = [NSMutableArray array]; _fanItems = [NSMutableArray array]; _fanOffsets = [NSMutableArray array];
         [self reloadPrefs]; [self loadHistory];
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
@@ -448,6 +460,19 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     if (_winH < 280) _winH = 280; if (_winH > 900) _winH = 900;
     CFPropertyListRef barRef = CFPreferencesCopyAppValue(CFSTR("barAtBottom"), (__bridge CFStringRef)kFUSuite);
     if (barRef) { _barAtBottom = [(__bridge NSNumber *)barRef boolValue]; CFRelease(barRef); }
+    // v1.3.0 布局滑杆：位置(X/Y 百分比)、图标大小、图标间隔
+    CFPropertyListRef pxRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUPosX, (__bridge CFStringRef)kFUSuite);
+    if (pxRef && CFGetTypeID(pxRef) == CFNumberGetTypeID()) { _posX = [(__bridge NSNumber *)pxRef floatValue] / 100.0f; CFRelease(pxRef); }
+    CFPropertyListRef pyRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUPosY, (__bridge CFStringRef)kFUSuite);
+    if (pyRef && CFGetTypeID(pyRef) == CFNumberGetTypeID()) { _posY = [(__bridge NSNumber *)pyRef floatValue] / 100.0f; CFRelease(pyRef); }
+    CFPropertyListRef isRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUIconSize, (__bridge CFStringRef)kFUSuite);
+    if (isRef && CFGetTypeID(isRef) == CFNumberGetTypeID()) { _iconSize = [(__bridge NSNumber *)isRef floatValue]; CFRelease(isRef); }
+    CFPropertyListRef igRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUIconGap, (__bridge CFStringRef)kFUSuite);
+    if (igRef && CFGetTypeID(igRef) == CFNumberGetTypeID()) { _iconGap = [(__bridge NSNumber *)igRef floatValue]; CFRelease(igRef); }
+    if (_posX < 0) _posX = 0; if (_posX > 1) _posX = 1;
+    if (_posY < 0) _posY = 0; if (_posY > 1) _posY = 1;
+    if (_iconSize < 24) _iconSize = 24; if (_iconSize > 64) _iconSize = 64;
+    if (_iconGap  < 12) _iconGap  = 12; if (_iconGap  > 120) _iconGap = 120;
     [self loadEntries];
 }
 - (void)loadEntries {
@@ -513,7 +538,8 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
         }
         if (scene) _overlay = [[FUOverlayWindow alloc] initWithWindowScene:scene];
         else       _overlay = [[FUOverlayWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-        _overlay.windowLevel = 1000;
+        // v1.3.0：层级提到 1e9（远高于状态栏 1000 / 弹窗 2000），下拉控制中心时球不再被盖住。
+        _overlay.windowLevel = 1000000000.0f;
         _overlay.backgroundColor = [UIColor clearColor];
         _overlay.hidden = NO;            // 仅可见，绝不 makeKeyAndVisible
         _overlay.userInteractionEnabled = YES;
@@ -529,6 +555,13 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     // 进入前台时实时重判「作用 App」网关，免去重启 App 才生效。
     [[NSNotificationCenter defaultCenter] addObserver:self
         selector:@selector(onBecomeActive) name:UIApplicationDidBecomeActiveNotification object:nil];
+    // v1.3.0 兜底：每秒重读偏好并重判黑名单/开关。Darwin 通知在某些 App（如 QQ）里会被
+    // 延迟或吞掉，导致「设置里加了黑名单、球还在」——轮询保证 1 秒内必生效。
+    if (!_pollTimer) {
+        _pollTimer = [NSTimer timerWithTimeInterval:1.0 target:self selector:@selector(onBecomeActive)
+                                           userInfo:nil repeats:YES];
+        [[NSRunLoop mainRunLoop] addTimer:_pollTimer forMode:NSRunLoopCommonModes];
+    }
     [self onBecomeActive];
 }
 - (void)onBecomeActive {
@@ -646,7 +679,9 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     _webView = [[WKWebView alloc] initWithFrame:CGRectZero configuration:cfg];
     _webView.navigationDelegate = self;
     _webView.allowsBackForwardNavigationGestures = YES;
-    _webView.opaque = NO; _webView.backgroundColor = [UIColor clearColor];
+    // v1.3.0 修「只有网址没有网页内容(白屏)」：透明 WKWebView 在独立 window 里
+    // 合成路径异常 → 改回不透明 + 实底色，内容进程稳定渲染。
+    _webView.opaque = YES; _webView.backgroundColor = [UIColor systemBackgroundColor];
     _webView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     _webView.scrollView.bounces = YES; [_panel addSubview:_webView];
 
@@ -690,7 +725,10 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 }
 - (void)placeBallInWindow:(UIWindow *)w {
     if (!_ball || !w) return;
-    _ball.frame = CGRectMake(w.bounds.size.width - kFUButtonSize - 4, w.bounds.size.height * 0.45, kFUButtonSize, kFUButtonSize);
+    // v1.3.0：默认落点由设置滑杆（posX/posY，屏幕百分比）决定。
+    CGFloat bw = w.bounds.size.width, bh = w.bounds.size.height;
+    _ball.frame = CGRectMake(_posX * bw - kFUButtonSize/2.0f, _posY * bh - kFUButtonSize/2.0f,
+                             kFUButtonSize, kFUButtonSize);
     _ball.alpha = 0.4f;   // 初始即半透明待机（拖动/点击会临时变实心）
 }
 - (void)layoutPanel {
@@ -726,6 +764,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 #pragma mark - 交互
 - (void)ballTapped {
     _ball.alpha = 1.0f;   // 点击唤醒：变实心，方便使用
+    [self restoreBallFromSnap];   // 半隐吸附态 → 先拉回完整可见
     if (_expanded) { [self collapse]; return; }
     if (_fanOpen)  { [self closeFan]; return; }
     // 没有配置任何入口 → 直接展开默认网页；有入口 → 弹出扇形（几个入口排几个）。
@@ -752,21 +791,40 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
             }
         }
     }
-    else if (g.state == UIGestureRecognizerStateEnded) [self snapBallToEdge];   // 松手 → 吸附最近边 + 半透明
+    else if (g.state == UIGestureRecognizerStateEnded) [self snapBallToEdge];   // 松手 → 近边才吸附 + 半透明
 }
-// 松手后自动吸附到离球心最近的屏幕边（仅留 2pt 间距），并进入半透明待机态，利于日常使用。
+// v1.3.0 修复「没靠近屏幕边也自动吸走」：只有球心距某条边 ≤48pt 才吸附；
+// 吸附态 = 图标只露出一半（另一半藏在屏幕外），带回弹动画。远处松手则原地半透明待机。
 - (void)snapBallToEdge {
     if (!_ball) return;
-    CGRect b = _ball.frame; CGRect s = _overlay.bounds; CGFloat inset = 2.0f;
+    CGRect b = _ball.frame; CGRect s = _overlay.bounds;
     CGFloat cx = CGRectGetMidX(b), cy = CGRectGetMidY(b);
     CGFloat dl = cx, dr = s.size.width - cx, dt = cy, db = s.size.height - cy;
     CGFloat m = MIN(MIN(dl, dr), MIN(dt, db));
+    if (m > kFUSnapThreshold) {   // 不靠近任何边 → 原地驻留，只回半透明
+        [UIView animateWithDuration:0.2 animations:^{ _ball.alpha = 0.4f; }];
+        return;
+    }
+    CGFloat half = b.size.width / 2.0f;
     CGRect f = b;
-    if      (m == dl) f.origin.x = inset;
-    else if (m == dr) f.origin.x = s.size.width  - b.size.width  - inset;
-    else if (m == dt) f.origin.y = inset;
-    else              f.origin.y = s.size.height - b.size.height - inset;
-    [UIView animateWithDuration:0.2 animations:^{ _ball.frame = f; _ball.alpha = 0.4f; }];
+    if      (m == dl) f.origin.x = -half;                              // 左吸：只露右半
+    else if (m == dr) f.origin.x = s.size.width - half;                // 右吸：只露左半
+    else if (m == dt) f.origin.y = -half;                              // 上吸：只露下半
+    else              f.origin.y = s.size.height - half;               // 下吸：只露上半
+    [UIView animateWithDuration:0.3 delay:0.0 usingSpringWithDamping:0.65 initialSpringVelocity:0.5
+                        options:UIViewAnimationOptionCurveEaseOut
+                     animations:^{ _ball.frame = f; _ball.alpha = 0.4f; }
+                     completion:nil];
+}
+// 球处于「半隐吸附态」时，点击先把它完整拉回屏幕内（再弹环/面板）。
+- (void)restoreBallFromSnap {
+    if (!_ball) return;
+    CGRect s = _overlay.bounds; CGRect f = _ball.frame;
+    CGRect clamped = CGRectMake(MAX(0, MIN(s.size.width  - f.size.width,  f.origin.x)),
+                                MAX(0, MIN(s.size.height - f.size.height, f.origin.y)),
+                                f.size.width, f.size.height);
+    if (!CGRectEqualToRect(f, clamped))
+        [UIView animateWithDuration:0.2 animations:^{ _ball.frame = clamped; }];
 }
 - (void)panPanel:(UIPanGestureRecognizer *)g {
     if (!_panel || !_panel.superview) return;
@@ -803,49 +861,56 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     [self layoutPanel];
 }
 
-#pragma mark - 扇形菜单（图标尺寸 = 球尺寸；长按可编辑）
+#pragma mark - 多环快捷菜单（v1.3.0：球居中，内环 6 个 + 外环 10 个；长按可编辑）
 - (void)openFan {
     if (_fanOpen || _entries.count < 1) return;   // 0 个入口不弹（loadEntries 至少兜底 1 个）
-    _fanOpen = YES; _ball.alpha = 1.0f;           // 扇形展开期间球保持实心可见
+    _fanOpen = YES; _ball.alpha = 1.0f;           // 展开期间球保持实心可见
     [self closeFanItemsAnimated:NO];
-    // 扇形无需键盘，保持非 key（不抢 App 触摸）；触摸经 hitTest 正常命中扇形按钮。
+    [self restoreBallFromSnap];                   // 半隐态先拉回，环才不会跟着缩在屏外
+    // 环无需键盘，保持非 key（不抢 App 触摸）；触摸经 hitTest 正常命中图标按钮。
     CGPoint c = CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame));
-    BOOL left = (c.x > _overlay.bounds.size.width / 2.0);
-    NSInteger n = _entries.count;
-    CGFloat base = left ? 180.0f : 0.0f;          // 球在右侧就向左展开，反之向右
-    // n==1 时 span=0，直接放在 base 方向（避免除以 (n-1)=0 得到 NaN）；n>1 才真正扇形展开。
-    CGFloat span = (n <= 1) ? 0.0f : MIN(140.0f, 40.0f + 30.0f * (n - 1));
-    // 半径随条目数增大，避免 6 个扇形挤在一起；最大不超过屏宽的 1/3。
-    CGFloat R = 96.0f + 8.0f * (n - 1);
-    R = MIN(R, _overlay.bounds.size.width / 3.0f);
+    CGFloat isz = _iconSize;                      // 图标尺寸（设置滑杆）
+    CGFloat gap = _iconGap;                       // 图标/圈层间隔（设置滑杆）
+    CGFloat R1 = kFUButtonSize/2.0f + isz/2.0f + gap;   // 第二层（内环）半径
+    CGFloat R2 = R1 + isz + gap;                        // 第三层（外环）半径
+    NSInteger n  = _entries.count;
+    NSInteger n1 = MIN(n, kFULayer1Max);                // 内环最多 6 个
+    NSInteger n2 = MIN(n - n1, kFULayer2Max);           // 外环最多 10 个
     [_fanOffsets removeAllObjects];
-    for (NSInteger i = 0; i < n; i++) {
-        // n==1 时直接放在 base 方向（避免除以 (n-1)=0 得到 NaN）。
-        CGFloat a = (n <= 1) ? base : (base - span/2.0f + span * ((CGFloat)i / (CGFloat)(n - 1)));
-        CGFloat rad = a * M_PI / 180.0f;
-        CGFloat x = c.x + R * cos(rad), y = c.y + R * sin(rad);
-        UIButton *it = [self buildFanItem:_entries[i] index:i];
-        CGRect target = CGRectMake(x - kFUButtonSize/2.0, y - kFUButtonSize/2.0, kFUButtonSize, kFUButtonSize);
-        target.origin.x = MAX(2, MIN(_overlay.bounds.size.width  - kFUButtonSize - 2, target.origin.x));
-        target.origin.y = MAX(2, MIN(_overlay.bounds.size.height - kFUButtonSize - 2, target.origin.y));
-        // 先把最终 frame 定死（target = 40pt 小圆），再只动画 transform(缩放) + alpha。
-        // 严禁在「同一动画块」里既设 frame 又设 transform：transform 非恒等时设 frame 是 UIKit
-        // 未定义行为，会把 bounds 反解放大 1/0.1=10 倍（40→400pt 全屏巨块）。
-        it.frame = target;
-        // 记录本扇形相对「球心」的偏移，拖动球时按偏移整体平移，扇形跟着球走。
-        [_fanOffsets addObject:[NSValue valueWithCGPoint:
-            CGPointMake(CGRectGetMidX(target) - c.x, CGRectGetMidY(target) - c.y)]];
-        it.alpha = 0.0f; it.transform = CGAffineTransformMakeScale(0.1f, 0.1f);
-        [_overlay addSubview:it]; [_fanItems addObject:it];
-        [UIView animateWithDuration:0.22 delay:0.02*i usingSpringWithDamping:0.7 initialSpringVelocity:0.6
-                            options:UIViewAnimationOptionCurveEaseOut
-                         animations:^{ it.alpha = 1.0f; it.transform = CGAffineTransformIdentity; }
-                         completion:nil];
+    // 逐环均匀 360° 分布：内环从正上方起排，外环错开半个步长（蜂窝状更好看、更不挤）。
+    for (NSInteger layer = 0; layer < 2; layer++) {
+        NSInteger cnt = (layer == 0) ? n1 : n2;
+        if (cnt <= 0) break;
+        CGFloat R = (layer == 0) ? R1 : R2;
+        CGFloat step = 360.0f / (CGFloat)cnt;
+        CGFloat a0 = -90.0f + ((layer == 1) ? step/2.0f : 0.0f);
+        for (NSInteger k = 0; k < cnt; k++) {
+            NSInteger idx = (layer == 0) ? k : (kFULayer1Max + k);
+            if (idx >= (NSInteger)n) break;
+            CGFloat rad = (a0 + step * (CGFloat)k) * M_PI / 180.0f;
+            CGFloat x = c.x + R * cos(rad), y = c.y + R * sin(rad);
+            UIButton *it = [self buildFanItem:_entries[idx] index:idx size:isz];
+            CGRect target = CGRectMake(x - isz/2.0f, y - isz/2.0f, isz, isz);
+            target.origin.x = MAX(2, MIN(_overlay.bounds.size.width  - isz - 2, target.origin.x));
+            target.origin.y = MAX(2, MIN(_overlay.bounds.size.height - isz - 2, target.origin.y));
+            // 先把最终 frame 定死，再只动画 transform(缩放) + alpha。
+            // 严禁在同一动画块里既设 frame 又设 transform（UIKit 未定义行为会放大 10 倍）。
+            it.frame = target;
+            [_fanOffsets addObject:[NSValue valueWithCGPoint:
+                CGPointMake(CGRectGetMidX(target) - c.x, CGRectGetMidY(target) - c.y)]];
+            it.alpha = 0.0f; it.transform = CGAffineTransformMakeScale(0.1f, 0.1f);
+            [_overlay addSubview:it]; [_fanItems addObject:it];
+            [UIView animateWithDuration:0.22 delay:0.02*(k + (layer==0?0:cnt))
+                                usingSpringWithDamping:0.7 initialSpringVelocity:0.6
+                                              options:UIViewAnimationOptionCurveEaseOut
+                                           animations:^{ it.alpha = 1.0f; it.transform = CGAffineTransformIdentity; }
+                                           completion:nil];
+        }
     }
 }
-- (UIButton *)buildFanItem:(NSDictionary *)entry index:(NSInteger)idx {
+- (UIButton *)buildFanItem:(NSDictionary *)entry index:(NSInteger)idx size:(CGFloat)isz {
     UIButton *it = [UIButton buttonWithType:UIButtonTypeCustom];
-    it.layer.cornerRadius = kFUButtonSize/2.0; it.layer.shadowColor = [UIColor blackColor].CGColor;
+    it.layer.cornerRadius = isz/2.0f; it.layer.shadowColor = [UIColor blackColor].CGColor;
     it.layer.shadowOpacity = 0.3f; it.layer.shadowRadius = 5.0f; it.layer.shadowOffset = CGSizeMake(0, 2);
     it.clipsToBounds = YES; it.tag = idx;
     NSData *icon = entry[kFUEntryIcon]; UIImage *img = icon.length ? [UIImage imageWithData:icon] : nil;
@@ -856,22 +921,22 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
         it.contentHorizontalAlignment = UIControlContentHorizontalAlignmentFill;
         it.contentVerticalAlignment   = UIControlContentVerticalAlignmentFill;
     } else {
-        // 无自定义图标：默认外观与悬浮球一致——毛玻璃 + 白色描边，避免以前那种"彩虹纯色块"。
+        // 无自定义图标：默认外观与悬浮球一致——毛玻璃 + 白色描边。
         it.backgroundColor = [UIColor clearColor];
         UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:
             [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterial]];
         blur.frame = it.bounds;
         blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        blur.layer.cornerRadius = kFUButtonSize/2.0; blur.clipsToBounds = YES;
+        blur.layer.cornerRadius = isz/2.0f; blur.clipsToBounds = YES;
         blur.layer.borderWidth = 0.8f; blur.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.55].CGColor;
-        blur.userInteractionEnabled = NO;   // 关键：否则毛玻璃会拦截触摸，导致「无图标时扇形点不动」
+        blur.userInteractionEnabled = NO;   // 关键：否则毛玻璃会拦截触摸，导致「无图标时点不动」
         [it addSubview:blur];
     }
     UILabel *lab = [[UILabel alloc] initWithFrame:it.bounds];
     lab.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     lab.textAlignment = NSTextAlignmentCenter; lab.textColor = img ? [UIColor whiteColor] : [UIColor labelColor];
     NSString *ch = entry[kFUEntryChar] ?: @""; NSString *lt = entry[kFUEntryLetter] ?: @"";
-    lab.numberOfLines = 0; lab.font = [UIFont boldSystemFontOfSize:img ? 11 : 17];
+    lab.numberOfLines = 0; lab.font = [UIFont boldSystemFontOfSize:img ? isz*0.26f : isz*0.42f];
     lab.text = img ? [NSString stringWithFormat:@"%@\n%@", ch, lt] : ch;
     if (img) lab.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
     [it addSubview:lab];
@@ -924,6 +989,15 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     }
 }
 
+// v1.3.0 修「历史列表看得见点不动」：_webView 比 _historyTable 后加入 _panel，
+// 永远压在历史表上层把触摸吞掉 → 显示历史时必须把表置顶，收起时把 webView 顶回。
+- (void)setHistoryVisible:(BOOL)v {
+    if (!_historyTable) return;
+    if (v) { [_historyTable reloadData]; _historyTable.hidden = (_history.count == 0);
+             [_panel bringSubviewToFront:_historyTable]; [_panel bringSubviewToFront:_bar]; }
+    else   { _historyTable.hidden = YES; [_panel bringSubviewToFront:_webView]; [_panel bringSubviewToFront:_bar]; }
+}
+
 #pragma mark - 展开 / 收起 面板
 - (void)expand {
     if (!_didSetup) { dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3*NSEC_PER_SEC)),
@@ -937,9 +1011,10 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     else _panel.frame = CGRectMake((s.size.width-ww)/2.0, (s.size.height-hh)/2.0, ww, hh);
     _urlField.text = _url; _schemeBox.hidden = YES; _bar.hidden = NO; _webView.hidden = NO;
     _ball.hidden = YES; _expanded = YES; [self setInteractive:YES];   // 先把 overlay 设为 key，WKWebView 才能正常渲染
-    [_overlay bringSubviewToFront:_panel]; _panel.hidden = NO; _historyTable.hidden = YES;
+    [_overlay bringSubviewToFront:_panel]; _panel.hidden = NO; [self setHistoryVisible:NO];
     [self layoutPanel]; [_panel layoutIfNeeded]; [_webView layoutIfNeeded];
-    [self loadURL];
+    // v1.3.0：等 key 窗口 + 布局生效后再发起加载（WKWebView 在非 key/零尺寸下加载会白屏）。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [self loadURL]; });
     [self writeSync];
 }
 - (void)showSchemeBox:(NSString *)u {
@@ -954,7 +1029,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
     _schemeField.text = u; _url = u;
     [_overlay bringSubviewToFront:_panel]; _panel.hidden = NO;
     // 非网页模式：只显示输入框 + 打开按钮，隐藏网页工具条/网页视图/历史。
-    _bar.hidden = YES; _webView.hidden = YES; _historyTable.hidden = YES; _schemeBox.hidden = NO;
+    _bar.hidden = YES; _webView.hidden = YES; [self setHistoryVisible:NO]; _schemeBox.hidden = NO;
     [self layoutPanel];
     _ball.hidden = YES; _expanded = YES; [self setInteractive:YES]; [self writeSync];
 }
@@ -968,18 +1043,19 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 }
 - (void)collapse {
     [_urlField resignFirstResponder]; [_schemeField resignFirstResponder];
-    _historyTable.hidden = YES; _panel.hidden = YES;
-    _ball.hidden = !_enabled; if (_enabled) _ball.alpha = 0.4f;   // 收起 → 回到半透明待机
+    [self setHistoryVisible:NO]; _panel.hidden = YES;
     _expanded = NO; [self setInteractive:NO]; [self writeSync];
+    // v1.3.0：统一走 applyVisibility（同时尊重总开关 + 黑名单），不再只判 enabled。
+    [self applyVisibility];
 }
 - (void)reload { [self loadURL]; }
 - (void)urlGo {
     NSString *raw = _urlField.text; NSString *u = [self normalizeURL:raw];
     if (!u.length) { _urlField.text = _url; return; }
     _url = u; [self pushHistory:u]; [self loadURL]; [_urlField resignFirstResponder];
-    _historyTable.hidden = YES; [self writeSync];
+    [self setHistoryVisible:NO]; [self writeSync];
 }
-- (void)urlEditingBegan { [_historyTable reloadData]; _historyTable.hidden = _history.count == 0; }
+- (void)urlEditingBegan { [self setHistoryVisible:YES]; }
 - (void)loadURL {
     NSURL *u = [NSURL URLWithString:_url]; if (!u || u.scheme == nil) u = [NSURL URLWithString:@"https://www.apple.com"];
     NSString *scheme = u.scheme.lowercaseString;
@@ -1001,8 +1077,14 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
         NSArray *list = nil; if (arr) list = (__bridge_transfer NSArray *)arr;
         if ([list isKindOfClass:[NSArray class]] && [list containsObject:_hostBid]) hidden = YES;
     }
-    _overlay.hidden = NO;   // 防御：回到前台/控制中心收起后，确保悬浮窗一定显示
-    if (!_enabled || hidden) { _ball.hidden = YES; _panel.hidden = YES; if (_fanOpen) [self closeFan]; return; }
+    // v1.3.0 修「黑名单加了球还在 / QQ 残留 URL」：黑名单或总开关命中时直接隐藏整个
+    // overlay 窗口（球、环、面板一锅端），比只藏球更彻底——之前只藏 _ball，环/面板
+    // 以及某些时序下 re-show 的球都会漏出来，看起来就像「残留了第二个 URL」。
+    if (!_enabled || hidden) {
+        _overlay.hidden = YES;
+        _ball.hidden = YES; _panel.hidden = YES; if (_fanOpen) [self closeFan]; return;
+    }
+    _overlay.hidden = NO;   // 允许显示：确保窗口一定恢复（含控制中心收起后）
     if (!_expanded && !_fanOpen) { _ball.hidden = NO; _ball.alpha = 0.4f; [_overlay bringSubviewToFront:_ball]; [self setInteractive:NO]; }
 }
 
@@ -1054,7 +1136,7 @@ static void fuSyncChanged(CFNotificationCenterRef center, void *observer,
 }
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     NSString *u = _history[ip.row]; _url = u; _urlField.text = u; [self loadURL]; [self pushHistory:u];
-    [tv reloadData]; _historyTable.hidden = YES; [_urlField resignFirstResponder];
+    [tv reloadData]; [self setHistoryVisible:NO]; [_urlField resignFirstResponder];
 }
 - (void)tableView:(UITableView *)tv commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
                                             forRowAtIndexPath:(NSIndexPath *)ip {
