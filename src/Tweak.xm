@@ -905,7 +905,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     if (_fanAutoHide < 0) _fanAutoHide = 0; if (_fanAutoHide > 60.0) _fanAutoHide = 60.0;
     if (_fanScale < 60.0f) _fanScale = 60.0f; if (_fanScale > 160.0f) _fanScale = 160.0f;
     // 每层数量（0=自动）
-    id l1 = suite[@"layer1"], *l2 = suite[@"layer2"], *l3 = suite[@"layer3"];
+    id l1 = suite[@"layer1"], l2 = suite[@"layer2"], l3 = suite[@"layer3"];
     if ([l1 isKindOfClass:[NSNumber class]]) _layer1 = [l1 integerValue];
     if ([l2 isKindOfClass:[NSNumber class]]) _layer2 = [l2 integerValue];
     if ([l3 isKindOfClass:[NSNumber class]]) _layer3 = [l3 integerValue];
@@ -925,7 +925,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     // 球外观
     id btRef = suite[@"ballTitle"]; _ballTitle = ([btRef isKindOfClass:[NSString class]] && [btRef length]) ? btRef : nil;
     if (!_ballTitle.length) _ballTitle = @"URL";
-    id lRef = suite[@"ballIconLeft"], *rRef = suite[@"ballIconRight"];
+    id lRef = suite[@"ballIconLeft"], rRef = suite[@"ballIconRight"];
     BOOL haveNew = (lRef != nil) || (rRef != nil);
     if (haveNew) {
         _ballIconL = [lRef isKindOfClass:[NSData class]] ? lRef : nil;
