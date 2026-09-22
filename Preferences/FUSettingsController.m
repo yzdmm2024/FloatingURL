@@ -1506,13 +1506,17 @@ static NSArray *FUColorPalette(void) {
     CFPreferencesSetAppValue((__bridge CFStringRef)kFUSilent, (__bridge CFPropertyListRef)@(on), (__bridge CFStringRef)kFUSuite);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
 }
-// v1.3.3：静默模式开关回调。旗标文件存在=开（App 跳过心跳、桌面球休眠）。
-// 不依赖偏好位时序：直接翻转旗标文件当前状态，保证开关与实际一致。
+// v1.3.33：静默模式开关回调。改用布尔（与启用开关一致）——直接翻转 suite 里的 silent 位。
+// 不再写旗标文件：沙盒 Preferences 进程在 rootless 上未必能写 /var/mobile/Media，导致静默时灵时不灵。
+// v1.3.33：PSSwitchCell 在调用 action 前已把新值写入 plist。这里只「同步 + 通知」，
+// 绝不能再翻转（否则写回旧值，开关不生效）。若框架未自动保存，则读开关当前态手动写入。
 - (void)setSilent:(id)sender {
-    BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"];
-    if (exists) [[NSFileManager defaultManager] removeItemAtPath:@"/var/mobile/Media/FloatingURL_silent" error:nil];
-    else        [@"" writeToFile:@"/var/mobile/Media/FloatingURL_silent" atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    CFPreferencesSetAppValue((__bridge CFStringRef)kFUSilent, (__bridge CFPropertyListRef)@(!exists), (__bridge CFStringRef)kFUSuite);
+    BOOL on;
+    if ([sender respondsToSelector:@selector(isOn)]) on = [(UISwitch *)sender isOn];   // sender 是 UISwitch
+    else if ([sender isKindOfClass:[NSObject class]] && [sender respondsToSelector:@selector(control)] && [[(id)sender control] isKindOfClass:[UISwitch class]])
+        on = [(UISwitch *)[(id)sender control] isOn];                                    // sender 是 PSSwitchCell
+    else { Boolean cur = false; on = !CFPreferencesGetAppBooleanValue((__bridge CFStringRef)kFUSilent, (__bridge CFStringRef)kFUSuite, &cur); }
+    CFPreferencesSetAppValue((__bridge CFStringRef)kFUSilent, (__bridge CFPropertyListRef)@(on), (__bridge CFStringRef)kFUSuite);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
     notify_post("com.yzdmm.floatingurl/settingsChanged");
 }

@@ -127,9 +127,10 @@ static UIViewController *fuTopViewController(void) {
 static void fuStartAppHeartbeat(NSString *bid) {
     static BOOL started = NO; if (started) return; started = YES;
     if (!bid.length) return;
-    // v1.3.3 静默模式：SpringBoard 写好标记文件后，App 进程完全不注入心跳（零打扰、最省电）。
-    // 读取失败（沙盒等）则回退到正常心跳，不影响黑名单功能。
-    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"]) return;
+    // v1.3.33：静默模式（布尔）开启时，App 进程完全不注入心跳（零打扰、最省电）。
+    // 走 CFPreferences 读；读不到则回退到正常心跳，不影响黑名单功能（守护进程仍按 _silent 强制隐藏）。
+    Boolean sVal = false;
+    if (CFPreferencesGetAppBooleanValue((__bridge CFStringRef)kFUSilent, (__bridge CFStringRef)kFUSuite, &sVal) && sVal) return;
     NSString *alive = fuAliveName(bid), *gone = fuGoneName(bid);
     void (^beat)(void) = ^{
         // 关键：只有「真前台」才上报。后台 App 的定时器可能仍在校跑，
@@ -857,113 +858,100 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     [mgr showRespringPrompt];
 }
 
+#pragma mark - v1.3.33：直接读磁盘偏好，绕过 cfprefsd 跨进程缓存
+- (NSDictionary *)fuSuiteDict {
+    // 设置页（沙盒 Preferences 进程）写的值，守护进程经 CFPreferences / cfprefsd 常读不到或读旧值，
+    // 导致「开关关不掉 / 布局不生效 / 静默掉」整类症状。直接读磁盘 plist = 权威来源。
+    static NSString *const cands[] = {
+        @"/var/mobile/Library/Preferences/com.yzdmm.floatingurl.plist",
+        @"/var/jb/var/mobile/Library/Preferences/com.yzdmm.floatingurl.plist",
+        nil
+    };
+    for (NSInteger i = 0; cands[i]; i++) {
+        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:cands[i]];
+        if ([d isKindOfClass:[NSDictionary class]]) return d;
+    }
+    return nil;
+}
 - (void)reloadPrefs {
-    // 关键：读之前强制把本进程对偏好域的缓存与磁盘同步，否则读到的仍是进程启动时的旧缓存值，
-    // 导致「关开关没用 / 设了条目扇形不弹 / 作用 App 限制不生效」等一堆症状。
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
-    Boolean valid;
-    BOOL en = CFPreferencesGetAppBooleanValue(CFSTR("enabled"), (__bridge CFStringRef)kFUSuite, &valid);
-    _enabled = valid ? en : YES;
-    CFPropertyListRef urlRef = CFPreferencesCopyAppValue(CFSTR("url"), (__bridge CFStringRef)kFUSuite);
-    if (urlRef) { NSString *u = (__bridge_transfer NSString *)urlRef; if (u.length) _url = u; }
-    // v1.3.24：动态压住系统手势边（底部上滑 / 顶部下拉），默认开
-    Boolean egValid;
-    BOOL eg = CFPreferencesGetAppBooleanValue(CFSTR("edgeGuard"), (__bridge CFStringRef)kFUSuite, &egValid);
-    _edgeGuard = egValid ? eg : YES;
-    // v1.3.25：截图/录屏时是否自动收拢 + 隐藏悬浮球（默认开）
-    Boolean chValid;
-    BOOL ch = CFPreferencesGetAppBooleanValue((__bridge CFStringRef)kFUCaptureHide, (__bridge CFStringRef)kFUSuite, &chValid);
-    _captureHide = chValid ? ch : YES;
-    // v1.3.1 布局：停靠边(side) + 图标大小 + 图标间隔（位置不再用 X/Y 滑杆，球固定在左/右边）
-    CFPropertyListRef sdRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUSide, (__bridge CFStringRef)kFUSuite);
-    if (sdRef && CFGetTypeID(sdRef) == CFNumberGetTypeID()) { _side = [(__bridge NSNumber *)sdRef integerValue]; CFRelease(sdRef); }
-    CFPropertyListRef isRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUIconSize, (__bridge CFStringRef)kFUSuite);
-    if (isRef && CFGetTypeID(isRef) == CFNumberGetTypeID()) { _iconSize = [(__bridge NSNumber *)isRef floatValue]; CFRelease(isRef); }
-    CFPropertyListRef igRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUIconGap, (__bridge CFStringRef)kFUSuite);
-    if (igRef && CFGetTypeID(igRef) == CFNumberGetTypeID()) { _iconGap = [(__bridge NSNumber *)igRef floatValue]; CFRelease(igRef); }
+    NSDictionary *suite = [self fuSuiteDict];
+    BOOL hasFile = (suite != nil);
+    BOOL (^fb)(NSString*,BOOL) = ^BOOL(NSString *k, BOOL d){
+        id v = suite[k]; return [v isKindOfClass:[NSNumber class]] ? [v boolValue] : d;
+    };
+    NSInteger (^fi)(NSString*,NSInteger) = ^NSInteger(NSString *k, NSInteger d){
+        id v = suite[k]; return [v isKindOfClass:[NSNumber class]] ? [v integerValue] : d;
+    };
+    // 总开关（没文件时默认开，避免首次进桌面没球）
+    _enabled = hasFile ? fb(@"enabled", YES) : YES;
+    id urlRef = suite[@"url"];
+    if ([urlRef isKindOfClass:[NSString class]] && [urlRef length]) _url = urlRef;
+    _edgeGuard = hasFile ? fb(@"edgeGuard", YES) : YES;
+    _captureHide = hasFile ? fb(@"captureHide", YES) : YES;
+    // 布局：停靠边 + 图标大小 + 图标间隔
+    id sdRef = suite[@"side"];     if ([sdRef isKindOfClass:[NSNumber class]]) _side = [sdRef integerValue];
+    id isRef = suite[@"iconSize"]; if ([isRef isKindOfClass:[NSNumber class]]) _iconSize = [isRef floatValue];
+    id igRef = suite[@"iconGap"];  if ([igRef isKindOfClass:[NSNumber class]]) _iconGap = [igRef floatValue];
     if (_side != 0) _side = 1;
     if (_iconSize < 24) _iconSize = 24; if (_iconSize > 64) _iconSize = 64;
     if (_iconGap  < 12) _iconGap  = 12; if (_iconGap  > 120) _iconGap = 120;
-    // v1.3.2：扇形角度 / 整体距离
-    CFPropertyListRef fspRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUFanSpan, (__bridge CFStringRef)kFUSuite);
-    if (fspRef && CFGetTypeID(fspRef) == CFNumberGetTypeID()) { _fanSpan = [(__bridge NSNumber *)fspRef floatValue]; CFRelease(fspRef); }
-    CFPropertyListRef fscRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUFanScale, (__bridge CFStringRef)kFUSuite);
-    if (fscRef && CFGetTypeID(fscRef) == CFNumberGetTypeID()) { _fanScale = [(__bridge NSNumber *)fscRef floatValue]; CFRelease(fscRef); }
+    // 扇形角度 / 整体距离
+    id fspRef = suite[@"fanSpan"];  if ([fspRef isKindOfClass:[NSNumber class]]) _fanSpan = [fspRef floatValue];
+    id fscRef = suite[@"fanScale"]; if ([fscRef isKindOfClass:[NSNumber class]]) _fanScale = [fscRef floatValue];
     if (_fanSpan  < 60.0f) _fanSpan = 60.0f;  if (_fanSpan  > 180.0f) _fanSpan = 180.0f;
-    // v1.3.21：扇形闲置多久自动收回（秒）。0 = 永不自动收回。
-    {
-        CFPropertyListRef ahRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUFanAutoHide, (__bridge CFStringRef)kFUSuite);
-        if (ahRef && (CFGetTypeID(ahRef) == CFNumberGetTypeID())) _fanAutoHide = [(__bridge NSNumber *)ahRef doubleValue];
-        else _fanAutoHide = 5.0;
-        if (ahRef) CFRelease(ahRef);
-        if (_fanAutoHide < 0) _fanAutoHide = 0;
-        if (_fanAutoHide > 60.0) _fanAutoHide = 60.0;
-    }
+    // 扇形闲置自动收回（秒）；0 = 永不
+    id ahRef = suite[@"fanAutoHide"];
+    _fanAutoHide = [ahRef isKindOfClass:[NSNumber class]] ? [ahRef doubleValue] : 5.0;
+    if (_fanAutoHide < 0) _fanAutoHide = 0; if (_fanAutoHide > 60.0) _fanAutoHide = 60.0;
     if (_fanScale < 60.0f) _fanScale = 60.0f; if (_fanScale > 160.0f) _fanScale = 160.0f;
-    // v1.3.3：每层数量（0=自动）
-    CFPropertyListRef l1 = CFPreferencesCopyAppValue((__bridge CFStringRef)kFULayer1Count, (__bridge CFStringRef)kFUSuite);
-    if (l1 && CFGetTypeID(l1) == CFNumberGetTypeID()) { _layer1 = [(__bridge NSNumber *)l1 integerValue]; CFRelease(l1); }
-    CFPropertyListRef l2 = CFPreferencesCopyAppValue((__bridge CFStringRef)kFULayer2Count, (__bridge CFStringRef)kFUSuite);
-    if (l2 && CFGetTypeID(l2) == CFNumberGetTypeID()) { _layer2 = [(__bridge NSNumber *)l2 integerValue]; CFRelease(l2); }
-    CFPropertyListRef l3 = CFPreferencesCopyAppValue((__bridge CFStringRef)kFULayer3Count, (__bridge CFStringRef)kFUSuite);
-    if (l3 && CFGetTypeID(l3) == CFNumberGetTypeID()) { _layer3 = [(__bridge NSNumber *)l3 integerValue]; CFRelease(l3); }
-    // v1.3.6：三层上限 8 / 16 / 24（0 = 该层自动按弧长排）
+    // 每层数量（0=自动）
+    id l1 = suite[@"layer1"], *l2 = suite[@"layer2"], *l3 = suite[@"layer3"];
+    if ([l1 isKindOfClass:[NSNumber class]]) _layer1 = [l1 integerValue];
+    if ([l2 isKindOfClass:[NSNumber class]]) _layer2 = [l2 integerValue];
+    if ([l3 isKindOfClass:[NSNumber class]]) _layer3 = [l3 integerValue];
     if (_layer1 < 0) _layer1 = 0; if (_layer1 > 8)  _layer1 = 8;
     if (_layer2 < 0) _layer2 = 0; if (_layer2 > 16) _layer2 = 16;
     if (_layer3 < 0) _layer3 = 0; if (_layer3 > 24) _layer3 = 24;
-    // v1.3.3：静默模式（旗标文件存在 = 开；App 心跳与桌面球都据此休眠）
-    _silent = [[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"];
-    // ---- v1.3.5：吸附模式 / 网页打开方式 / 悬浮球外观 ----
-    CFPropertyListRef smRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUSnapMode, (__bridge CFStringRef)kFUSuite);
-    if (smRef && CFGetTypeID(smRef) == CFNumberGetTypeID()) { _snapMode = [(__bridge NSNumber *)smRef integerValue]; CFRelease(smRef); }
+    // 静默模式（v1.3.33：改读布尔，不再用旗标文件——沙盒写文件在 rootless 上不可靠）
+    _silent = hasFile ? fb(@"silent", NO) : NO;
+    // 吸附模式 / 网页方式
+    id smRef = suite[@"snapMode"]; if ([smRef isKindOfClass:[NSNumber class]]) _snapMode = [smRef integerValue];
     if (_snapMode != 1) _snapMode = 0;
-    Boolean wv = NO; CFPreferencesGetAppBooleanValue((__bridge CFStringRef)kFUWebMode, (__bridge CFStringRef)kFUSuite, &wv);
-    _webMode = wv ? 1 : 0;
-    // v1.3.13：吸附延时（秒）。松手后球先以「完整悬浮图标」停在落点，这么久之后才自动吸附（0=立即）。
-    CFPropertyListRef sdlyRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUSnapDelay, (__bridge CFStringRef)kFUSuite);
-    if (sdlyRef && CFGetTypeID(sdlyRef) == CFNumberGetTypeID()) {
-        _snapDelay = [(__bridge NSNumber *)sdlyRef doubleValue];
-        CFRelease(sdlyRef);
-    } else if (sdlyRef) { CFRelease(sdlyRef); }
-    if (_snapDelay < 0) _snapDelay = 0; if (_snapDelay > 15.0 && _snapDelay < kFUKeepForever) _snapDelay = 15.0;   // v1.3.25：999 = 常驻    // v1.3.9 修 05（真机实测确认的根因）：键被删掉时 CFPreferencesCopyAppValue 返回 NULL，
-    // 而旧代码两个分支都不走 → _ballIcon / _ballColor / _ballTitle **保持上一次的旧值**，
-    // 于是「设置里删了照片，球上照片还在」。这里必须在读到 NULL 时明确清空。
-    CFPropertyListRef btRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallTitle, (__bridge CFStringRef)kFUSuite);
-    if (btRef && CFGetTypeID(btRef) == CFStringGetTypeID()) { _ballTitle = (__bridge_transfer NSString *)btRef; }
-    else { if (btRef) CFRelease(btRef); _ballTitle = nil; }
+    _webMode = fb(@"webMode", NO) ? 1 : 0;
+    // 吸附延时（秒）
+    id sdlyRef = suite[@"snapDelay"];
+    _snapDelay = [sdlyRef isKindOfClass:[NSNumber class]] ? [sdlyRef doubleValue] : 3.0;
+    if (_snapDelay < 0) _snapDelay = 0; if (_snapDelay > 15.0 && _snapDelay < kFUKeepForever) _snapDelay = 15.0;
+    // 球外观
+    id btRef = suite[@"ballTitle"]; _ballTitle = ([btRef isKindOfClass:[NSString class]] && [btRef length]) ? btRef : nil;
     if (!_ballTitle.length) _ballTitle = @"URL";
-    // v1.3.28：左右图标独立存储；若用户从未写过新键（老用户），则把旧 ballIcon 镜像成「两侧同一张」兜底。
-    CFPropertyListRef lRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallIconL, (__bridge CFStringRef)kFUSuite);
-    CFPropertyListRef rRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallIconR, (__bridge CFStringRef)kFUSuite);
-    BOOL haveNew = (lRef != NULL) || (rRef != NULL);
+    id lRef = suite[@"ballIconLeft"], *rRef = suite[@"ballIconRight"];
+    BOOL haveNew = (lRef != nil) || (rRef != nil);
     if (haveNew) {
-        _ballIconL = (lRef && CFGetTypeID(lRef) == CFDataGetTypeID()) ? (__bridge_transfer NSData *)lRef : nil;
-        _ballIconR = (rRef && CFGetTypeID(rRef) == CFDataGetTypeID()) ? (__bridge_transfer NSData *)rRef : nil;
-        if (lRef && CFGetTypeID(lRef) != CFDataGetTypeID()) CFRelease(lRef);
-        if (rRef && CFGetTypeID(rRef) != CFDataGetTypeID()) CFRelease(rRef);
-        _ballIcon = nil;   // 写了新键就忽略旧键
+        _ballIconL = [lRef isKindOfClass:[NSData class]] ? lRef : nil;
+        _ballIconR = [rRef isKindOfClass:[NSData class]] ? rRef : nil;
+        _ballIcon = nil;
     } else {
-        CFPropertyListRef biRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallIcon, (__bridge CFStringRef)kFUSuite);
-        if (biRef && CFGetTypeID(biRef) == CFDataGetTypeID()) { _ballIcon = (__bridge_transfer NSData *)biRef; }
-        else { if (biRef) CFRelease(biRef); _ballIcon = nil; }
-        _ballIconL = _ballIcon; _ballIconR = _ballIcon;   // 旧数据：两侧同图（不镜像），保持原观感
+        id biRef = suite[@"ballIcon"];
+        _ballIcon = [biRef isKindOfClass:[NSData class]] ? biRef : nil;
+        _ballIconL = _ballIcon; _ballIconR = _ballIcon;
     }
-    CFPropertyListRef bcRef = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallColor, (__bridge CFStringRef)kFUSuite);
-    if (bcRef && CFGetTypeID(bcRef) == CFStringGetTypeID()) { _ballColor = (__bridge_transfer NSString *)bcRef; }
-    else { if (bcRef) CFRelease(bcRef); _ballColor = nil; }
+    id bcRef = suite[@"ballColor"]; _ballColor = [bcRef isKindOfClass:[NSString class]] ? bcRef : nil;
     NSInteger oldEntryCount = (NSInteger)_entries.count;
-    [self loadEntries];    if (_didSetup) {
-        [self applyBallAppearance];   // 设置里改了外观 → 立即生效
-        [self fuApplyCaptureExclusion];   // v1.3.28：captureHide 开关变化时同步更新截图排除
-        // v1.3.13：扇形正开着时新增/删除了入口 → 立刻重排，修「添加了快捷 URL 但扇形里不显示」
-        if (_fanOpen && (NSInteger)_entries.count != oldEntryCount) [self fuRelayoutFanInstant];
-    }}
+    [self loadEntries];
+    if (_didSetup) {
+        [self applyBallAppearance];          // 外观变化立即生效
+        [self fuApplyCaptureExclusion];       // captureHide 开关变化同步截图排除
+        if (_fanOpen) [self fuRelayoutFanInstant];   // v1.3.33：几何（大小/间隔/角度/距离/层数）变了立即重排扇形
+    }
+}
 #pragma mark - v1.3.2 黑名单（前台 App 心跳驱动）
 - (NSArray *)fuBlacklist {
-    CFPropertyListRef arr = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUEnabledApps, (__bridge CFStringRef)kFUSuite);
-    NSArray *list = nil;
-    if (arr) { list = (__bridge_transfer NSArray *)arr; if (![list isKindOfClass:[NSArray class]]) list = nil; }
-    return list ?: @[];
+    // v1.3.33：直接读磁盘偏好，绕过 cfprefsd 跨进程缓存（否则黑名单在守护进程里读不到最新值）
+    NSDictionary *suite = [self fuSuiteDict];
+    id v = suite[@"enabledApps"];
+    if ([v isKindOfClass:[NSArray class]]) return v;
+    return @[];
 }
 // 黑名单里的每个 bundle id 注册「来前台 / 退后台」两条 Darwin 通知（通知名带 bundle id，可精确匹配）
 - (void)fuSyncFrontWatches {
@@ -1035,17 +1023,17 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     }
 }
 - (void)loadEntries {
-    CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUURLs, (__bridge CFStringRef)kFUSuite);
-    NSArray *arr = nil;
-    if (r) { arr = (__bridge_transfer NSArray *)r; if (![arr isKindOfClass:[NSArray class]]) arr = nil; }
+    // v1.3.33：直接读磁盘 plist（与 reloadPrefs 同一权威来源），避免 cfprefsd 跨进程缓存读旧值。
+    NSDictionary *suite = [self fuSuiteDict];
+    id r = suite[kFUURLs];
+    NSArray *arr = [r isKindOfClass:[NSArray class]] ? r : nil;
     // v1.3.5 修 06：用户把快捷 URL 全删了（urls 存在但为空数组）→ 就是「没有入口」，
     // 绝不能再用默认网址兜底（那正是「删完还弹出一个打不开的网页」的根因）。
     if (arr) { _entries = arr; return; }
     // 兼容老版本：只设了主 URL、没有 urls 数组 → 当成唯一一条入口。
-    CFPropertyListRef ur = CFPreferencesCopyAppValue(CFSTR("url"), (__bridge CFStringRef)kFUSuite);
-    NSString *u = nil;
-    if (ur) { u = (__bridge_transfer NSString *)ur; if (![u isKindOfClass:[NSString class]]) u = nil; }
-    _entries = u.length ? @[ @{ kFUEntryURL: u } ] : @[];
+    id ur = suite[@"url"];
+    NSString *u = [ur isKindOfClass:[NSString class]] ? ur : nil;
+    _entries = (u.length) ? @[ @{ kFUEntryURL: u } ] : @[];
 }
 
 #pragma mark - 历史
@@ -2143,8 +2131,8 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     if (!_didSetup) return;
     // 非桌面进程一律不建 UI（沙盒 App 读不到偏好），这里兜底防守。
     if (!fuIsSpringBoard()) return;
-    // v1.3.3：静默模式 → 整窗彻底休眠（球/环/面板全藏），App 端也跳过心跳，最省电。
-    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"]) {
+    // v1.3.33：静默模式（布尔）→ 整窗彻底休眠（球/环/面板全藏），App 端也跳过心跳，最省电。
+    if (_silent) {
         _overlay.hidden = YES; _ball.hidden = YES;
         if (_fanOpen) [self closeFan];
         [self setInteractive:NO];
