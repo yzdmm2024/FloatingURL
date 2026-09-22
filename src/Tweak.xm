@@ -590,6 +590,7 @@ static void fuStartAppHeartbeat(NSString *bid) {
 - (void)fuDeepLinkFailed:(NSString *)abs;                 // v1.3.29：深链无人受理 → 明确提示（去重）
 - (void)fuCaptureWillHide;                             // v1.3.27：截图按下快门前收拢扇形 + 藏球
 - (void)fuApplyCaptureExclusion;                       // v1.3.28：把悬浮窗从截图/录屏里彻底排除（私有 API）
+- (void)fuApplySecureCaptureGuard;                     // v1.3.30：secureTextEntry 渲染层保护（截图/录屏必排除，不依赖截图入口）
 - (NSArray *)fuFanPointArray;                           // v1.3.13：扇形点位（openFan 与拖动重排共用同一套算法）
 - (void)fuScheduleFanAutoHide;                          // v1.3.21：重排「闲置自动收回」倒计时
 - (void)fuCancelFanAutoHide;                            // v1.3.21：取消空闲收回倒计时
@@ -754,6 +755,7 @@ static NSArray<NSString *> *fuPrefsCandidates(NSString *abs) {
     BOOL                  _captureHiding; // v1.3.25：当前正处于「截图/录屏隐藏」中
     NSInteger             _captureToken;  // v1.3.25：隐藏→恢复的代次，防止画面还没拍完就提前把球显示回来
     BOOL                  _captureExclusionOK; // v1.3.28：悬浮窗是否支持「截图/录屏排除」（支持则球永不进画面，最稳）
+    UITextField          *_secureGuard;   // v1.3.30：secureTextEntry 渲染层保护（截图/录屏/第三方截取都拍不到，Telegram 同款）
     BOOL                  _ballShownMirrored; // v1.3.27：球图标当前是否已镜像（变更检测用）
     BOOL                  _screenWasOn;   // v1.3.24：上次轮询时的亮屏状态（亮屏瞬间补一次完整刷新）
     CGFloat               _fanAutoHide;
@@ -2186,13 +2188,58 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 - (void)fuApplyCaptureExclusion {
     if (!_overlay) return;
     SEL s = NSSelectorFromString(@"_setExcludedFromScreenCapture:");
-    if (![_overlay respondsToSelector:s]) { _captureExclusionOK = NO; return; }
-    _captureExclusionOK = YES;
-    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:[_overlay methodSignatureForSelector:s]];
-    [inv setSelector:s]; [inv setTarget:_overlay];
-    BOOL v = _captureHide ? YES : NO;
-    [inv setArgument:&v atIndex:2];
-    @try { [inv invoke]; } @catch (NSException *e) { NSLog(@"[FloatingURL] 排除截图异常（已忽略）: %@", e); }
+    if ([_overlay respondsToSelector:s]) {
+        _captureExclusionOK = YES;
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:[_overlay methodSignatureForSelector:s]];
+        [inv setSelector:s]; [inv setTarget:_overlay];
+        BOOL v = _captureHide ? YES : NO;
+        [inv setArgument:&v atIndex:2];
+        @try { [inv invoke]; } @catch (NSException *e) { NSLog(@"[FloatingURL] 排除截图异常（已忽略）: %@", e); }
+    } else {
+        // v1.3.30：iOS16 实测很多机型没有这个私有方法，1.3.28 在那些机上就是空操作 → 球照拍。
+        _captureExclusionOK = NO;
+    }
+    [self fuApplySecureCaptureGuard];   // v1.3.30：主力的渲染层排除（不依赖任何截图入口/系统版本）
+}
+
+// v1.3.30：secureTextEntry 渲染层保护（Telegram「秘密聊天」同款，iOS13-18 全版本实证可用）。
+// 原理：UITextField 开 isSecureTextEntry 后，其内部容器层会被渲染服务打上特殊标记 ——
+//   挂进这块层树的任何内容「屏幕上照常显示，但系统截图 / 录屏 / Snapper 等第三方截取全拍不到」，
+//   由 WindowServer 在合成阶段直接跳过，不依赖任何截图入口的钩子或时序。
+// 做法：把承载全部 UI 的 rootVC.view 的 CALayer 摘下来挂到 secure field 的层下。
+//   只动渲染树、不动视图树 —— hitTest/触摸路径完全不受影响；captureHide 关掉时把层挂回窗口。
+- (void)fuApplySecureCaptureGuard {
+    if (!_overlay || !_overlayRoot) return;
+    UIView *content = _overlayRoot.view;
+    if (!content || !content.superview) return;
+    @try {
+        if (_captureHide) {
+            if (!_secureGuard) {
+                UITextField *f = [[UITextField alloc] initWithFrame:content.frame];
+                f.secureTextEntry = YES;
+                f.userInteractionEnabled = NO;
+                f.backgroundColor = [UIColor clearColor];
+                f.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+                [_overlay addSubview:f];
+                _secureGuard = f;
+            }
+            _secureGuard.frame = content.frame;
+            if (content.layer.superlayer != _secureGuard.layer) {
+                // secure 标记真正落在 field 内部容器层（_UITextLayoutCanvasView 那块）上，
+                // 优先挂到它的第一个子层；拿不到就退而直接挂 field 层（多一层保险总有一样生效）。
+                CALayer *host = _secureGuard.layer.sublayers.firstObject;
+                if (!host) host = _secureGuard.layer;
+                [content.layer removeFromSuperlayer];
+                [host addSublayer:content.layer];
+            }
+        } else if (_secureGuard && content.layer.superlayer == _secureGuard.layer) {
+            // 恢复「可被拍到」：把层挂回窗口根层
+            [content.layer removeFromSuperlayer];
+            [_overlay.layer addSublayer:content.layer];
+        }
+    } @catch (NSException *e) {
+        NSLog(@"[FloatingURL] secure 截图保护异常（已忽略）: %@", e);
+    }
 }
 
 @end

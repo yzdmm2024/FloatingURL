@@ -1,10 +1,11 @@
 #!/bin/bash
-# v1.3.17：不再自动 killall SpringBoard。改为「写旗标 + 发通知」，由运行中的 tweak
-# 弹出「立即注销 / 稍后」选择框让用户决定。
-# 注意：从 1.3.16 或更早版本升上来的这一次，旧版 tweak 里还没有弹窗逻辑，
-# 所以本次升级需要手动注销一次；之后的版本升级就会弹窗可选了。
+# 安装后：写旗标 + 发通知，由运行中的 tweak 弹「立即注销 / 稍后」选择框。
+# v1.3.30：写旗标全程容错 —— 先 mkdir -p 再写，任何一步失败都不算安装错误。
+#   修掉 1.3.29 及之前在部分机型（多巴胺越狱等）上 dpkg 红字报错
+#   「line 7: /var/mobile/Media/FloatingURL_respring: No such file or directory」的问题。
+#   旗标万一写不进去也不影响安装收尾，用户手动注销一次即可加载新版。
 FLAG=/var/mobile/Media/FloatingURL_respring
-: > "$FLAG" 2>/dev/null || touch "$FLAG" 2>/dev/null
-chown mobile:mobile "$FLAG" 2>/dev/null
-notifyutil -p com.yzdmm.floatingurl/needsRespring 2>/dev/null
+{ mkdir -p "$(dirname "$FLAG")" 2>/dev/null; : > "$FLAG"; } 2>/dev/null || true
+chown mobile:mobile "$FLAG" 2>/dev/null || true
+notifyutil -p com.yzdmm.floatingurl/needsRespring 2>/dev/null || true
 exit 0
