@@ -1458,7 +1458,16 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     [[NSNotificationCenter defaultCenter] addObserver:self
         selector:@selector(fuScreenshotTaken)
         name:UIApplicationUserDidTakeScreenshotNotification object:nil];
+    // v1.3.37：跨进程通道。第三方/自有「局部截图」tweak 若自己抓像素（不置 isCaptured、不走系统截图键），
+    // 上面两条系统通知都不会触发 → 扇形收不回。让它用 NSDistributedNotificationCenter 广播下面两个名字，
+    // 即可 100% 可靠地指挥本 tweak 在「按下快门前」隐藏、截完恢复。SpringBoard 能收到跨进程通知。
+    [[NSDistributedNotificationCenter defaultCenter] addObserver:self
+        selector:@selector(fuDistributedCaptureWill:) name:@"yz.FloatingURL.willCapture" object:nil];
+    [[NSDistributedNotificationCenter defaultCenter] addObserver:self
+        selector:@selector(fuDistributedCaptureDid:)  name:@"yz.FloatingURL.didCapture"  object:nil];
 }
+- (void)fuDistributedCaptureWill:(NSNotification *)n { if (!_captureHide) return; [self fuBeginCaptureHide]; }
+- (void)fuDistributedCaptureDid:(NSNotification *)n  { [self fuEndCaptureHide]; }
 - (void)fuScreenshotTaken {
     if (!_captureHide) return;
     [self fuBeginCaptureHide];
@@ -1504,7 +1513,11 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 // 收拢扇形 + 临时藏球（悬浮球与扇形都不会出现在截图/录像里）
 - (void)fuBeginCaptureHide {
     if (!_ball || !_overlay) return;
-    if (_fanOpen) [self closeFan];
+    // v1.3.37：截图隐藏必须「瞬时」，不能走 closeFan 的 0.18s 渐隐动画。
+    // 实测：第三方局部截图（SuperScreenshot 的 MaskCropWindow / Snapper4 的 SSCoordinator）在「界面弹出」
+    // 那一刻就同步冻屏抓底图，而 closeFan 的渐隐要 ~200ms 才跑完 → 球/扇形被冻进底图。
+    // 这里直接把扇形成员即时移除（无动画），球也即时透明，确保「冻屏前」画面里已无本插件 UI。
+    if (_fanOpen) { _fanOpen = NO; [self closeFanItemsAnimated:NO]; [self setInteractive:NO]; }
     if (_captureHiding) return;
     _captureHiding = YES;
     for (UIButton *it in _fanItems) it.alpha = 0.0f;
@@ -1768,12 +1781,17 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     [self fuCancelFanAutoHide];
     if (!_fanOpen || _fanAutoHide < 0.5) return;   // 0 秒 = 永不自动收
     __weak FUFloatingManager *ws = self;
-    _fanHideTimer = [NSTimer scheduledTimerWithTimeInterval:_fanAutoHide repeats:NO block:^(NSTimer *t){
+    _fanHideTimer = [NSTimer timerWithTimeInterval:_fanAutoHide repeats:NO block:^(NSTimer *t){
         FUFloatingManager *ss = ws; if (!ss) return;
         if (!ss->_fanOpen) return;
         if (ss->_draggingBall) { [ss fuScheduleFanAutoHide]; return; }  // 正在拖 → 再给一轮
         [ss closeFan];   // 收拢 → 球按「吸附延时」归位到半透明待机，恢复原状
     }];
+    // v1.3.37 修：挂到 NSRunLoopCommonModes（与心跳/轮询定时器一致）。
+    // 原写法用 scheduledTimerWithTimeInterval: 默认 NSDefaultRunLoopMode —— 手指按住拖球 /
+    // 局部截图拖选区时主 RunLoop 进入 UITrackingRunLoopMode，default-mode 定时器不触发，
+    // 表现为「扇形闲置自动收回」失效、局部截图按住时扇形收不回来。
+    [[NSRunLoop mainRunLoop] addTimer:_fanHideTimer forMode:NSRunLoopCommonModes];
 }
 - (UIButton *)buildFanItem:(NSDictionary *)entry index:(NSInteger)idx size:(CGFloat)isz {
     UIButton *it = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -2237,6 +2255,11 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 static CFAbsoluteTime fuLastCaptureSignal = 0;
 static void (*fuOrigTakeScreenshot)(id, SEL) = NULL;
 static void (*fuOrigFlashWhite)(id, SEL, id) = NULL;
+// v1.3.37：第三方局部/长截图 tweak 入口（SuperScreenshot / Snapper4）。它们「界面弹出 / 开始捕获」那一刻
+// 就同步冻屏抓底图，且自身不置 isCaptured、不走系统硬件键 → 系统通知/硬件钩子全收不到。
+// 改在它们的入口「调原始实现之前」先把本插件 UI 瞬时隐藏并等一帧渲染，球/扇形就不会被冻进底图。
+static void (*fuOrigMaskCropShow)(id, SEL) = NULL;        // SuperScreenshot：MaskCropWindow - show
+static void (*fuOrigSn4Begin)(id, SEL, NSInteger) = NULL; // Snapper 4：SSCoordinator - beginCaptureWithMode:
 
 static void fuSignalCaptureWill(BOOL allowDelay) {
     if (![NSThread isMainThread]) {
@@ -2260,14 +2283,26 @@ static void fuHookFlashWhite(id self, SEL _cmd, id completion) {
     fuSignalCaptureWill(NO);
     if (fuOrigFlashWhite) fuOrigFlashWhite(self, _cmd, completion);
 }
+// v1.3.37：第三方截图入口钩子。在原始实现「之前」先隐藏并等帧，确保冻屏时已无本插件 UI。
+static void fuHookMaskCropShow(id self, SEL _cmd) {
+    fuSignalCaptureWill(YES);
+    if (fuOrigMaskCropShow) fuOrigMaskCropShow(self, _cmd);
+}
+static void fuHookSn4Begin(id self, SEL _cmd, NSInteger mode) {
+    fuSignalCaptureWill(YES);
+    if (fuOrigSn4Begin) fuOrigSn4Begin(self, _cmd, mode);
+}
 static void fuInstallCaptureHooks(void) {
     @try {
-        const char *names[2] = {"SBCombinationHardwareButtonActions", "SBScreenFlash"};
-        const char *sels[2]  = {"performTakeScreenshotAction", "flashWhiteWithCompletion:"};
-        IMP imps[2] = {(IMP)fuHookTakeScreenshot, (IMP)fuHookFlashWhite};
-        void **slots[2] = {(void **)&fuOrigTakeScreenshot, (void **)&fuOrigFlashWhite};
-        const char *types[2] = {"v@:", "v@:@"};
-        for (int i = 0; i < 2; i++) {
+        // v1.3.37：前两个是系统截图（硬件键/闪光）；后两个是第三方局部/长截图 tweak 入口。
+        // 注：iOS 16 上并不存在 SBScreenShotter（已 frida 实测），系统截图真名是 SBScreenshotManager，
+        // 但它只能兜底「拍照后」，对「拍照前隐藏」无意义（硬件键钩子已覆盖），故此处不挂，避免参数不匹配崩。
+        const char *names[4] = {"SBCombinationHardwareButtonActions", "SBScreenFlash", "MaskCropWindow", "SSCoordinator"};
+        const char *sels[4]  = {"performTakeScreenshotAction", "flashWhiteWithCompletion:", "show", "beginCaptureWithMode:"};
+        IMP imps[4] = {(IMP)fuHookTakeScreenshot, (IMP)fuHookFlashWhite, (IMP)fuHookMaskCropShow, (IMP)fuHookSn4Begin};
+        void **slots[4] = {(void **)&fuOrigTakeScreenshot, (void **)&fuOrigFlashWhite, (void **)&fuOrigMaskCropShow, (void **)&fuOrigSn4Begin};
+        const char *types[4] = {"v@:", "v@:@", "v@:", "v@:q"};
+        for (int i = 0; i < 4; i++) {
             Class c = objc_getClass(names[i]);
             if (!c) continue;
             SEL s = sel_registerName(sels[i]);
