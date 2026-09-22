@@ -2209,44 +2209,18 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     [self fuApplySecureCaptureGuard];   // v1.3.30：主力的渲染层排除（不依赖任何截图入口/系统版本）
 }
 
-// v1.3.30：secureTextEntry 渲染层保护（Telegram「秘密聊天」同款，iOS13-18 全版本实证可用）。
-// 原理：UITextField 开 isSecureTextEntry 后，其内部容器层会被渲染服务打上特殊标记 ——
-//   挂进这块层树的任何内容「屏幕上照常显示，但系统截图 / 录屏 / Snapper 等第三方截取全拍不到」，
-//   由 WindowServer 在合成阶段直接跳过，不依赖任何截图入口的钩子或时序。
-// 做法：把承载全部 UI 的 rootVC.view 的 CALayer 摘下来挂到 secure field 的层下。
-//   只动渲染树、不动视图树 —— hitTest/触摸路径完全不受影响；captureHide 关掉时把层挂回窗口。
+// v1.3.32：禁用 v1.3.30 引入的「secureTextEntry 渲染层保护」。
+// 原实现在启动期把 overlay 根视图的 CALayer 手动摘下、挂到 secure UITextField 内部层，
+// 导致「视图树」与「图层树」脱节，SpringBoard 在图层合成阶段直接 EXC_BAD_ACCESS 硬崩
+// → 安全模式循环（每注销一次崩一次，设备进不了桌面）。@try/@catch 只能接 Objective-C
+// 异常、接不住内存崩溃，所以它无法自保。
+// 现改为禁用；截图排除回退到两条安全的路径：
+//   ① _setExcludedFromScreenCapture:（私有 API，存在则生效、不存在则安全空操作，绝不崩）
+//   ② 电源+音量组合键的系统截图钩子（始终生效，系统截图前先藏球）
+// 后续会以「视图树一致」的方式（用 addSubview 让 UIKit 自己搬层，而非手动动 CALayer）
+// 安全地重做 secure 保护，目前以「设备能正常进桌面」为第一优先级。
 - (void)fuApplySecureCaptureGuard {
-    if (!_overlay || !_overlayRoot) return;
-    UIView *content = _overlayRoot.view;
-    if (!content || !content.superview) return;
-    @try {
-        if (_captureHide) {
-            if (!_secureGuard) {
-                UITextField *f = [[UITextField alloc] initWithFrame:content.frame];
-                f.secureTextEntry = YES;
-                f.userInteractionEnabled = NO;
-                f.backgroundColor = [UIColor clearColor];
-                f.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-                [_overlay addSubview:f];
-                _secureGuard = f;
-            }
-            _secureGuard.frame = content.frame;
-            if (content.layer.superlayer != _secureGuard.layer) {
-                // secure 标记真正落在 field 内部容器层（_UITextLayoutCanvasView 那块）上，
-                // 优先挂到它的第一个子层；拿不到就退而直接挂 field 层（多一层保险总有一样生效）。
-                CALayer *host = _secureGuard.layer.sublayers.firstObject;
-                if (!host) host = _secureGuard.layer;
-                [content.layer removeFromSuperlayer];
-                [host addSublayer:content.layer];
-            }
-        } else if (_secureGuard && content.layer.superlayer == _secureGuard.layer) {
-            // 恢复「可被拍到」：把层挂回窗口根层
-            [content.layer removeFromSuperlayer];
-            [_overlay.layer addSublayer:content.layer];
-        }
-    } @catch (NSException *e) {
-        NSLog(@"[FloatingURL] secure 截图保护异常（已忽略）: %@", e);
-    }
+    return;   // v1.3.32：禁用会崩的图层重父化，见上方注释。_secureGuard 暂不创建。
 }
 
 @end
