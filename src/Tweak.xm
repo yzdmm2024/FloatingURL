@@ -1451,6 +1451,8 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 //   ① UIApplicationUserDidTakeScreenshotNotification —— 系统截图，瞬时事件，隐藏 1.6 秒
 //   ② UIScreenCapturedDidChangeNotification —— 录屏 / 第三方局部截图会置位 isCaptured，
 //      整个期间持续隐藏，停止后再自动恢复并把悬浮按钮显示出来
+// Darwin Notify 跨进程回调前向声明（定义见下方 fuSetupCaptureObservers 之后）
+static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo);
 - (void)fuSetupCaptureObservers {
     [[NSNotificationCenter defaultCenter] addObserver:self
         selector:@selector(fuCapturedStateChanged)
@@ -1459,15 +1461,26 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
         selector:@selector(fuScreenshotTaken)
         name:UIApplicationUserDidTakeScreenshotNotification object:nil];
     // v1.3.37：跨进程通道。第三方/自有「局部截图」tweak 若自己抓像素（不置 isCaptured、不走系统截图键），
-    // 上面两条系统通知都不会触发 → 扇形收不回。让它用 NSDistributedNotificationCenter 广播下面两个名字，
+    // 上面两条系统通知都不会触发 → 扇形收不回。让它用 Darwin Notify 广播下面两个名字，
     // 即可 100% 可靠地指挥本 tweak 在「按下快门前」隐藏、截完恢复。SpringBoard 能收到跨进程通知。
-    [[NSDistributedNotificationCenter defaultCenter] addObserver:self
-        selector:@selector(fuDistributedCaptureWill:) name:@"yz.FloatingURL.willCapture" object:nil];
-    [[NSDistributedNotificationCenter defaultCenter] addObserver:self
-        selector:@selector(fuDistributedCaptureDid:)  name:@"yz.FloatingURL.didCapture"  object:nil];
+    // 注意：NSDistributedNotificationCenter 是 macOS 专属、iOS 上不存在，必须用 CFNotificationCenterGetDarwinNotifyCenter。
+    CFNotificationCenterRef dc = CFNotificationCenterGetDarwinNotifyCenter();
+    CFNotificationCenterAddObserver(dc, (__bridge const void *)(self), &fuDarwinCaptureNotify,
+        CFSTR("yz.FloatingURL.willCapture"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterAddObserver(dc, (__bridge const void *)(self), &fuDarwinCaptureNotify,
+        CFSTR("yz.FloatingURL.didCapture"),  NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
 }
-- (void)fuDistributedCaptureWill:(NSNotification *)n { if (!_captureHide) return; [self fuBeginCaptureHide]; }
-- (void)fuDistributedCaptureDid:(NSNotification *)n  { [self fuEndCaptureHide]; }
+// Darwin Notify 桥接：把跨进程通知转成本类的实例方法调用（CF 回调签名固定，无法直接 objc 方法）
+static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    @autoreleasepool {
+        FUFloatingManager *mgr = (__bridge FUFloatingManager *)observer;
+        NSString *n = (__bridge NSString *)name;
+        if ([n isEqualToString:@"yz.FloatingURL.willCapture"]) [mgr fuDistributedCaptureWill];
+        else if ([n isEqualToString:@"yz.FloatingURL.didCapture"])  [mgr fuDistributedCaptureDid];
+    }
+}
+- (void)fuDistributedCaptureWill { if (!_captureHide) return; [self fuBeginCaptureHide]; }
+- (void)fuDistributedCaptureDid  { [self fuEndCaptureHide]; }
 - (void)fuScreenshotTaken {
     if (!_captureHide) return;
     [self fuBeginCaptureHide];
