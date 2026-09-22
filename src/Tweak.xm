@@ -2222,6 +2222,10 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
     NSArray *list = [self fuBlacklist];
     NSString *front = _frontBid;
     if (front && (CFAbsoluteTimeGetCurrent() - _frontBidTs) > 3.0) front = nil;
+    // v1.3.40：本插件设置面板 / 布局调节处于前台时收起悬浮球，避免遮住设置 UI。
+    // 历史版本让设置 App 在 ctor 直接 return、不发前台心跳，导致 SpringBoard 永远不知道「设置在前台」，
+    // 球一直盖在设置上，只能停用「启用悬浮窗」才关得掉。现让设置也上报前台 + 这里判定隐藏。
+    if (front && [front isEqualToString:@"com.apple.Preferences"]) hidden = YES;
     for (id b in list) {
         if (![b isKindOfClass:[NSString class]]) continue;
         if (front.length && [(NSString *)b caseInsensitiveCompare:front] == NSOrderedSame) { hidden = YES; break; }
