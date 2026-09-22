@@ -16,8 +16,12 @@ static NSString * const kFUEnabledApps = @"enabledApps";
 static NSString * const kFUSide        = @"side";
 static NSString * const kFUIconSize    = @"iconSize";
 static NSString * const kFUIconGap     = @"iconGap";
-static NSString * const kFUFanSpan     = @"fanSpan";    // v1.3.2 扇形角度 60~180°
-static NSString * const kFUFanScale    = @"fanScale";   // v1.3.2 整体距离 %
+static NSString * const kFUFanSpanL1   = @"fanSpanL1";  // v1.3.41 第一层扇形角度
+static NSString * const kFUFanSpanL2   = @"fanSpanL2";  // v1.3.41 第二层扇形角度
+static NSString * const kFUFanSpanL3   = @"fanSpanL3";  // v1.3.41 第三层扇形角度
+static NSString * const kFUFanScaleL1  = @"fanScaleL1"; // v1.3.41 第一层距离（到图标）
+static NSString * const kFUFanScaleL2  = @"fanScaleL2"; // v1.3.41 第二层距离（到第一层）
+static NSString * const kFUFanScaleL3  = @"fanScaleL3"; // v1.3.41 第三层距离（到第二层）
 static NSString * const kFULayer1Count = @"layer1";     // v1.3.3 第一层入口数（0=自动）
 static NSString * const kFULayer2Count = @"layer2";     // v1.3.3 第二层入口数（0=自动）
 static NSString * const kFULayer3Count = @"layer3";     // v1.3.3 第三层入口数（0=自动）
@@ -1096,7 +1100,8 @@ static NSArray *FUColorPalette(void) {
 @interface FUPreviewView : UIView
 @property (nonatomic, assign) NSInteger side;        // 0=右 1=左
 @property (nonatomic, assign) CGFloat iconSize, iconGap;
-@property (nonatomic, assign) CGFloat span, scale;   // v1.3.2 扇形角度 / 整体距离%
+@property (nonatomic, assign) CGFloat spanL1, spanL2, spanL3;   // v1.3.41 逐层扇形角度
+@property (nonatomic, assign) CGFloat scaleL1, scaleL2, scaleL3; // v1.3.41 逐层距离%
 @property (nonatomic, assign) NSInteger layer1, layer2, layer3;   // v1.3.3 每层数量（0=自动）
 @property (nonatomic, strong) NSArray *entries;
 - (void)refresh;
@@ -1104,24 +1109,22 @@ static NSArray *FUColorPalette(void) {
 @implementation FUPreviewView
 - (void)refresh { [self setNeedsDisplay]; }
 // v1.3.8 修 02/06：预览与 tweak 内 openFan 用**同一套**公式（朝向按球位置、角度自适应收缩）。
-- (BOOL)fuSpanOK:(CGFloat)sp center:(CGFloat)centerA radii:(const CGFloat *)R caps:(const NSInteger *)caps
+- (BOOL)fuSpanOKLayer:(int)layer sp:(CGFloat)sp center:(CGFloat)centerA radii:(const CGFloat *)R caps:(const NSInteger *)caps
             icon:(CGFloat)isz rect:(CGRect)sc ball:(CGPoint)c checkFit:(BOOL)checkFit {
-    for (int layer = 0; layer < 3; layer++) {
-        NSInteger cnt = caps[layer]; if (cnt <= 0) continue;
-        CGFloat sp2 = (cnt > 1) ? sp / (CGFloat)(cnt - 1) : 0.0f;
-        if (cnt > 1) {
-            CGFloat arcStep = sp2 * (CGFloat)M_PI / 180.0f * R[layer];
-            if (arcStep < isz * 1.02f) return NO;
-        }
-        if (!checkFit) continue;
-        CGFloat a0 = centerA - sp / 2.0f;
-        for (NSInteger k = 0; k < cnt; k++) {
-            CGFloat a = (cnt > 1) ? (a0 + sp2 * (CGFloat)k) : centerA;
-            CGFloat rad = a * (CGFloat)M_PI / 180.0f;
-            CGFloat x = c.x + R[layer] * cosf(rad), y = c.y + R[layer] * sinf(rad);
-            if (x - isz/2.0f < 6.0f || x + isz/2.0f > sc.size.width  - 6.0f ||
-                y - isz/2.0f < 6.0f || y + isz/2.0f > sc.size.height - 6.0f) return NO;
-        }
+    NSInteger cnt = caps[layer]; if (cnt <= 0) return YES;
+    CGFloat sp2 = (cnt > 1) ? sp / (CGFloat)(cnt - 1) : 0.0f;
+    if (cnt > 1) {
+        CGFloat arcStep = sp2 * (CGFloat)M_PI / 180.0f * R[layer];
+        if (arcStep < isz * 1.02f) return NO;
+    }
+    if (!checkFit) return YES;
+    CGFloat a0 = centerA - sp / 2.0f;
+    for (NSInteger k = 0; k < cnt; k++) {
+        CGFloat a = (cnt > 1) ? (a0 + sp2 * (CGFloat)k) : centerA;
+        CGFloat rad = a * (CGFloat)M_PI / 180.0f;
+        CGFloat x = c.x + R[layer] * cosf(rad), y = c.y + R[layer] * sinf(rad);
+        if (x - isz/2.0f < 6.0f || x + isz/2.0f > sc.size.width  - 6.0f ||
+            y - isz/2.0f < 6.0f || y + isz/2.0f > sc.size.height - 6.0f) return NO;
     }
     return YES;
 }
@@ -1143,14 +1146,17 @@ static NSArray *FUColorPalette(void) {
     CGFloat isz = _iconSize * k;
     CGFloat gap = MAX(4.0f, _iconGap * 0.5f) * k;        // 图标之间至少留的净空隙
     CGFloat stepR = (_iconSize + _iconGap) * k;          // 相邻圈层的半径差
-    CGFloat kscale = MAX(0.6f, MIN(1.6f, (_scale > 0 ? _scale : 100.0f) / 100.0f));
+    CGFloat scl[3] = { MAX(0.6f,MIN(1.6f,(_scaleL1>0?_scaleL1:160.0f)/100.0f)),
+                        MAX(0.6f,MIN(1.6f,(_scaleL2>0?_scaleL2:160.0f)/100.0f)),
+                        MAX(0.6f,MIN(1.6f,(_scaleL3>0?_scaleL3:160.0f)/100.0f)) };
     CGFloat cx = (_side == 1) ? (bs/2.0f + 6.0f) : (s.size.width - bs/2.0f - 6.0f);
     CGPoint c = CGPointMake(cx, s.size.height * 0.5f);
-    // ---- v1.3.2：三层半径 + 数量驱动分层 + 贴边自动变形（与 tweak 内 openFan 同一套公式）----
+    // ---- v1.3.41：三层半径（逐层距离）+ 数量驱动分层（与 tweak 内 fuFanPointArray 同一套公式）----
     CGFloat R[3];
-    R[0] = (bs/2.0f + isz/2.0f + _iconGap * k) * kscale;
-    R[1] = R[0] + stepR * kscale;
-    R[2] = R[1] + stepR * kscale;
+    CGFloat baseR = bs/2.0f + isz/2.0f + _iconGap * k;
+    R[0] = baseR * scl[0];
+    R[1] = R[0] + stepR * scl[1];
+    R[2] = R[1] + stepR * scl[2];
     // v1.3.34：预览只画「实际添加的入口」——添加几个就是几个，自动按 8/16/24 分层，
     // 与真机扇形同一套规则（先满第 1 层≤8、再第 2 层≤16、再第 3 层≤24），不再铺满 48 个占位。
     NSInteger real = (NSInteger)_entries.count;
@@ -1159,17 +1165,18 @@ static NSArray *FUColorPalette(void) {
     NSInteger caps[3] = { 0, 0, 0 };
     NSInteger autoMax[3] = { 8, 16, 24 };   // v1.3.31：自动模式每层容量上限
     BOOL anyExplicit = (want[0] > 0) || (want[1] > 0) || (want[2] > 0);
-    CGFloat spanMax = MAX(60.0f, MIN(180.0f, (_span > 0 ? _span : 180.0f)));
-    CGFloat spanRad = spanMax * (CGFloat)M_PI / 180.0f;
+    CGFloat spanMax[3] = { MAX(60.0f,MIN(180.0f,(_spanL1>0?_spanL1:180.0f))),
+                            MAX(60.0f,MIN(180.0f,(_spanL2>0?_spanL2:180.0f))),
+                            MAX(60.0f,MIN(180.0f,(_spanL3>0?_spanL3:180.0f))) };
     NSInteger placed = 0;
     if (!anyExplicit) {
-        // 全部自动：按「先满第 1 层、再第 2、第 3 层」分层，每层同时受弧长容量约束
+        // 全部自动：按「先满第 1 层、再第 2、第 3 层」分层，每层同时受各自弧长容量约束
         NSInteger li = 0;
         while (placed < n) {
             NSInteger target = -1;
             for (int i = li; i < 3; i++) { if (want[i] == 0) { target = i; break; } }
             if (target < 0) target = 2;
-            CGFloat arc = R[target] * spanRad;
+            CGFloat arc = R[target] * (spanMax[target] * (CGFloat)M_PI / 180.0f);
             NSInteger arcCap = MAX(1, (NSInteger)floor(arc / (isz + gap)));
             NSInteger autoCap = MIN(arcCap, autoMax[target]);
             NSInteger space = n - placed;
@@ -1182,7 +1189,7 @@ static NSArray *FUColorPalette(void) {
         // 有显式数量：每层最多画用户指定的个数（受该层弧长容量与实际条目数约束），不自动补满
         for (int i = 0; i < 3; i++) {
             if (want[i] > 0) {
-                CGFloat arc = R[i] * spanRad;
+                CGFloat arc = R[i] * (spanMax[i] * (CGFloat)M_PI / 180.0f);
                 NSInteger arcCap = MAX(1, (NSInteger)floor(arc / (isz + gap)));
                 NSInteger c = MIN(want[i], arcCap);
                 c = MIN(c, n - placed);
@@ -1192,20 +1199,24 @@ static NSArray *FUColorPalette(void) {
     }
     // v1.3.8 修 02：朝向 = 球心指向画布中心（与真机 fuAngleToScreenCenter: 同源）
     CGFloat centerA = atan2f((s.size.height/2.0f) - c.y, (s.size.width/2.0f) - c.x) * 180.0f / (CGFloat)M_PI;
-    // v1.3.8 修 02：角度自适应收缩，保证预览里图标不会画出画布（真机同一套逻辑）
-    CGFloat span = spanMax;
-    while (span > 45.0f) {
-        if ([self fuSpanOK:span center:centerA radii:R caps:caps icon:isz rect:s ball:c checkFit:YES]) break;
-        CGFloat next = span - 5.0f;
-        if (![self fuSpanOK:next center:centerA radii:R caps:caps icon:isz rect:s ball:c checkFit:NO]) break;
-        span = next;
+    // v1.3.41：逐层角度自适应收缩（真机同一套逻辑）
+    CGFloat spanFit[3] = { spanMax[0], spanMax[1], spanMax[2] };
+    for (int i = 0; i < 3; i++) {
+        CGFloat sp = spanFit[i];
+        while (sp > 45.0f) {
+            if ([self fuSpanOKLayer:i sp:sp center:centerA radii:R caps:caps icon:isz rect:s ball:c checkFit:YES]) break;
+            CGFloat next = sp - 5.0f;
+            if (![self fuSpanOKLayer:i sp:next center:centerA radii:R caps:caps icon:isz rect:s ball:c checkFit:NO]) break;
+            sp = next;
+        }
+        spanFit[i] = sp;
     }
     // 圈层参考弧
     CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:1.0 alpha:0.13].CGColor);
     CGContextSetLineWidth(ctx, 1.0f);
     for (int i = 0; i < 3; i++) {
         if (caps[i] <= 0) continue;
-        CGContextAddArc(ctx, c.x, c.y, R[i], (centerA - span/2.0f)*M_PI/180.0, (centerA + span/2.0f)*M_PI/180.0, 0);
+        CGContextAddArc(ctx, c.x, c.y, R[i], (centerA - spanFit[i]/2.0f)*M_PI/180.0, (centerA + spanFit[i]/2.0f)*M_PI/180.0, 0);
         CGContextStrokePath(ctx);
     }
     // 中心球（URL 玻璃球）
@@ -1214,7 +1225,7 @@ static NSArray *FUColorPalette(void) {
     placed = 0;   // 复用上方的 placed（cap 分配已完成，这里重置为绘制起点）
     for (NSInteger layer = 0; layer < 3; layer++) {
         NSInteger cnt = caps[layer]; if (cnt <= 0) continue;
-        CGFloat a0 = centerA - span/2.0f, sp2 = (cnt > 1) ? span/(CGFloat)(cnt-1) : 0.0f;
+        CGFloat a0 = centerA - spanFit[layer]/2.0f, sp2 = (cnt > 1) ? spanFit[layer]/(CGFloat)(cnt-1) : 0.0f;
         for (NSInteger i2 = 0; i2 < cnt; i2++) {
             if (placed >= n) break;
             NSDictionary *e = _entries[placed];   // n == real，只画真实入口，无占位
@@ -1280,8 +1291,9 @@ static NSArray *FUColorPalette(void) {
 @property (nonatomic, strong) UIScrollView *scroll;
 @property (nonatomic, strong) FUPreviewView *preview;
 @property (nonatomic, strong) UISegmentedControl *sideSeg;
-@property (nonatomic, strong) UISlider *ss, *sg, *span, *sc;
-@property (nonatomic, strong) UILabel *ls, *lg, *lspan, *lsc;
+@property (nonatomic, strong) UISlider *ss, *sg;   // 图标大小 / 间隔
+@property (nonatomic, strong) UISlider *scaleL1s, *spanL1s, *scaleL2s, *spanL2s, *scaleL3s, *spanL3s;  // v1.3.41 逐层距离/角度
+@property (nonatomic, strong) UILabel *ls, *lg, *lS1, *lA1, *lS2, *lA2, *lS3, *lA3;
 @property (nonatomic, strong) UISlider *l1s, *l2s, *l3s;   // v1.3.3 每层数量
 @property (nonatomic, strong) UILabel *ll1, *ll2, *ll3;
 @property (nonatomic, strong) UISegmentedControl *modeSeg;   // v1.3.8 吸附模式（0=自动吸附 1=全屏固定）
@@ -1352,8 +1364,12 @@ static NSArray *FUColorPalette(void) {
     _preview.side     = (NSInteger)[self prefFloat:kFUSide dft:0];
     _preview.iconSize = [self prefFloat:kFUIconSize dft:24];   // v1.3.34 默认图标 24
     _preview.iconGap  = [self prefFloat:kFUIconGap dft:12];    // v1.3.34 默认间隔 12
-    _preview.span     = [self prefFloat:kFUFanSpan dft:180];
-    _preview.scale    = [self prefFloat:kFUFanScale dft:160];  // v1.3.34 默认整体距离 160%
+    _preview.spanL1   = [self prefFloat:kFUFanSpanL1 dft:180];
+    _preview.spanL2   = [self prefFloat:kFUFanSpanL2 dft:180];
+    _preview.spanL3   = [self prefFloat:kFUFanSpanL3 dft:180];
+    _preview.scaleL1  = [self prefFloat:kFUFanScaleL1 dft:160];
+    _preview.scaleL2  = [self prefFloat:kFUFanScaleL2 dft:160];
+    _preview.scaleL3  = [self prefFloat:kFUFanScaleL3 dft:160];
     _preview.layer1   = [self prefInt:kFULayer1Count dft:0];
     _preview.layer2   = [self prefInt:kFULayer2Count dft:0];
     _preview.layer3   = [self prefInt:kFULayer3Count dft:0];
@@ -1394,19 +1410,29 @@ static NSArray *FUColorPalette(void) {
     CGFloat colGap = 12.0f, colW = (w - 32 - colGap) / 2.0f;
     CGFloat x0 = 16, x1 = 16 + colW + colGap;
     CGFloat pis = [self prefFloat:kFUIconSize dft:24], pig = [self prefFloat:kFUIconGap dft:12];
-    CGFloat psp = [self prefFloat:kFUFanSpan dft:180], psc = [self prefFloat:kFUFanScale dft:160];
     _ss   = [self mkSliderAt:x0 width:colW y:y min:24 max:64  val:pis label:@"图标大小"  lout:&_ls];
     _sg   = [self mkSliderAt:x1 width:colW y:y min:12 max:120 val:pig label:@"图标间隔"  lout:&_lg];
     _ss.tag = 2; _sg.tag = 3; y += 46;
-    _span = [self mkSliderAt:x0 width:colW y:y min:60 max:180 val:psp label:@"扇形角度°" lout:&_lspan];
-    _sc   = [self mkSliderAt:x1 width:colW y:y min:60 max:160 val:psc label:@"整体距离%" lout:&_lsc];
-    _span.tag = 4; _sc.tag = 5; y += 48;
+    // ---- v1.3.41：扇形分层布局（按层分组，距离+角度各一滑杆）----
+    CGFloat pS1 = [self prefFloat:kFUFanScaleL1 dft:160], pA1 = [self prefFloat:kFUFanSpanL1 dft:180];
+    CGFloat pS2 = [self prefFloat:kFUFanScaleL2 dft:160], pA2 = [self prefFloat:kFUFanSpanL2 dft:180];
+    CGFloat pS3 = [self prefFloat:kFUFanScaleL3 dft:160], pA3 = [self prefFloat:kFUFanSpanL3 dft:180];
+    _scaleL1s = [self mkSliderAt:x0 width:colW y:y min:60 max:160 val:pS1 label:@"第一层·距离(到图标)" lout:&_lS1];
+    _spanL1s  = [self mkSliderAt:x1 width:colW y:y min:60 max:180 val:pA1 label:@"第一层·角度°"   lout:&_lA1];
+    _scaleL1s.tag = 4; _spanL1s.tag = 5; y += 46;
+    _scaleL2s = [self mkSliderAt:x0 width:colW y:y min:60 max:160 val:pS2 label:@"第二层·距离(到第一层)" lout:&_lS2];
+    _spanL2s  = [self mkSliderAt:x1 width:colW y:y min:60 max:180 val:pA2 label:@"第二层·角度°"   lout:&_lA2];
+    _scaleL2s.tag = 6; _spanL2s.tag = 7; y += 46;
+    _scaleL3s = [self mkSliderAt:x0 width:colW y:y min:60 max:160 val:pS3 label:@"第三层·距离(到第二层)" lout:&_lS3];
+    _spanL3s  = [self mkSliderAt:x1 width:colW y:y min:60 max:180 val:pA3 label:@"第三层·角度°"   lout:&_lA3];
+    _scaleL3s.tag = 8; _spanL3s.tag = 9; y += 48;
+    // ---- 每层数量（0=自动；受各自角度/半径容量约束）----
     NSInteger pl1 = [self prefInt:kFULayer1Count dft:0], pl2 = [self prefInt:kFULayer2Count dft:0], pl3 = [self prefInt:kFULayer3Count dft:0];
-    _l1s  = [self mkSliderAt:x0 width:colW y:y min:0 max:8  val:pl1 label:@"第一层" lout:&_ll1];
-    _l2s  = [self mkSliderAt:x1 width:colW y:y min:0 max:16 val:pl2 label:@"第二层" lout:&_ll2];
-    _l1s.tag = 6; _l2s.tag = 7; y += 46;
-    _l3s  = [self mkSliderAt:x0 width:colW y:y min:0 max:24 val:pl3 label:@"第三层" lout:&_ll3];
-    _l3s.tag = 8; y += 48;
+    _l1s  = [self mkSliderAt:x0 width:colW y:y min:0 max:8  val:pl1 label:@"第一层数量" lout:&_ll1];
+    _l2s  = [self mkSliderAt:x1 width:colW y:y min:0 max:16 val:pl2 label:@"第二层数量" lout:&_ll2];
+    _l1s.tag = 10; _l2s.tag = 11; y += 46;
+    _l3s  = [self mkSliderAt:x0 width:colW y:y min:0 max:24 val:pl3 label:@"第三层数量" lout:&_ll3];
+    _l3s.tag = 12; y += 48;
     // v1.3.31：分层滑杆 0 = 自动；标签按 0 显示「自动」，其余显示数字
     _ll1.text = (pl1 == 0) ? @"第一层 自动" : [NSString stringWithFormat:@"第一层 %ld", (long)pl1];
     _ll2.text = (pl2 == 0) ? @"第二层 自动" : [NSString stringWithFormat:@"第二层 %ld", (long)pl2];
@@ -1415,12 +1441,12 @@ static NSArray *FUColorPalette(void) {
     NSInteger dSlot = [self fuSecSlot:[self prefFloat:kFUSnapDelay dft:3] keep:999];
     _delayS = [self mkSliderAt:16 width:w - 32 y:y min:1 max:(kFUSecMax + 1) val:dSlot
                          label:@"吸附延时（松手后完整图标停留）" lout:&_ldelay];
-    _delayS.tag = 10; _ldelay.text = [self fuSecText:@"吸附延时（松手后完整图标停留）" slot:dSlot keepTitle:@"常驻（永不吸附）"]; y += 46;
+    _delayS.tag = 13; _ldelay.text = [self fuSecText:@"吸附延时（松手后完整图标停留）" slot:dSlot keepTitle:@"常驻（永不吸附）"]; y += 46;
     NSInteger fSlot = [self fuSecSlot:[self prefFloat:kFUFanAutoHide dft:5] keep:0];
     _fanHideS = [self mkSliderAt:16 width:w - 32 y:y min:1 max:(kFUSecMax + 1) val:fSlot
                            label:@"扇形闲置自动收回" lout:&_lfanHide];
-    _fanHideS.tag = 11; _lfanHide.text = [self fuSecText:@"扇形闲置自动收回" slot:fSlot keepTitle:@"常驻（不自动收回）"]; y += 46;
-    for (UISlider *sl in @[_ss, _sg, _span, _sc, _l1s, _l2s, _l3s, _delayS, _fanHideS])
+    _fanHideS.tag = 14; _lfanHide.text = [self fuSecText:@"扇形闲置自动收回" slot:fSlot keepTitle:@"常驻（不自动收回）"]; y += 46;
+    for (UISlider *sl in @[_ss, _sg, _scaleL1s, _spanL1s, _scaleL2s, _spanL2s, _scaleL3s, _spanL3s, _l1s, _l2s, _l3s, _delayS, _fanHideS])
         [sl addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
     UILabel *foot = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 28)];
     foot.numberOfLines = 0; foot.font = [UIFont systemFontOfSize:10];
@@ -1485,12 +1511,16 @@ static NSArray *FUColorPalette(void) {
     switch (sl.tag) {
         case 2: key = kFUIconSize; l = _ls; name = @"图标大小"; _preview.iconSize = v; break;
         case 3: key = kFUIconGap;  l = _lg; name = @"图标间隔"; _preview.iconGap = v; break;
-        case 4: key = kFUFanSpan;  l = _lspan; name = @"扇形角度°"; _preview.span = v; break;
-        case 5: key = kFUFanScale; l = _lsc; name = @"整体距离%"; _preview.scale = v; break;
-        case 6: key = kFULayer1Count; l = _ll1; name = @"第一层"; _preview.layer1 = (NSInteger)v; break;
-        case 7: key = kFULayer2Count; l = _ll2; name = @"第二层"; _preview.layer2 = (NSInteger)v; break;
-        case 8: key = kFULayer3Count; l = _ll3; name = @"第三层"; _preview.layer3 = (NSInteger)v; break;
-        case 10: {   // v1.3.25：整秒步进 + 常驻
+        case 4: key = kFUFanScaleL1; l = _lS1; name = @"第一层·距离(到图标)"; _preview.scaleL1 = v; break;
+        case 5: key = kFUFanSpanL1;  l = _lA1; name = @"第一层·角度°"; _preview.spanL1 = v; break;
+        case 6: key = kFUFanScaleL2; l = _lS2; name = @"第二层·距离(到第一层)"; _preview.scaleL2 = v; break;
+        case 7: key = kFUFanSpanL2;  l = _lA2; name = @"第二层·角度°"; _preview.spanL2 = v; break;
+        case 8: key = kFUFanScaleL3; l = _lS3; name = @"第三层·距离(到第二层)"; _preview.scaleL3 = v; break;
+        case 9: key = kFUFanSpanL3;  l = _lA3; name = @"第三层·角度°"; _preview.spanL3 = v; break;
+        case 10: key = kFULayer1Count; l = _ll1; name = @"第一层数量"; _preview.layer1 = (NSInteger)v; break;
+        case 11: key = kFULayer2Count; l = _ll2; name = @"第二层数量"; _preview.layer2 = (NSInteger)v; break;
+        case 12: key = kFULayer3Count; l = _ll3; name = @"第三层数量"; _preview.layer3 = (NSInteger)v; break;
+        case 13: {   // v1.3.25：整秒步进 + 常驻
             NSInteger slot = [self fuSecSlot:v keep:999];
             if (v >= kFUSecMax + 1) slot = kFUSecMax + 1;
             sl.value = slot; v = slot;
@@ -1498,7 +1528,7 @@ static NSArray *FUColorPalette(void) {
             _ldelay.text = [self fuSecText:@"吸附延时（松手后完整图标停留）" slot:slot keepTitle:@"常驻（永不吸附）"];
             return;
         }
-        case 11: {   // v1.3.25：扇形闲置收回，整秒步进 + 常驻
+        case 14: {   // v1.3.25：扇形闲置收回，整秒步进 + 常驻
             NSInteger slot = [self fuSecSlot:v keep:0];
             if (v >= kFUSecMax + 1) slot = kFUSecMax + 1;
             sl.value = slot;
@@ -1508,8 +1538,8 @@ static NSArray *FUColorPalette(void) {
         }
     }
     if (!key) return;
-    // v1.3.31：分层滑杆 0 = 自动，标签显示「自动」而非「0」
-    if (sl.tag >= 6 && sl.tag <= 8) {
+    // v1.3.31：分层数量滑杆 0 = 自动，标签显示「自动」而非「0」
+    if (sl.tag >= 10 && sl.tag <= 12) {
         l.text = (v == 0) ? [NSString stringWithFormat:@"%@ 自动", name] : [NSString stringWithFormat:@"%@ %.0f", name, v];
         [self writeInt:key value:(NSInteger)v];
     } else {
@@ -1520,19 +1550,24 @@ static NSArray *FUColorPalette(void) {
 }
 - (void)reset {
     _sideSeg.selectedSegmentIndex = 0; _modeSeg.selectedSegmentIndex = 0; [self refreshModeLabel];
-    _ss.value = 24; _sg.value = 12; _span.value = 180; _sc.value = 160;   // v1.3.34 默认 24 / 12 / 180 / 160
+    _ss.value = 24; _sg.value = 12;
+    _scaleL1s.value = 160; _spanL1s.value = 180; _scaleL2s.value = 160; _spanL2s.value = 180; _scaleL3s.value = 160; _spanL3s.value = 180;
     _l1s.value = 0; _l2s.value = 0; _l3s.value = 0;   // v1.3.31：恢复默认 = 自动分层（按实际 URL 数量排）
     _ls.text = @"图标大小 24"; _lg.text = @"图标间隔 12";
-    _lspan.text = @"扇形角度° 180"; _lsc.text = @"整体距离% 160";
-    _ll1.text = @"第一层 自动"; _ll2.text = @"第二层 自动"; _ll3.text = @"第三层 自动";
+    _lS1.text = @"第一层·距离(到图标) 160"; _lA1.text = @"第一层·角度° 180";
+    _lS2.text = @"第二层·距离(到第一层) 160"; _lA2.text = @"第二层·角度° 180";
+    _lS3.text = @"第三层·距离(到第二层) 160"; _lA3.text = @"第三层·角度° 180";
+    _ll1.text = @"第一层数量 自动"; _ll2.text = @"第二层数量 自动"; _ll3.text = @"第三层数量 自动";
     _delayS.value = 3; _ldelay.text = @"吸附延时（松手后完整图标停留） 3 秒";    // v1.3.25
     _fanHideS.value = 5; _lfanHide.text = @"扇形闲置自动收回 5 秒";
     _preview.side = 0; _preview.iconSize = 24; _preview.iconGap = 12;
-    _preview.span = 180; _preview.scale = 160;
+    _preview.spanL1 = 180; _preview.spanL2 = 180; _preview.spanL3 = 180;
+    _preview.scaleL1 = 160; _preview.scaleL2 = 160; _preview.scaleL3 = 160;
     _preview.layer1 = 0; _preview.layer2 = 0; _preview.layer3 = 0;
     [self writeInt:kFUSnapMode value:0];
     [self writeFloat:kFUIconSize value:24]; [self writeFloat:kFUIconGap value:12];
-    [self writeFloat:kFUFanSpan value:180]; [self writeFloat:kFUFanScale value:160];
+    [self writeFloat:kFUFanSpanL1 value:180]; [self writeFloat:kFUFanSpanL2 value:180]; [self writeFloat:kFUFanSpanL3 value:180];
+    [self writeFloat:kFUFanScaleL1 value:160]; [self writeFloat:kFUFanScaleL2 value:160]; [self writeFloat:kFUFanScaleL3 value:160];
     [self writeInt:kFULayer1Count value:0]; [self writeInt:kFULayer2Count value:0]; [self writeInt:kFULayer3Count value:0];
     [self writeFloat:kFUSnapDelay value:3];   // v1.3.13：吸附延时恢复默认 3 秒
     [self writeFloat:kFUFanAutoHide value:5]; // v1.3.25：扇形闲置收回恢复默认 5 秒

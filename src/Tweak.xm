@@ -64,11 +64,15 @@ static NSString * const kFUEnabledApps = @"enabledApps";
 static NSString * const kFUSide        = @"side";       // 球停靠边：0=右(默认) 1=左
 static NSString * const kFUIconSize    = @"iconSize";   // 快捷图标尺寸 pt
 static NSString * const kFUIconGap     = @"iconGap";    // 图标/圈层间隔 pt
-static NSString * const kFUFanSpan     = @"fanSpan";    // v1.3.2 扇形角度（60~180°，默认 180）
+static NSString * const kFUFanSpanL1  = @"fanSpanL1";  // v1.3.41 第一层扇形角度（60~180°，默认 180）
+static NSString * const kFUFanSpanL2  = @"fanSpanL2";  // v1.3.41 第二层扇形角度
+static NSString * const kFUFanSpanL3  = @"fanSpanL3";  // v1.3.41 第三层扇形角度
 static NSString * const kFUFanAutoHide = @"fanAutoHide"; // v1.3.21：扇形展开后闲置多少秒自动收回（0=不自动收，默认 5）
 static NSString * const kFUCaptureHide = @"captureHide"; // v1.3.25：截图/录屏时自动收拢扇形并临时隐藏悬浮球（默认开）
 static const NSInteger kFUKeepForever  = 999;            // v1.3.25：秒数滑杆最右一档「常驻」哨兵（永不吸附）
-static NSString * const kFUFanScale    = @"fanScale";   // v1.3.2 整体距离（%，默认 100）
+static NSString * const kFUFanScaleL1 = @"fanScaleL1"; // v1.3.41 第一层距离（到图标，%）
+static NSString * const kFUFanScaleL2 = @"fanScaleL2"; // v1.3.41 第二层距离（到第一层，%）
+static NSString * const kFUFanScaleL3 = @"fanScaleL3"; // v1.3.41 第三层距离（到第二层，%）
 static NSString * const kFULayer1Count = @"layer1";     // v1.3.3：第一层入口数（0=自动）
 static NSString * const kFULayer2Count = @"layer2";     // v1.3.3：第二层入口数（0=自动）
 static NSString * const kFULayer3Count = @"layer3";     // v1.3.3：第三层入口数（0=自动）
@@ -771,8 +775,12 @@ static NSArray<NSString *> *fuPrefsCandidates(NSString *abs) {
     CGFloat               _iconSize;         // 快捷图标尺寸
     CGFloat               _iconGap;          // 图标/圈层间隔
     NSTimer               *_pollTimer;       // 每秒兜底重判黑名单/开关（修黑名单不生效）
-    CGFloat               _fanSpan;          // v1.3.2 扇形角度 60~180°
-    CGFloat               _fanScale;         // v1.3.2 整体距离 %
+    CGFloat               _fanSpanL1;        // v1.3.41 第一层扇形角度 60~180°
+    CGFloat               _fanSpanL2;        // v1.3.41 第二层扇形角度
+    CGFloat               _fanSpanL3;        // v1.3.41 第三层扇形角度
+    CGFloat               _fanScaleL1;       // v1.3.41 第一层距离（到图标）%
+    CGFloat               _fanScaleL2;       // v1.3.41 第二层距离（到第一层）%
+    CGFloat               _fanScaleL3;       // v1.3.41 第三层距离（到第二层）%
     NSInteger             _layer1;           // v1.3.3 第一层入口数（0=自动）
     NSInteger             _layer2;           // v1.3.3 第二层入口数（0=自动）
     NSInteger             _layer3;           // v1.3.3 第三层入口数（0=自动）
@@ -809,7 +817,8 @@ static NSArray<NSString *> *fuPrefsCandidates(NSString *abs) {
         _enabled  = YES; _url = @"https://www.apple.com";
         _didSetup = NO; _fanOpen = NO;
         _side = 0; _iconSize = 24.0f; _iconGap = 12.0f;   // v1.3.34：默认图标 24 / 间隔 12，球停靠右侧
-        _fanSpan = 180.0f; _fanScale = 160.0f;            // v1.3.34 默认扇形角度 180° / 整体距离 160%
+        _fanSpanL1 = _fanSpanL2 = _fanSpanL3 = 180.0f;     // v1.3.41 逐层扇形角度默认 180°
+        _fanScaleL1 = _fanScaleL2 = _fanScaleL3 = 160.0f;   // v1.3.41 逐层距离默认 160%
         _fanAutoHide = 5.0f;                              // v1.3.21：默认闲置 5 秒自动收回扇形
         _snapMode = 0; _webMode = 0; _ballTitle = @"URL";  // v1.3.5 默认：自动吸附 + 系统浏览器
         _snapDelay = 3.0;                                  // v1.3.13：默认吸附延时 3 秒（松手后先给完整图标）
@@ -916,15 +925,24 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     if (_side != 0) _side = 1;
     if (_iconSize < 24) _iconSize = 24; if (_iconSize > 64) _iconSize = 64;
     if (_iconGap  < 12) _iconGap  = 12; if (_iconGap  > 120) _iconGap = 120;
-    // 扇形角度 / 整体距离
-    id fspRef = suite[@"fanSpan"];  if ([fspRef isKindOfClass:[NSNumber class]]) _fanSpan = [fspRef floatValue];
-    id fscRef = suite[@"fanScale"]; if ([fscRef isKindOfClass:[NSNumber class]]) _fanScale = [fscRef floatValue];
-    if (_fanSpan  < 60.0f) _fanSpan = 60.0f;  if (_fanSpan  > 180.0f) _fanSpan = 180.0f;
+    // v1.3.41：逐层扇形角度 / 距离。升级时若没存过逐层值，回落到旧全局 fanSpan / fanScale，避免丢设置。
+    CGFloat gSpan = 180.0f, gScale = 160.0f;
+    id fspRef = suite[@"fanSpan"];  if ([fspRef isKindOfClass:[NSNumber class]]) gSpan  = [fspRef floatValue];
+    id fscRef = suite[@"fanScale"]; if ([fscRef isKindOfClass:[NSNumber class]]) gScale = [fscRef floatValue];
+    if (gSpan  < 60.0f) gSpan  = 60.0f; if (gSpan  > 180.0f) gSpan  = 180.0f;
+    if (gScale < 60.0f) gScale = 60.0f; if (gScale > 160.0f) gScale = 160.0f;
+    #define FU_RD(k,df,lo,hi) ({ id _r=(suite)[(k)]; CGFloat _v=([_r isKindOfClass:[NSNumber class]]?[(__bridge NSNumber *)_r floatValue]:(df)); if(_v<(lo))_v=(lo); if(_v>(hi))_v=(hi); _v; })
+    _fanSpanL1  = FU_RD(@"fanSpanL1",  gSpan,  60.0f, 180.0f);
+    _fanSpanL2  = FU_RD(@"fanSpanL2",  gSpan,  60.0f, 180.0f);
+    _fanSpanL3  = FU_RD(@"fanSpanL3",  gSpan,  60.0f, 180.0f);
+    _fanScaleL1 = FU_RD(@"fanScaleL1", gScale, 60.0f, 160.0f);
+    _fanScaleL2 = FU_RD(@"fanScaleL2", gScale, 60.0f, 160.0f);
+    _fanScaleL3 = FU_RD(@"fanScaleL3", gScale, 60.0f, 160.0f);
+    #undef FU_RD
     // 扇形闲置自动收回（秒）；0 = 永不
     id ahRef = suite[@"fanAutoHide"];
     _fanAutoHide = [ahRef isKindOfClass:[NSNumber class]] ? [ahRef doubleValue] : 5.0;
     if (_fanAutoHide < 0) _fanAutoHide = 0; if (_fanAutoHide > 60.0) _fanAutoHide = 60.0;
-    if (_fanScale < 60.0f) _fanScale = 60.0f; if (_fanScale > 160.0f) _fanScale = 160.0f;
     // 每层数量（0=自动）
     id l1 = suite[@"layer1"], l2 = suite[@"layer2"], l3 = suite[@"layer3"];
     if ([l1 isKindOfClass:[NSNumber class]]) _layer1 = [l1 integerValue];
@@ -1604,47 +1622,44 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
     if (fabs(dx) < 1.0f && fabs(dy) < 1.0f) return 0.0f;   // 球正好在屏幕中心：默认朝右
     return atan2f(dy, dx) * 180.0f / (CGFloat)M_PI;
 }
-// v1.3.8 修 02：给定扇形角度是否可用。
-//   checkFit=YES 时还检查「所有图标都在屏内」；
-//   两种模式都会检查「同层相邻图标的弧距 >= 图标直径」——收缩角度会让弧距变小，一旦会挤到一起就不能再收了。
-- (BOOL)fuSpanOK:(CGFloat)sp center:(CGFloat)centerA radii:(const CGFloat *)R
-            caps:(const NSInteger *)caps icon:(CGFloat)isz margin:(CGFloat)m
-          screen:(CGRect)sc ball:(CGPoint)c checkFit:(BOOL)checkFit {
-    for (int layer = 0; layer < 3; layer++) {
-        NSInteger cnt = caps[layer]; if (cnt <= 0) continue;
-        CGFloat sp2 = (cnt > 1) ? sp / (CGFloat)(cnt - 1) : 0.0f;
-        if (cnt > 1) {
-            CGFloat arcStep = sp2 * (CGFloat)M_PI / 180.0f * R[layer];
-            if (arcStep < isz * 1.02f) return NO;      // 会重叠 → 这个角度不可用
-        }
-        if (!checkFit) continue;
-        CGFloat a0 = centerA - sp / 2.0f;
-        for (NSInteger k = 0; k < cnt; k++) {
-            CGFloat a = (cnt > 1) ? (a0 + sp2 * (CGFloat)k) : centerA;
-            CGFloat rad = a * (CGFloat)M_PI / 180.0f;
-            CGFloat x = c.x + R[layer] * cosf(rad), y = c.y + R[layer] * sinf(rad);
-            if (x - isz/2.0f < m || x + isz/2.0f > sc.size.width  - m ||
-                y - isz/2.0f < m || y + isz/2.0f > sc.size.height - m) return NO;
-        }
+// v1.3.41：给定「某层 + 该层角度」是否可用（检查该层图标不重叠 + 在屏内）。
+//   逐层角度后，每层独立判断；收缩角度会让弧距变小，一旦会挤到一起就不能再收。
+- (BOOL)fuSpanOKLayer:(int)layer sp:(CGFloat)sp center:(CGFloat)centerA radii:(const CGFloat *)R
+              caps:(const NSInteger *)caps icon:(CGFloat)isz margin:(CGFloat)m
+            screen:(CGRect)sc ball:(CGPoint)c checkFit:(BOOL)checkFit {
+    NSInteger cnt = caps[layer]; if (cnt <= 0) return YES;
+    CGFloat sp2 = (cnt > 1) ? sp / (CGFloat)(cnt - 1) : 0.0f;
+    if (cnt > 1) {
+        CGFloat arcStep = sp2 * (CGFloat)M_PI / 180.0f * R[layer];
+        if (arcStep < isz * 1.02f) return NO;      // 会重叠 → 这个角度不可用
+    }
+    if (!checkFit) return YES;
+    CGFloat a0 = centerA - sp / 2.0f;
+    for (NSInteger k = 0; k < cnt; k++) {
+        CGFloat a = (cnt > 1) ? (a0 + sp2 * (CGFloat)k) : centerA;
+        CGFloat rad = a * (CGFloat)M_PI / 180.0f;
+        CGFloat x = c.x + R[layer] * cosf(rad), y = c.y + R[layer] * sinf(rad);
+        if (x - isz/2.0f < m || x + isz/2.0f > sc.size.width  - m ||
+            y - isz/2.0f < m || y + isz/2.0f > sc.size.height - m) return NO;
     }
     return YES;
 }
-// v1.3.8 修 02：在给定中心角下，求「所有图标都在屏内、且同层不重叠」的最大扇形角度。
-// 从用户设定角度起每 5° 收缩一次；一旦再收缩就会让图标挤到一起，就停止收缩（交给整体平移兜底）。
-- (CGFloat)fuFittingSpanForCenter:(CGFloat)centerA radii:(const CGFloat *)R caps:(const NSInteger *)caps
-                            icon:(CGFloat)isz margin:(CGFloat)m maxSpan:(CGFloat)spanMax {
+// v1.3.41：逐层求「该层图标都在屏内、同层不重叠」的最大角度；每 5° 收缩，直到再收就重叠则停。
+- (void)fuFitLayerSpansForCenter:(CGFloat)centerA radii:(const CGFloat *)R caps:(const NSInteger *)caps
+                         icon:(CGFloat)isz margin:(CGFloat)m
+                    spanMaxIn:(const CGFloat *)spanMax spanOut:(CGFloat *)spanOut {
     CGRect sc = _overlay ? _overlay.bounds : [UIScreen mainScreen].bounds;
     CGPoint c = CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame));
-    CGFloat sp = spanMax;
-    while (sp > 45.0f) {
-        if ([self fuSpanOK:sp center:centerA radii:R caps:caps icon:isz margin:m screen:sc ball:c checkFit:YES])
-            break;
-        CGFloat next = sp - 5.0f;
-        if (![self fuSpanOK:next center:centerA radii:R caps:caps icon:isz margin:m screen:sc ball:c checkFit:NO])
-            break;   // 再收就会重叠 → 保持当前角度
-        sp = next;
+    for (int i = 0; i < 3; i++) {
+        CGFloat sp = spanMax[i];
+        while (sp > 45.0f) {
+            if ([self fuSpanOKLayer:i sp:sp center:centerA radii:R caps:caps icon:isz margin:m screen:sc ball:c checkFit:YES]) break;
+            CGFloat next = sp - 5.0f;
+            if (![self fuSpanOKLayer:i sp:next center:centerA radii:R caps:caps icon:isz margin:m screen:sc ball:c checkFit:NO]) break;
+            sp = next;
+        }
+        spanOut[i] = sp;
     }
-    return sp;
 }
 // v1.3.13：把「算扇形点位」抽成独立方法 —— openFan（动画摆放）与拖动球（实时重排）共用同一套算法，
 // 保证「扇形永远围绕球、且始终留在屏内」在两种场景下完全一致。
@@ -1656,12 +1671,14 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
     CGFloat isz   = _iconSize;
     CGFloat gap   = MAX(4.0f, _iconGap * 0.5f);   // 图标之间至少要留的净空隙
     CGFloat stepR = isz + _iconGap;               // 相邻圈层的半径差
-    CGFloat scale = _fanScale / 100.0f;           // 整体距离
+    // v1.3.41：逐层距离。第一层=到图标、第二层=到第一层、第三层=到第二层（各自%独立）。
+    CGFloat scl[3] = { _fanScaleL1/100.0f, _fanScaleL2/100.0f, _fanScaleL3/100.0f };
     // 1) 三层半径
     CGFloat R[3];
-    R[0] = (kFUButtonSize/2.0f + isz/2.0f + _iconGap) * scale;
-    R[1] = R[0] + stepR * scale;
-    R[2] = R[1] + stepR * scale;
+    CGFloat baseR = kFUButtonSize/2.0f + isz/2.0f + _iconGap;   // 球到图标基准
+    R[0] = baseR * scl[0];
+    R[1] = R[0] + stepR * scl[1];
+    R[2] = R[1] + stepR * scl[2];
     // 2) 每圈容量（v1.3.10 重做）：容量 = 弧长 ÷ (图标+净空隙) → 同圈永不挤叠。
     //    用户指定的每层数量只作该圈「上限」（0=自动），放不下的自动溢到下一圈，
     //    第三圈满了继续往外动态加圈 —— 条目再多（到48）扇形也始终围绕悬浮球。
@@ -1670,11 +1687,14 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
     NSInteger want[3] = { _layer1, _layer2, _layer3 };
     NSInteger autoMax[3] = { 8, 16, 24 };   // v1.3.31：自动模式每层容量上限（先满第1层再第2层再第3层）
     NSInteger caps[3] = { 0, 0, 0 };   // 预估每圈容量（仅供下面「角度收缩」检查用）
-    CGFloat spanMax = MAX(60.0f, MIN(180.0f, _fanSpan));
+    // v1.3.41：逐层扇形角度（60~180°），缺省回落到旧全局已在 reloadPrefs 处理。
+    CGFloat spanMax[3] = { MAX(60.0f,MIN(180.0f,_fanSpanL1)),
+                           MAX(60.0f,MIN(180.0f,_fanSpanL2)),
+                           MAX(60.0f,MIN(180.0f,_fanSpanL3)) };
     {
-        CGFloat spanRad0 = spanMax * (CGFloat)M_PI / 180.0f;
         NSInteger placed2 = 0;
         for (int i = 0; i < 3 && placed2 < n; i++) {
+            CGFloat spanRad0 = spanMax[i] * (CGFloat)M_PI / 180.0f;
             NSInteger capArc = MAX(1, (NSInteger)floor(R[i] * spanRad0 / (isz + gap)));
             if (want[i] > 0) capArc = MIN(capArc, want[i]);
             else capArc = MIN(capArc, autoMax[i]);   // v1.3.31：自动模式按「先满第1层再第2、第3层」分层
@@ -1699,16 +1719,16 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
     else if (nearT)          centerA =  90.0f;    // 正上边 → 朝下铺开
     else if (nearB)          centerA = -90.0f;    // 正下边 → 朝上铺开
     else                     centerA = [self fuBallSide] ? 0.0f : 180.0f;   // 左/右边 → 水平朝内
-    // v1.3.8 修 02：角度自适应——从用户设定角度起逐档收缩，直到所有图标都在屏内；
-    // （收缩会让同层弧距变小 → 一旦会挤到一起就停止收缩，改由下方「整体平移」兜底。）
-    CGFloat span = [self fuFittingSpanForCenter:centerA radii:R caps:caps icon:isz margin:6.0f maxSpan:spanMax];
-    // 3) 摆点（v1.3.10 重做）：用**最终** span 重算每圈容量；第三圈满了继续动态加圈（最多 8 圈）
+    // v1.3.41：逐层角度自适应——每层从各自设定角度起逐档收缩，直到该层图标都在屏内且不重叠。
+    CGFloat spanFit[3] = { spanMax[0], spanMax[1], spanMax[2] };
+    [self fuFitLayerSpansForCenter:centerA radii:R caps:caps icon:isz margin:6.0f spanMaxIn:spanMax spanOut:spanFit];
+    // 3) 摆点（v1.3.10 重做）：用**每层各自最终 span** 重算每圈容量；第三圈满了继续动态加圈（最多 8 圈）
     {
-        CGFloat spanRad = span * (CGFloat)M_PI / 180.0f;
         NSInteger placed2 = 0;
         for (NSInteger ring = 0; ring < 8 && placed2 < n; ring++) {
-            CGFloat Rcur = (ring < 3) ? R[ring] : (R[2] + stepR * scale * (CGFloat)(ring - 2));
-            NSInteger capArc = MAX(1, (NSInteger)floor(Rcur * spanRad / (isz + gap)));
+            CGFloat Rcur = (ring < 3) ? R[ring] : (R[2] + stepR * scl[2] * (CGFloat)(ring - 2));
+            CGFloat span = spanFit[ring < 3 ? (int)ring : 2];   // v1.3.41：逐层角度
+            NSInteger capArc = MAX(1, (NSInteger)floor(Rcur * (span * (CGFloat)M_PI / 180.0f) / (isz + gap)));
             if (ring < 3) {
                 if (want[ring] > 0) capArc = MIN(capArc, want[ring]);
                 else capArc = MIN(capArc, autoMax[ring]);   // v1.3.31：自动模式容量上限
