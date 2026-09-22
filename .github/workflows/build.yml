@@ -1,6 +1,8 @@
 # ============ FloatingURL CI：编译 deb + 发布到 yzdmm2024/repo 源 ============
 # 出包方式照搬已验证的 PowerSave：brew 装 theos 依赖 + gh 拉 14.5 SDK +
-# make 编译 + 手动 dpkg-deb stage 到 var/jb/...（rootless / roothide 注入目录）
+# make 编译 + 手动 dpkg-deb stage 到 var/jb/...（无根/隐根共用的注入目录前缀）
+# 双架构（v1.3.43）：iphoneos-arm64 给无根越狱（Dopamine/palera1n）；
+#                    iphoneos-arm64e 给隐根越狱（relaxin / RootHide Bootstrap）
 # 发布：把 deb 推到 yzdmm2024/repo 的 debs/，其 gen.yml 会自动重建 Packages
 
 name: Build 悬浮URL FloatingURL
@@ -42,51 +44,74 @@ jobs:
           echo "=== build output ==="
           find .theos -type f 2>/dev/null | head -80
 
-      - name: Package deb manual (TweakInject stage)
+      - name: Package debs (rootless arm64 + roothide arm64e)
         run: |
           set -e
           PKG=$(grep '^Package:' control | awk '{print $2}')
           VERSION=$(grep '^Version:' control | awk '{print $2}')
-          ARCH=$(grep '^Architecture:' control | awk '{print $2}')
-          echo "PKG=$PKG VERSION=$VERSION ARCH=$ARCH"
-          mkdir -p stage/DEBIAN
+          echo "PKG=$PKG VERSION=$VERSION"
 
-          # ---- TweakInject：dylib + 对应的 Filter plist（roothide 真正扫描的注入目录）----
-          mkdir -p stage/var/jb/usr/lib/TweakInject
-          cp .theos/obj/debug/FloatingURL.dylib stage/var/jb/usr/lib/TweakInject/ 2>/dev/null || \
-          cp .theos/obj/FloatingURL.dylib stage/var/jb/usr/lib/TweakInject/ || { echo "FATAL: FloatingURL.dylib not found"; exit 1; }
-          cp FloatingURL.plist stage/var/jb/usr/lib/TweakInject/
-
-          # ---- PreferenceBundles：先铺 layout（手写 Info/Root.plist），再单独拷 theos 产出的可执行文件 ----
-          mkdir -p stage/var/jb/Library/PreferenceBundles
-          cp -R layout/Library/PreferenceBundles/FloatingURLPrefs.bundle stage/var/jb/Library/PreferenceBundles/
-          cp .theos/obj/debug/FloatingURLPrefs.bundle/FloatingURLPrefs stage/var/jb/Library/PreferenceBundles/FloatingURLPrefs.bundle/ 2>/dev/null || \
-          cp .theos/obj/FloatingURLPrefs.bundle/FloatingURLPrefs stage/var/jb/Library/PreferenceBundles/FloatingURLPrefs.bundle/ || { echo "FATAL: FloatingURLPrefs executable not found"; exit 1; }
-
-          # ---- PreferenceLoader 入口 ----
-          mkdir -p stage/var/jb/Library/PreferenceLoader/Preferences
-          cp layout/Library/PreferenceLoader/Preferences/FloatingURLEntry.plist stage/var/jb/Library/PreferenceLoader/Preferences/
-
-          # ---- 自检 ----
-          test -f stage/var/jb/Library/PreferenceBundles/FloatingURLPrefs.bundle/FloatingURLPrefs || { echo "FATAL: prefs executable missing"; exit 1; }
-          test -f stage/var/jb/Library/PreferenceBundles/FloatingURLPrefs.bundle/Root.plist || { echo "FATAL: Root.plist missing"; exit 1; }
-          plutil -extract NSPrincipalClass raw stage/var/jb/Library/PreferenceBundles/FloatingURLPrefs.bundle/Info.plist
-
-          # ---- 假签名兜底 ----
-          find stage -type f \( -name "*.dylib" -o -name "FloatingURLPrefs" \) -exec ldid -S {} \;
-
-          # ---- DEBIAN：control + preinst + postinst(respring) ----
-          cp control stage/DEBIAN/control
-          sed -i '' "s/^Version:.*/Version: $VERSION/" stage/DEBIAN/control
-          cp layout/DEBIAN/preinst stage/DEBIAN/preinst
-          cp layout/DEBIAN/postinst stage/DEBIAN/postinst
-          chmod 755 stage/DEBIAN/preinst stage/DEBIAN/postinst
-
-          echo "=== stage layout ==="
-          find stage -type f
+          DYLIB=$(ls .theos/obj/debug/FloatingURL.dylib .theos/obj/FloatingURL.dylib 2>/dev/null | head -1)
+          [ -n "$DYLIB" ] || { echo "FATAL: FloatingURL.dylib not found"; exit 1; }
+          BIN=$(ls .theos/obj/debug/FloatingURLPrefs.bundle/FloatingURLPrefs .theos/obj/FloatingURLPrefs.bundle/FloatingURLPrefs 2>/dev/null | head -1)
+          [ -n "$BIN" ] || { echo "FATAL: FloatingURLPrefs executable not found"; exit 1; }
+          echo "DYLIB=$DYLIB"; echo "BIN=$BIN"
 
           mkdir -p packages
-          dpkg-deb --root-owner-group -b stage packages/${PKG}_${VERSION}_${ARCH}.deb
+
+          # ============ 双架构出包 ============
+          # v1.3.43：relaxin / RootHide Bootstrap 这类「隐根(roothide)」越狱只认
+          #   Architecture: iphoneos-arm64e 的包；带 iphoneos-arm64 标签的包会被它的
+          #   兼容层塞进 /var/mobile/Library/pkgmirror，而那里的 usr/lib/TweakInject
+          #   是 patchloader 占用的符号链接 → dpkg 报
+          #   「trying to overwrite '.../pkgmirror/usr/lib/TweakInject'」直接装不上。
+          #   所以同一个版本发两个包，让设备按架构各取所需：
+          #     iphoneos-arm64  → 普通无根（Dopamine / palera1n / ellekit）
+          #     iphoneos-arm64e → 隐根（relaxin / RootHide），原生装进真正的 bootstrap
+          pack() {
+            ARCH="$1"; STAGE="stage_$ARCH"; TIDIR="$2"
+            rm -rf "$STAGE"; mkdir -p "$STAGE/DEBIAN"
+
+            # ---- 注入目录：dylib + 对应 Filter plist ----
+            mkdir -p "$STAGE/$TIDIR"
+            cp "$DYLIB" "$STAGE/$TIDIR/"
+            cp FloatingURL.plist "$STAGE/$TIDIR/"
+
+            # ---- PreferenceBundles：先铺 layout（手写 Info/Root.plist），再单独拷 theos 产出的可执行文件 ----
+            mkdir -p "$STAGE/var/jb/Library/PreferenceBundles"
+            cp -R layout/Library/PreferenceBundles/FloatingURLPrefs.bundle "$STAGE/var/jb/Library/PreferenceBundles/"
+            cp "$BIN" "$STAGE/var/jb/Library/PreferenceBundles/FloatingURLPrefs.bundle/"
+
+            # ---- PreferenceLoader 入口 ----
+            mkdir -p "$STAGE/var/jb/Library/PreferenceLoader/Preferences"
+            cp layout/Library/PreferenceLoader/Preferences/FloatingURLEntry.plist "$STAGE/var/jb/Library/PreferenceLoader/Preferences/"
+
+            # ---- 自检 ----
+            test -f "$STAGE/var/jb/Library/PreferenceBundles/FloatingURLPrefs.bundle/FloatingURLPrefs" || { echo "FATAL: prefs executable missing"; exit 1; }
+            test -f "$STAGE/var/jb/Library/PreferenceBundles/FloatingURLPrefs.bundle/Root.plist" || { echo "FATAL: Root.plist missing"; exit 1; }
+            plutil -extract NSPrincipalClass raw "$STAGE/var/jb/Library/PreferenceBundles/FloatingURLPrefs.bundle/Info.plist"
+
+            # ---- 假签名兜底 ----
+            find "$STAGE" -type f \( -name "*.dylib" -o -name "FloatingURLPrefs" \) -exec ldid -S {} \;
+
+            # ---- DEBIAN：control + preinst + postinst(respring) ----
+            cp control "$STAGE/DEBIAN/control"
+            sed -i '' "s/^Version:.*/Version: $VERSION/" "$STAGE/DEBIAN/control"
+            sed -i '' "s/^Architecture:.*/Architecture: $ARCH/" "$STAGE/DEBIAN/control"
+            cp layout/DEBIAN/preinst "$STAGE/DEBIAN/preinst"
+            cp layout/DEBIAN/postinst "$STAGE/DEBIAN/postinst"
+            chmod 755 "$STAGE/DEBIAN/preinst" "$STAGE/DEBIAN/postinst"
+
+            echo "=== $ARCH stage layout ==="
+            find "$STAGE" -type f
+            dpkg-deb --root-owner-group -b "$STAGE" "packages/${PKG}_${VERSION}_${ARCH}.deb"
+          }
+
+          # 1) 无根越狱（Dopamine / palera1n / ellekit）：注入目录用 usr/lib/TweakInject（程序约定）
+          pack iphoneos-arm64 var/jb/usr/lib/TweakInject
+          # 2) 隐根越狱（relaxin / RootHide Bootstrap）：原生 arm64e，dpkg 会装进真正的 bootstrap
+          pack iphoneos-arm64e var/jb/usr/lib/TweakInject
+
           echo "=== deb ==="
           ls -la packages/
 
@@ -114,11 +139,12 @@ jobs:
           git config --global user.email "ci@users.noreply.github.com"
           git config --global user.name "ci-bot"
           git clone --depth=1 https://x-access-token:${GH_PAT}@github.com/yzdmm2024/repo.git repo_src
-          DEB=$(ls deb-artifacts/*.deb | head -1)
-          echo "publishing $DEB"
-          cp "$DEB" repo_src/debs/
           cd repo_src
-          git add "debs/$(basename "$DEB")"
-          git commit -m "add $(basename "$DEB")"
+          for DEB in ../deb-artifacts/*.deb; do
+            echo "publishing $DEB"
+            cp "$DEB" debs/
+            git add "debs/$(basename "$DEB")"
+          done
+          git commit -m "add $(basename $(ls ../deb-artifacts/*.deb | head -1) )"
           git pull --rebase origin main || true
           git push
