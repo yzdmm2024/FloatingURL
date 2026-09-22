@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>title</key>
-	<string>悬浮URL 1.3.27</string>
+	<string>悬浮URL 1.3.31</string>
 	<key>items</key>
 	<array>
 		<dict>
@@ -32,7 +32,7 @@
 			<key>label</key>
 			<string>静默 / 功耗</string>
 			<key>footerText</key>
-			<string>开启「静默模式」后，悬浮窗彻底休眠（球/扇形/网页面板全部隐藏，App 也跳过心跳），最省电；需要用时关闭即可。</string>
+			<string>开启后悬浮窗彻底休眠（球/扇形/面板全隐藏，App 也跳过心跳），最省电。需要用时关闭即可。玩法见「说明书 / 玩法」。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -54,9 +54,9 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
-			<string>快捷URI（扇形 · 每层 8/16/24 · 最多 48 个）</string>
+			<string>快捷URI（扇形 · 自动分层 · 最多 48 个）</string>
 			<key>footerText</key>
-			<string>点悬浮球朝屏幕内侧展开扇形：球不动，快捷图标添加几个排几个（默认三层 8/16/24，最多 48，每层数量可在「布局调节」改）。长按扇形图标可就地改名称/网址/颜色；入口删光后点球不再弹网页。</string>
+			<string>点球展开扇形：添加几个排几个，默认自动分层（先满第 1 层、再第 2、第 3 层，每层数量可在「布局调节」改，拖到 0 = 自动）。长按图标可就地改名称/网址/颜色；删光后点球不再弹网页。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -72,32 +72,21 @@
 			<key>label</key>
 			<string>URL 深链（插件触发器，必须全小写）</string>
 			<key>footerText</key>
-			<string>Snapper 4 官方「URL 深链」共 10 条（设置 → Snapper 4 → URL 深链可自查）。把任意一条填进「管理快捷URI」的入口，点一下就直接触发对应动作（不会打开设置）：
-prefs:root=snapper4_freeze —— 冻结截图
-prefs:root=snapper4_long —— 长截图
-prefs:root=screenshot-shell —— 仅截屏套壳
-prefs:root=screenshot-watermark —— 仅截图水印
-prefs:root=screenshot-both —— 截屏套壳＋水印
-prefs:root=screenshot-off —— 关闭截屏套壳/水印
-prefs:root=recording-shell —— 仅录屏套壳
-prefs:root=recording-watermark —— 仅录屏水印
-prefs:root=recording-both —— 录屏套壳＋水印
-prefs:root=recording-off —— 关闭录屏套壳/水印
-注意：官方 id 全是小写，写成 snapper4_Freeze 这类大小写是匹配不到的（本版已自动纠正，但建议直接复制上面原文）。</string>
+			<string>支持 Snapper 4 等插件的「URL 深链」（prefs:root=…），必须全小写，填进快捷入口即可一键触发。完整 10 条清单见「说明书 / 玩法」。本版已自动纠正大小写。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
-			<string>布局调节（吸附模式 + 扇形）</string>
+			<string>布局调节</string>
 			<key>footerText</key>
-			<string>预览即时反映你的设置。吸附可选「自动（按屏幕中心线吸左/右）」或「全屏固定」。秒数都按 1 秒一档：最低 1 秒，拖到最右显示「常驻」（永不）——「吸附延时」常驻 = 球永远保持完整图标不吸附，「扇形闲置收回」常驻 = 扇形展开后不自动收回。图标大小/间隔、扇形角度、整体距离、每层数量都能单独调，改完即时生效。</string>
+			<string>实时预览。吸附可选自动（按屏幕中心线吸左/右）或全屏固定；秒数最低 1 秒，最右=常驻。图标大小/间隔、扇形角度、整体距离、每层数量都可单独调，改完即时生效。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
 			<string>PSButtonCell</string>
 			<key>label</key>
-			<string>布局调节（吸附模式 + 收回/延时/角度/距离/大小/间隔）</string>
+			<string>布局调节</string>
 			<key>action</key>
 			<string>showLayout</string>
 		</dict>
@@ -107,7 +96,7 @@ prefs:root=recording-off —— 关闭录屏套壳/水印
 			<key>label</key>
 			<string>截图 / 录屏</string>
 			<key>footerText</key>
-			<string>开启后：系统截图、录屏、第三方局部截图一开始，扇形会立刻收拢，悬浮球临时隐藏——不会被拍进截图或录像里；结束后自动把悬浮按钮显示回来，并按「吸附延时」归位。完全靠系统通知驱动，不轮询、不额外耗电。</string>
+			<string>开启后截图/录屏一开始，扇形收拢、球临时隐藏（不会被拍进画面）；结束自动恢复并按「吸附延时」归位。靠系统通知驱动，不轮询、不耗电。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -129,7 +118,7 @@ prefs:root=recording-off —— 关闭录屏套壳/水印
 			<key>label</key>
 			<string>悬浮球外观</string>
 			<key>footerText</key>
-			<string>自定义悬浮球：名称（默认 URL）、左/右图标（从相册方形裁剪，任一侧没设会自动镜像另一侧）、底色（48 色 + 任意色，不设则为玻璃质感）。不选图标时底色生效。</string>
+			<string>自定义名称（默认 URL）、左/右图标（从相册方形裁剪，任一侧没设自动镜像另一侧）、底色（48 色 + 任意色，不设则为玻璃质感）。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -145,7 +134,7 @@ prefs:root=recording-off —— 关闭录屏套壳/水印
 			<key>label</key>
 			<string>系统手势优先级（防冲突）</string>
 			<key>footerText</key>
-			<string>球停在底部容易跟「上滑回主屏」抢手指，停在左上/右上容易跟「下拉通知 / 控制中心」抢。开启后：只有当球真的贴到那条边时，才把那条边的系统手势让位给悬浮球，其它位置系统手势完全不受影响；被让位的边第一次划先给球，紧接着再划一次照样能拉出系统面板。不做轮询，不额外耗电。</string>
+			<string>球贴到某条边时，把该边系统手势先让给球（再划一次仍出系统面板）。若觉得手势发钝可关闭。不做轮询，不额外耗电。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -167,7 +156,7 @@ prefs:root=recording-off —— 关闭录屏套壳/水印
 			<key>label</key>
 			<string>更多</string>
 			<key>footerText</key>
-			<string>说明书/玩法：各种 URL 与 scheme 示例，长按即可复制。隐藏悬浮窗的 App（黑名单）：默认所有 App 都显示悬浮窗，勾选某个 App = 在该 App 内隐藏球（桌面同样遵循，不勾就不隐藏）。</string>
+			<string>说明书/玩法：各种 URL 与 scheme 示例，长按即可复制。黑名单：勾选某 App = 该 App 内隐藏球（桌面同样遵循）。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -191,7 +180,7 @@ prefs:root=recording-off —— 关闭录屏套壳/水印
 			<key>label</key>
 			<string>关于</string>
 			<key>footerText</key>
-			<string>系统级悬浮窗：可拖动小球常驻屏幕，点开扇形快捷环（按入口数量自动分层），网页/scheme 一键直达（1.3.24 起彻底移除内置的网页面板，所有链接一律交给 Safari / 对应 App，更轻更省电）；全 App 及主屏幕可用。吸附模式可选「自动吸附（按屏幕中心线吸左/右）」或「全屏固定（停在哪就在哪）」，球的位置会被记住；1.3.13 起松手后有「吸附延时」（默认 3 秒）——这段时间球保持完整图标，不会马上缩到屏幕边缘。</string>
+			<string>系统级悬浮窗：可拖动小球常驻屏幕，点开扇形快捷环（自动分层），网页/scheme 一键直达（全部交给 Safari / 对应 App，更轻更省电）。全 App 及主屏幕可用；球位置会被记住，松手后有「吸附延时」。</string>
 		</dict>
 	</array>
 </dict>

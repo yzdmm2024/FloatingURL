@@ -816,7 +816,7 @@ static NSArray<NSString *> *fuPrefsCandidates(NSString *abs) {
         _fanAutoHide = 5.0f;                              // v1.3.21：默认闲置 5 秒自动收回扇形
         _snapMode = 0; _webMode = 0; _ballTitle = @"URL";  // v1.3.5 默认：自动吸附 + 系统浏览器
         _snapDelay = 3.0;                                  // v1.3.13：默认吸附延时 3 秒（松手后先给完整图标）
-        _layer1 = 8; _layer2 = 16; _layer3 = 24;           // v1.3.6：三层默认数量 8/16/24（合计 48）
+        _layer1 = 0; _layer2 = 0; _layer3 = 0;           // v1.3.31：默认「自动分层」= 按实际 URL 数量排（先满第1层≤8、再第2层≤16、再第3层≤24）；0 即自动，每层数量滑杆拖到 0 同义
         _edgeGuard = YES; _screenWasOn = YES;              // v1.3.24：默认压住冲突边 + 起始按亮屏算
         _captureHide = YES; _captureHiding = NO; _captureToken = 0; _captureExclusionOK = NO;   // v1.3.25 / v1.3.28
         _ballShownMirrored = NO;   // v1.3.27：图标镜像变更检测
@@ -1514,9 +1514,9 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     _captureHiding = NO;
     if (!_ball) return;
     _ball.userInteractionEnabled = YES;
-    _ball.alpha = 1.0f;
-    [self restoreBallFromSnap];
-    [self scheduleSnapAfterDrop];
+    // v1.3.31：收尾交给 applyVisibility —— 它才是显隐的权威来源，会尊重「启用悬浮窗」开关与黑名单，
+    // 不会再出现「截图结束把本该隐藏的球重新点亮」的问题（这正是开关关不掉球的一大诱因）。
+    [self applyVisibility];
 }
 
 - (void)restoreBallFromSnap {
@@ -1609,6 +1609,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     //    （1.3.6 的「塞满指定层」把 27 条挤进 3 圈，真机实测图标叠成一团。）
     NSInteger n = (NSInteger)_entries.count;
     NSInteger want[3] = { _layer1, _layer2, _layer3 };
+    NSInteger autoMax[3] = { 8, 16, 24 };   // v1.3.31：自动模式每层容量上限（先满第1层再第2层再第3层）
     NSInteger caps[3] = { 0, 0, 0 };   // 预估每圈容量（仅供下面「角度收缩」检查用）
     CGFloat spanMax = MAX(60.0f, MIN(180.0f, _fanSpan));
     {
@@ -1617,6 +1618,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
         for (int i = 0; i < 3 && placed2 < n; i++) {
             NSInteger capArc = MAX(1, (NSInteger)floor(R[i] * spanRad0 / (isz + gap)));
             if (want[i] > 0) capArc = MIN(capArc, want[i]);
+            else capArc = MIN(capArc, autoMax[i]);   // v1.3.31：自动模式按「先满第1层再第2、第3层」分层
             NSInteger add = MIN(capArc, n - placed2);
             caps[i] = add; placed2 += add;
         }
@@ -1648,7 +1650,10 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
         for (NSInteger ring = 0; ring < 8 && placed2 < n; ring++) {
             CGFloat Rcur = (ring < 3) ? R[ring] : (R[2] + stepR * scale * (CGFloat)(ring - 2));
             NSInteger capArc = MAX(1, (NSInteger)floor(Rcur * spanRad / (isz + gap)));
-            if (ring < 3 && want[ring] > 0) capArc = MIN(capArc, want[ring]);
+            if (ring < 3) {
+                if (want[ring] > 0) capArc = MIN(capArc, want[ring]);
+                else capArc = MIN(capArc, autoMax[ring]);   // v1.3.31：自动模式容量上限
+            }
             NSInteger add = MIN(capArc, n - placed2);
             if (add <= 0) break;
             CGFloat a0  = centerA - span/2.0f;
@@ -2145,6 +2150,8 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
         [self setInteractive:NO];
         return;
     }
+    // v1.3.31：截图 / 录屏进行中，球保持隐藏——否则 2 秒轮询 / 状态回调可能把球重新点亮，被拍进画面。
+    if (_captureHiding) { _overlay.hidden = NO; _ball.hidden = YES; [self setInteractive:NO]; return; }
     // 防御：直接读之前也刷新一次进程内偏好缓存，确保拿到设置里最新改的值。
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
     // v1.3.2 黑名单语义（重写）：球只在 SpringBoard 里，所以判断对象是「当前前台 App」。

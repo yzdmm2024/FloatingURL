@@ -829,6 +829,7 @@ static NSArray *FUColorPalette(void) {
         @{@"t":@"㉖ 直达设置某一页", @"c":@"prefs:root=WIFI", @"d":@"填 prefs:root=页面ID 直接跳到「设置」里某一页（例：WIFI / Bluetooth / Battery / General）。第三方插件也走这个：ID 就是它设置面板的标识 —— PreferenceBundle 的 .bundle 目录名、或 PreferenceLoader 的 .plist 文件名，去掉后缀。ID 写错或该页不存在时，只会停在设置首页，不会报错。"},
         @{@"t":@"㉘ 图标自动分左右", @"c":@"上传的自定义图标会自动「跟边」", @"d":@"球在屏幕左半边，图标主体就显示在左边；球在右半边，主体显示在右边（主体偏一侧的图会自动水平镜像）。判不出来居中的图不翻。开关在「悬浮球外观」里，默认开。"},
         @{@"t":@"㉗ 直达本插件设置", @"c":@"prefs:root=FloatingURLPrefs", @"d":@"本插件设置页 ID 就是 FloatingURLPrefs，填这个可一键跳到「悬浮URL」设置页。同理 prefs:root=snapper4_Freeze 这类写法要生效，前提是设备上真装了那个插件、且它的设置面板名字与冒号后的 ID 完全一致。"},
+        @{@"t":@"㉙ Snapper 4 深链", @"c":@"设置→Snapper 4→URL 深链 自查", @"d":@"把下面任意一条填进快捷入口，点一下直接触发（不会打开设置）。官方 id 全小写：\nprefs:root=snapper4_freeze 冻结截图\nprefs:root=snapper4_long 长截图\nprefs:root=screenshot-shell 仅截屏套壳\nprefs:root=screenshot-watermark 仅截图水印\nprefs:root=screenshot-both 截屏套壳＋水印\nprefs:root=screenshot-off 关闭截屏套壳/水印\nprefs:root=recording-shell 仅录屏套壳\nprefs:root=recording-watermark 仅录屏水印\nprefs:root=recording-both 录屏套壳＋水印\nprefs:root=recording-off 关闭录屏套壳/水印\n注意：写成 snapper4_Freeze 这类大写匹配不到；前提是设备真装了 Snapper 4 且它的设置面板 ID 与冒号后完全一致。"},
     ];
     _tv = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleGrouped];
     _tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -1305,9 +1306,9 @@ static NSArray *FUColorPalette(void) {
     _preview.iconGap  = [self prefFloat:kFUIconGap dft:56];
     _preview.span     = [self prefFloat:kFUFanSpan dft:180];
     _preview.scale    = [self prefFloat:kFUFanScale dft:100];
-    _preview.layer1   = [self prefInt:kFULayer1Count dft:8];
-    _preview.layer2   = [self prefInt:kFULayer2Count dft:16];
-    _preview.layer3   = [self prefInt:kFULayer3Count dft:24];
+    _preview.layer1   = [self prefInt:kFULayer1Count dft:0];
+    _preview.layer2   = [self prefInt:kFULayer2Count dft:0];
+    _preview.layer3   = [self prefInt:kFULayer3Count dft:0];
     [self loadEntriesForPreview];
     [_scroll addSubview:_preview]; y += ph + 12;
     // ---- v1.3.8 修 03：吸附模式改成真正的「分段选择器」：选中的一边蓝色、另一边灰色。
@@ -1352,12 +1353,16 @@ static NSArray *FUColorPalette(void) {
     _span = [self mkSliderAt:x0 width:colW y:y min:60 max:180 val:psp label:@"扇形角度°" lout:&_lspan];
     _sc   = [self mkSliderAt:x1 width:colW y:y min:60 max:160 val:psc label:@"整体距离%" lout:&_lsc];
     _span.tag = 4; _sc.tag = 5; y += 48;
-    NSInteger pl1 = [self prefInt:kFULayer1Count dft:8], pl2 = [self prefInt:kFULayer2Count dft:16], pl3 = [self prefInt:kFULayer3Count dft:24];
+    NSInteger pl1 = [self prefInt:kFULayer1Count dft:0], pl2 = [self prefInt:kFULayer2Count dft:0], pl3 = [self prefInt:kFULayer3Count dft:0];
     _l1s  = [self mkSliderAt:x0 width:colW y:y min:0 max:8  val:pl1 label:@"第一层" lout:&_ll1];
     _l2s  = [self mkSliderAt:x1 width:colW y:y min:0 max:16 val:pl2 label:@"第二层" lout:&_ll2];
     _l1s.tag = 6; _l2s.tag = 7; y += 46;
     _l3s  = [self mkSliderAt:x0 width:colW y:y min:0 max:24 val:pl3 label:@"第三层" lout:&_ll3];
     _l3s.tag = 8; y += 48;
+    // v1.3.31：分层滑杆 0 = 自动；标签按 0 显示「自动」，其余显示数字
+    _ll1.text = (pl1 == 0) ? @"第一层 自动" : [NSString stringWithFormat:@"第一层 %ld", (long)pl1];
+    _ll2.text = (pl2 == 0) ? @"第二层 自动" : [NSString stringWithFormat:@"第二层 %ld", (long)pl2];
+    _ll3.text = (pl3 == 0) ? @"第三层 自动" : [NSString stringWithFormat:@"第三层 %ld", (long)pl3];
     // ---- v1.3.25：两个「秒数」滑杆统一改成整秒步进，最低 1 秒，最右一档 = 常驻（永不）----
     NSInteger dSlot = [self fuSecSlot:[self prefFloat:kFUSnapDelay dft:3] keep:999];
     _delayS = [self mkSliderAt:16 width:w - 32 y:y min:1 max:(kFUSecMax + 1) val:dSlot
@@ -1454,27 +1459,32 @@ static NSArray *FUColorPalette(void) {
         }
     }
     if (!key) return;
-    l.text = [NSString stringWithFormat:@"%@ %.0f", name, v];
-    if (sl.tag >= 6 && sl.tag <= 8) [self writeInt:key value:(NSInteger)v];
-    else [self writeFloat:key value:v];
+    // v1.3.31：分层滑杆 0 = 自动，标签显示「自动」而非「0」
+    if (sl.tag >= 6 && sl.tag <= 8) {
+        l.text = (v == 0) ? [NSString stringWithFormat:@"%@ 自动", name] : [NSString stringWithFormat:@"%@ %.0f", name, v];
+        [self writeInt:key value:(NSInteger)v];
+    } else {
+        l.text = [NSString stringWithFormat:@"%@ %.0f", name, v];
+        [self writeFloat:key value:v];
+    }
     [_preview refresh];
 }
 - (void)reset {
     _sideSeg.selectedSegmentIndex = 0; _modeSeg.selectedSegmentIndex = 0; [self refreshModeLabel];
     _ss.value = 40; _sg.value = 56; _span.value = 180; _sc.value = 100;
-    _l1s.value = 8; _l2s.value = 16; _l3s.value = 24;
+    _l1s.value = 0; _l2s.value = 0; _l3s.value = 0;   // v1.3.31：恢复默认 = 自动分层（按实际 URL 数量排）
     _ls.text = @"图标大小 40"; _lg.text = @"图标间隔 56";
     _lspan.text = @"扇形角度° 180"; _lsc.text = @"整体距离% 100";
-    _ll1.text = @"第一层 8"; _ll2.text = @"第二层 16"; _ll3.text = @"第三层 24";
+    _ll1.text = @"第一层 自动"; _ll2.text = @"第二层 自动"; _ll3.text = @"第三层 自动";
     _delayS.value = 3; _ldelay.text = @"吸附延时（松手后完整图标停留） 3 秒";    // v1.3.25
     _fanHideS.value = 5; _lfanHide.text = @"扇形闲置自动收回 5 秒";
     _preview.side = 0; _preview.iconSize = 40; _preview.iconGap = 56;
     _preview.span = 180; _preview.scale = 100;
-    _preview.layer1 = 8; _preview.layer2 = 16; _preview.layer3 = 24;
+    _preview.layer1 = 0; _preview.layer2 = 0; _preview.layer3 = 0;
     [self writeInt:kFUSnapMode value:0];
     [self writeFloat:kFUIconSize value:40]; [self writeFloat:kFUIconGap value:56];
     [self writeFloat:kFUFanSpan value:180]; [self writeFloat:kFUFanScale value:100];
-    [self writeInt:kFULayer1Count value:8]; [self writeInt:kFULayer2Count value:16]; [self writeInt:kFULayer3Count value:24];
+    [self writeInt:kFULayer1Count value:0]; [self writeInt:kFULayer2Count value:0]; [self writeInt:kFULayer3Count value:0];
     [self writeFloat:kFUSnapDelay value:3];   // v1.3.13：吸附延时恢复默认 3 秒
     [self writeFloat:kFUFanAutoHide value:5]; // v1.3.25：扇形闲置收回恢复默认 5 秒
     [_preview refresh];
