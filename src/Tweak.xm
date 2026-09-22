@@ -757,6 +757,7 @@ static NSArray<NSString *> *fuPrefsCandidates(NSString *abs) {
     BOOL                  _capSession;    // v1.3.38：第三方局部/长截图「会话中」（球隐藏直到工具界面消失，不用固定短延时）
     NSInteger             _captureToken;  // v1.3.25：隐藏→恢复的代次，防止画面还没拍完就提前把球显示回来
     BOOL                  _captureExclusionOK; // v1.3.28：悬浮窗是否支持「截图/录屏排除」（支持则球永不进画面，最稳）
+    BOOL                  _captureExcludedApplied; // v1.3.42：已实际写入 _overlay 的排除值，用于侦测变化并强制重合成
     UITextField          *_secureGuard;   // v1.3.30：secureTextEntry 渲染层保护（截图/录屏/第三方截取都拍不到，Telegram 同款）
     BOOL                  _ballShownMirrored; // v1.3.27：球图标当前是否已镜像（变更检测用）
     BOOL                  _screenWasOn;   // v1.3.24：上次轮询时的亮屏状态（亮屏瞬间补一次完整刷新）
@@ -824,7 +825,7 @@ static NSArray<NSString *> *fuPrefsCandidates(NSString *abs) {
         _snapDelay = 3.0;                                  // v1.3.13：默认吸附延时 3 秒（松手后先给完整图标）
         _layer1 = 0; _layer2 = 0; _layer3 = 0;           // v1.3.31：默认「自动分层」= 按实际 URL 数量排（先满第1层≤8、再第2层≤16、再第3层≤24）；0 即自动，每层数量滑杆拖到 0 同义
         _edgeGuard = YES; _screenWasOn = YES;              // v1.3.24：默认压住冲突边 + 起始按亮屏算
-        _captureHide = YES; _captureHiding = NO; _captureToken = 0; _captureExclusionOK = NO;   // v1.3.25 / v1.3.28
+        _captureHide = YES; _captureHiding = NO; _captureToken = 0; _captureExclusionOK = NO; _captureExcludedApplied = NO;   // v1.3.25 / v1.3.28 / v1.3.42
         _ballShownMirrored = NO;   // v1.3.27：图标镜像变更检测
         _frontWatched = [NSMutableSet set];
         _fanItems = [NSMutableArray array]; _fanOffsets = [NSMutableArray array];
@@ -2279,17 +2280,37 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
 // 但截出来的图 / 录出来的屏里它就是一片透明，绝对不会带进去。captureHide 关掉则恢复正常（可被拍到）。
 - (void)fuApplyCaptureExclusion {
     if (!_overlay) return;
+    // v1.3.42：开关关掉时，先解除任何残留的「截图隐藏」态，保证球立刻回到屏幕、且不再被排除。
+    // 否则即便排除值已写 NO，_captureHiding 仍可能卡在 YES（上次截图会话没正常收尾），
+    // applyVisibility 会一直把球藏起来——这正是「开关关了球还是消失」的元凶之一。
+    if (!_captureHide && _captureHiding) {
+        _captureHiding = NO; _capSession = NO;
+        [self applyVisibility];
+    }
     SEL s = NSSelectorFromString(@"_setExcludedFromScreenCapture:");
+    BOOL wantExclude = _captureHide ? YES : NO;   // 开关 OFF → 不排除（可被拍到）；ON → 排除
     if ([_overlay respondsToSelector:s]) {
         _captureExclusionOK = YES;
         NSInvocation *inv = [NSInvocation invocationWithMethodSignature:[_overlay methodSignatureForSelector:s]];
         [inv setSelector:s]; [inv setTarget:_overlay];
-        BOOL v = _captureHide ? YES : NO;
-        [inv setArgument:&v atIndex:2];
+        [inv setArgument:&wantExclude atIndex:2];
         @try { [inv invoke]; } @catch (NSException *e) { NSLog(@"[FloatingURL] 排除截图异常（已忽略）: %@", e); }
+        // v1.3.42：部分 iOS 版本「先设 YES 再设 NO」不会立即让受保护图层重新参与合成，
+        // 导致关掉开关后球仍不进画面。排除值发生变化时，把窗口 hidden 先置 YES、下一帧再置 NO，
+        // 强制系统重新合成（仅设置变更时触发，不在截图中跑）。
+        if (_captureExcludedApplied != wantExclude) {
+            _captureExcludedApplied = wantExclude;
+            _overlay.hidden = YES;
+            __weak FUOverlayWindow *wov = _overlay;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [wov setNeedsDisplay];
+                wov.hidden = NO;
+            });
+        }
     } else {
         // v1.3.30：iOS16 实测很多机型没有这个私有方法，1.3.28 在那些机上就是空操作 → 球照拍。
         _captureExclusionOK = NO;
+        _captureExcludedApplied = NO;
     }
     [self fuApplySecureCaptureGuard];   // v1.3.30：主力的渲染层排除（不依赖任何截图入口/系统版本）
 }
