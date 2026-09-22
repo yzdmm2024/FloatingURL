@@ -750,6 +750,7 @@ static NSArray<NSString *> *fuPrefsCandidates(NSString *abs) {
     BOOL                  _edgeGuard;     // v1.3.24：悬浮球是否在「会撞车的边」上压住系统手势（默认开）
     BOOL                  _captureHide;   // v1.3.25：截图/录屏时自动收拢扇形 + 临时隐藏悬浮球（默认开）
     BOOL                  _captureHiding; // v1.3.25：当前正处于「截图/录屏隐藏」中
+    BOOL                  _capSession;    // v1.3.38：第三方局部/长截图「会话中」（球隐藏直到工具界面消失，不用固定短延时）
     NSInteger             _captureToken;  // v1.3.25：隐藏→恢复的代次，防止画面还没拍完就提前把球显示回来
     BOOL                  _captureExclusionOK; // v1.3.28：悬浮窗是否支持「截图/录屏排除」（支持则球永不进画面，最稳）
     UITextField          *_secureGuard;   // v1.3.30：secureTextEntry 渲染层保护（截图/录屏/第三方截取都拍不到，Telegram 同款）
@@ -1381,6 +1382,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
         _draggingBall = NO;   // 取消/中断也要复位，否则球的半透明待机态回不来
         if (g.state == UIGestureRecognizerStateEnded) [self scheduleSnapAfterDrop];   // v1.3.13：按延时吸附
         [self fuRefreshDeferredEdges];   // v1.3.24：松手后按新落点重算要压住的边
+        if (_fanOpen) [self fuScheduleFanAutoHide];   // v1.3.38：拖完球 → 重新计时闲置收回
     }
 }
 // v1.3.13：吸附改成「延时吸附」三步走（用户要求：松手后先给完整的悬浮图标，N 秒后再吸附）：
@@ -1519,6 +1521,7 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
         FUFloatingManager *ss = ws; if (!ss) return;
         if (ss->_captureToken != tk) return;
         if ([UIScreen mainScreen].captured) return;   // 还在录屏/截取中 → 交给状态回调收尾
+        if (ss->_capSession) return;                  // v1.3.38：第三方截图会话进行中，恢复交给会话 end 钩子
         [ss fuEndCaptureHide];
     });
 }
@@ -1546,6 +1549,33 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
     // v1.3.31：收尾交给 applyVisibility —— 它才是显隐的权威来源，会尊重「启用悬浮窗」开关与黑名单，
     // 不会再出现「截图结束把本该隐藏的球重新点亮」的问题（这正是开关关不掉球的一大诱因）。
     [self applyVisibility];
+}
+
+// v1.3.38：第三方局部/长截图「会话」模式隐藏。
+// 与系统截图（硬件键，瞬时）不同，第三方局部截图用户要拖选区/等数秒，若用固定 1.8s 恢复，
+// 球会在用户还在操作时就回来、被冻进底图。这里隐藏后进入会话态，球保持藏起，
+// 直到截图工具界面消失（end 钩子）才恢复；并留 8s 安全兜底，万一端钩没命中也能回来。
+- (void)fuCaptureWillHideSession {
+    if (![NSThread isMainThread]) {
+        __weak FUFloatingManager *ww = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ FUFloatingManager *ss = ww; if (ss) [ss fuCaptureWillHideSession]; });
+        return;
+    }
+    if (!_captureHide) return;
+    [self fuBeginCaptureHide];
+    _capSession = YES;
+    __weak FUFloatingManager *ws = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        FUFloatingManager *ss = ws; if (!ss) return;
+        if (ss->_capSession) [ss fuCaptureDidEnd];   // 8s 安全兜底
+    });
+}
+// v1.3.38：第三方截图会话结束 → 恢复球（仅在会话态内有效，可重复调用无害）
+- (void)fuCaptureDidEnd {
+    if (!_capSession) return;
+    _capSession = NO;
+    [self fuEndCaptureHide];
 }
 
 - (void)restoreBallFromSnap {
@@ -1728,7 +1758,10 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
 - (void)fuRelayoutFanInstant {
     if (!_fanOpen || !_ball || !_overlay) return;
     [self restoreBallFromSnap];
-    [self fuScheduleFanAutoHide];   // v1.3.21：拖球 = 还在操作，重新计时
+    // v1.3.38 修：这里【不要】重排「闲置自动收回」倒计时。
+    // 本方法会被 2 秒轮询 onBecomeActive 反复调用（展开中改布局即时重排），若在此重置倒计时，
+    // 每次轮询都清零 N 秒计时 → 设 >2 秒时永远等不到触发，表现为「只有 1 秒生效、其余像常驻」。
+    // 倒计时只在真正的用户操作处启动：openFan（展开）与 panBall 松手（拖完）。
     NSArray *pts = [self fuFanPointArray];
     if (pts.count != _fanItems.count) {     // 条目数变了（刚加/删了入口）→ 整组重开
         [self closeFanItemsAnimated:NO];
@@ -2297,25 +2330,37 @@ static void fuHookFlashWhite(id self, SEL _cmd, id completion) {
     if (fuOrigFlashWhite) fuOrigFlashWhite(self, _cmd, completion);
 }
 // v1.3.37：第三方截图入口钩子。在原始实现「之前」先隐藏并等帧，确保冻屏时已无本插件 UI。
+// v1.3.38：改用「会话」模式（隐藏直到工具界面消失），避免固定 1.8s 把球提前放回被拍进图。
 static void fuHookMaskCropShow(id self, SEL _cmd) {
-    fuSignalCaptureWill(YES);
+    [[FUFloatingManager shared] fuCaptureWillHideSession];
     if (fuOrigMaskCropShow) fuOrigMaskCropShow(self, _cmd);
 }
 static void fuHookSn4Begin(id self, SEL _cmd, NSInteger mode) {
-    fuSignalCaptureWill(YES);
+    [[FUFloatingManager shared] fuCaptureWillHideSession];
     if (fuOrigSn4Begin) fuOrigSn4Begin(self, _cmd, mode);
+}
+// v1.3.38：第三方截图「结束」钩子 —— 工具界面收起/放弃时立即恢复球（不必等 8s 兜底）。
+static void (*fuOrigMaskCropSetHidden)(id, SEL, BOOL) = NULL;  // SuperScreenshot：MaskCropWindow - setWindowHidden:
+static void (*fuOrigSn4Dismiss)(id, SEL) = NULL;              // Snapper 4：SSCoordinator - dismissCaptureInterfaceBeforeNativeScreenshot
+static void fuHookMaskCropSetHidden(id self, SEL _cmd, BOOL hidden) {
+    if (hidden) [[FUFloatingManager shared] fuCaptureDidEnd];
+    if (fuOrigMaskCropSetHidden) fuOrigMaskCropSetHidden(self, _cmd, hidden);
+}
+static void fuHookSn4Dismiss(id self, SEL _cmd) {
+    [[FUFloatingManager shared] fuCaptureDidEnd];
+    if (fuOrigSn4Dismiss) fuOrigSn4Dismiss(self, _cmd);
 }
 static void fuInstallCaptureHooks(void) {
     @try {
         // v1.3.37：前两个是系统截图（硬件键/闪光）；后两个是第三方局部/长截图 tweak 入口。
         // 注：iOS 16 上并不存在 SBScreenShotter（已 frida 实测），系统截图真名是 SBScreenshotManager，
         // 但它只能兜底「拍照后」，对「拍照前隐藏」无意义（硬件键钩子已覆盖），故此处不挂，避免参数不匹配崩。
-        const char *names[4] = {"SBCombinationHardwareButtonActions", "SBScreenFlash", "MaskCropWindow", "SSCoordinator"};
-        const char *sels[4]  = {"performTakeScreenshotAction", "flashWhiteWithCompletion:", "show", "beginCaptureWithMode:"};
-        IMP imps[4] = {(IMP)fuHookTakeScreenshot, (IMP)fuHookFlashWhite, (IMP)fuHookMaskCropShow, (IMP)fuHookSn4Begin};
-        void **slots[4] = {(void **)&fuOrigTakeScreenshot, (void **)&fuOrigFlashWhite, (void **)&fuOrigMaskCropShow, (void **)&fuOrigSn4Begin};
-        const char *types[4] = {"v@:", "v@:@", "v@:", "v@:q"};
-        for (int i = 0; i < 4; i++) {
+        const char *names[6] = {"SBCombinationHardwareButtonActions", "SBScreenFlash", "MaskCropWindow", "SSCoordinator", "MaskCropWindow", "SSCoordinator"};
+        const char *sels[6]  = {"performTakeScreenshotAction", "flashWhiteWithCompletion:", "show", "beginCaptureWithMode:", "setWindowHidden:", "dismissCaptureInterfaceBeforeNativeScreenshot"};
+        IMP imps[6] = {(IMP)fuHookTakeScreenshot, (IMP)fuHookFlashWhite, (IMP)fuHookMaskCropShow, (IMP)fuHookSn4Begin, (IMP)fuHookMaskCropSetHidden, (IMP)fuHookSn4Dismiss};
+        void **slots[6] = {(void **)&fuOrigTakeScreenshot, (void **)&fuOrigFlashWhite, (void **)&fuOrigMaskCropShow, (void **)&fuOrigSn4Begin, (void **)&fuOrigMaskCropSetHidden, (void **)&fuOrigSn4Dismiss};
+        const char *types[6] = {"v@:", "v@:@", "v@:", "v@:q", "v@:c", "v@:"};
+        for (int i = 0; i < 6; i++) {
             Class c = objc_getClass(names[i]);
             if (!c) continue;
             SEL s = sel_registerName(sels[i]);

@@ -1458,6 +1458,7 @@ static NSArray *FUColorPalette(void) {
     [_scroll addSubview:l]; if (lout) *lout = l;
     UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(x, fy + 15, cw, 28)];
     sl.minimumValue = mn; sl.maximumValue = mx; sl.value = v;
+    sl.continuous = NO;   // v1.3.38：只在松手时触发 valueChanged，拖动过程不每帧写偏好/重排，消除卡顿
     [_scroll addSubview:sl];
     return sl;
 }
