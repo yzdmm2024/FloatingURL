@@ -861,17 +861,10 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 //     这正是 1.3.33 只读磁盘时「总开关 / 布局改了时灵时不灵」的根因（磁盘未必已落盘）。
 //   · CFPreferences 永远不比磁盘旧（磁盘本来就是 cfprefsd 写的），叠加只安全不上抛旧值。
 - (NSDictionary *)fuSuiteDict {
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);   // 先与 cfprefsd 同步一次，拉最新
     NSMutableDictionary *merged = [NSMutableDictionary dictionary];
-    static NSString *const cands[] = {
-        @"/var/mobile/Library/Preferences/com.yzdmm.floatingurl.plist",
-        @"/var/jb/var/mobile/Library/Preferences/com.yzdmm.floatingurl.plist",
-        nil
-    };
-    for (NSInteger i = 0; cands[i]; i++) {
-        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:cands[i]];
-        if ([d isKindOfClass:[NSDictionary class]]) [merged addEntriesFromDictionary:d];
-    }
+    // 1) 先取 cfprefsd 实时值：写入进程（设置 App）刚 CFPreferencesAppSynchronize 的那一瞬，
+    //    可能比磁盘落盘还新，用来覆盖「磁盘尚未落盘」的极短空窗（仅作兜底填充）。
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
     NSArray *liveKeys = @[
         @"enabled", @"url", @"edgeGuard", @"captureHide", @"side", @"iconSize", @"iconGap",
         @"fanSpan", @"fanScale", @"fanAutoHide", @"layer1", @"layer2", @"layer3",
@@ -887,6 +880,23 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
             merged[k] = (__bridge_transfer id)v;
         else
             CFRelease(v);
+    }
+    // 2) 再用磁盘 plist 覆盖（权威）：磁盘是「设置 App」真正落盘的值，跨进程最可靠。
+    //    cfprefsd 跨进程缓存可能滞后/陈旧 —— 典型症状：关了「启用悬浮窗」却仍读到旧的 true → 球一直在；
+    //    或调了布局却读到旧值 → 扇形一点没变。绝不能让陈旧的 live 值盖掉正确落盘值，因此磁盘优先，
+    //    live 仅用于「磁盘尚无该键」时兜底（例如该键等于默认值被系统从 plist 移除的情况）。
+    static NSString *const cands[] = {
+        @"/var/mobile/Library/Preferences/com.yzdmm.floatingurl.plist",
+        @"/var/jb/var/mobile/Library/Preferences/com.yzdmm.floatingurl.plist",
+        nil
+    };
+    for (NSInteger i = 0; cands[i]; i++) {
+        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:cands[i]];
+        if (![d isKindOfClass:[NSDictionary class]]) continue;
+        for (NSString *k in d) {
+            // 磁盘有该键 → 以磁盘为准（权威落盘）；磁盘没有 → 才保留上面的 live 兜底值。
+            merged[k] = d[k];
+        }
     }
     return [merged copy];
 }
@@ -1163,6 +1173,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
             if (_frontBid && (CFAbsoluteTimeGetCurrent() - _frontBidTs) > 3.0) { _frontBid = nil; _frontBidTs = 0; }
         }
         [self applyVisibility];
+        if (_fanOpen) [self fuRelayoutFanInstant];   // v1.3.35：展开中改了布局，轮询内即时重排（≈2 秒内生效）
     } @catch (NSException *e) {
         // v1.3.4：任何意外都不该带崩 SpringBoard（否则循环进安全模式）。记日志后静默退出本次重判。
         NSLog(@"[FloatingURL] onBecomeActive 异常（已忽略）: %@", e);
@@ -1720,6 +1731,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
 }
 - (void)openFan {
     if (_fanOpen || _entries.count < 1) return;   // 0 个入口不弹（loadEntries 至少兜底 1 个）
+    [self reloadPrefs];   // v1.3.35：每次展开都先重载偏好，确保布局/开关即时生效（即便没收到通知也不会弹旧布局）
     _fanOpen = YES; _ball.alpha = 1.0f;           // 展开期间球保持实心可见
     [self cancelPendingSnap];                     // v1.3.13：扇形开着不吸附
     [self closeFanItemsAnimated:NO];
