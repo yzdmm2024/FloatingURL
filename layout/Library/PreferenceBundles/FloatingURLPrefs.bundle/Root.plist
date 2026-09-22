@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>title</key>
-	<string>悬浮URL 1.3.33</string>
+	<string>悬浮URL 1.3.34</string>
 	<key>items</key>
 	<array>
 		<dict>
@@ -23,30 +23,6 @@
 			<string>enabled</string>
 			<key>label</key>
 			<string>启用悬浮窗</string>
-			<key>PostNotification</key>
-			<string>com.yzdmm.floatingurl/settingsChanged</string>
-		</dict>
-				<dict>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>label</key>
-			<string>静默 / 功耗</string>
-			<key>footerText</key>
-			<string>开启后悬浮窗彻底休眠（球/扇形/面板全隐藏，App 也跳过心跳），最省电。需要用时关闭即可。玩法见「说明书 / 玩法」。</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>default</key>
-			<false/>
-			<key>defaults</key>
-			<string>com.yzdmm.floatingurl</string>
-			<key>key</key>
-			<string>silent</string>
-			<key>label</key>
-			<string>静默模式（休眠，最省电）</string>
-			<key>action</key>
-			<string>setSilent</string>
 			<key>PostNotification</key>
 			<string>com.yzdmm.floatingurl/settingsChanged</string>
 		</dict>

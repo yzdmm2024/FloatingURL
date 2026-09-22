@@ -72,7 +72,7 @@ static NSString * const kFUFanScale    = @"fanScale";   // v1.3.2 整体距离�
 static NSString * const kFULayer1Count = @"layer1";     // v1.3.3：第一层入口数（0=自动）
 static NSString * const kFULayer2Count = @"layer2";     // v1.3.3：第二层入口数（0=自动）
 static NSString * const kFULayer3Count = @"layer3";     // v1.3.3：第三层入口数（0=自动）
-static NSString * const kFUSilent      = @"silent";     // v1.3.3：静默模式（1=不注入 App 进程、零打扰）
+
 static NSString * const kFUSnapMode    = @"snapMode";   // v1.3.5：0=自动吸附 1=全屏固定
 static NSString * const kFUBallX       = @"ballX";      // v1.3.5：球中心 X（归一化 0~1）
 static NSString * const kFUBallY       = @"ballY";      // v1.3.5：球中心 Y（归一化 0~1）
@@ -127,10 +127,6 @@ static UIViewController *fuTopViewController(void) {
 static void fuStartAppHeartbeat(NSString *bid) {
     static BOOL started = NO; if (started) return; started = YES;
     if (!bid.length) return;
-    // v1.3.33：静默模式（布尔）开启时，App 进程完全不注入心跳（零打扰、最省电）。
-    // 走 CFPreferences 读；读不到则回退到正常心跳，不影响黑名单功能（守护进程仍按 _silent 强制隐藏）。
-    Boolean sVal = false;
-    if (CFPreferencesGetAppBooleanValue((__bridge CFStringRef)kFUSilent, (__bridge CFStringRef)kFUSuite, &sVal) && sVal) return;
     NSString *alive = fuAliveName(bid), *gone = fuGoneName(bid);
     void (^beat)(void) = ^{
         // 关键：只有「真前台」才上报。后台 App 的定时器可能仍在校跑，
@@ -779,7 +775,6 @@ static NSArray<NSString *> *fuPrefsCandidates(NSString *abs) {
     NSInteger             _layer1;           // v1.3.3 第一层入口数（0=自动）
     NSInteger             _layer2;           // v1.3.3 第二层入口数（0=自动）
     NSInteger             _layer3;           // v1.3.3 第三层入口数（0=自动）
-    BOOL                  _silent;           // v1.3.3 静默模式（旗标文件存在即为开）
     NSInteger             _snapMode;         // v1.3.5 0=自动吸附 1=全屏固定
     NSString             *_ballTitle;        // v1.3.5 球上的文字
     NSData               *_ballIcon;         // v1.3.5 球的图标（v1.3.28 起仅作旧数据兜底）
@@ -812,8 +807,8 @@ static NSArray<NSString *> *fuPrefsCandidates(NSString *abs) {
     if (self = [super init]) {
         _enabled  = YES; _url = @"https://www.apple.com";
         _didSetup = NO; _fanOpen = NO;
-        _side = 0; _iconSize = 40.0f; _iconGap = 56.0f;   // v1.3.1：球默认停靠右侧
-        _fanSpan = 180.0f; _fanScale = 100.0f;            // v1.3.2 扇形角度 / 整体距离
+        _side = 0; _iconSize = 24.0f; _iconGap = 12.0f;   // v1.3.34：默认图标 24 / 间隔 12，球停靠右侧
+        _fanSpan = 180.0f; _fanScale = 160.0f;            // v1.3.34 默认扇形角度 180° / 整体距离 160%
         _fanAutoHide = 5.0f;                              // v1.3.21：默认闲置 5 秒自动收回扇形
         _snapMode = 0; _webMode = 0; _ballTitle = @"URL";  // v1.3.5 默认：自动吸附 + 系统浏览器
         _snapDelay = 3.0;                                  // v1.3.13：默认吸附延时 3 秒（松手后先给完整图标）
@@ -858,10 +853,16 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     [mgr showRespringPrompt];
 }
 
-#pragma mark - v1.3.33：直接读磁盘偏好，绕过 cfprefsd 跨进程缓存
+#pragma mark - 偏好读取（磁盘 + cfprefsd 实时双源）
+// v1.3.34：双源合并，彻底解决「时灵时不灵」。
+//   · 磁盘 plist = 权威落盘值（兜底）；
+//   · cfprefsd 实时缓存（CFPreferences）覆盖磁盘 —— 设置页（Preferences 进程）刚写进
+//     cfprefsd 的值，守护进程经同一 cfprefsd 立刻读到，不受「cfprefsd 异步刷盘」的延时影响。
+//     这正是 1.3.33 只读磁盘时「总开关 / 布局改了时灵时不灵」的根因（磁盘未必已落盘）。
+//   · CFPreferences 永远不比磁盘旧（磁盘本来就是 cfprefsd 写的），叠加只安全不上抛旧值。
 - (NSDictionary *)fuSuiteDict {
-    // 设置页（沙盒 Preferences 进程）写的值，守护进程经 CFPreferences / cfprefsd 常读不到或读旧值，
-    // 导致「开关关不掉 / 布局不生效 / 静默掉」整类症状。直接读磁盘 plist = 权威来源。
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);   // 先与 cfprefsd 同步一次，拉最新
+    NSMutableDictionary *merged = [NSMutableDictionary dictionary];
     static NSString *const cands[] = {
         @"/var/mobile/Library/Preferences/com.yzdmm.floatingurl.plist",
         @"/var/jb/var/mobile/Library/Preferences/com.yzdmm.floatingurl.plist",
@@ -869,9 +870,25 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     };
     for (NSInteger i = 0; cands[i]; i++) {
         NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:cands[i]];
-        if ([d isKindOfClass:[NSDictionary class]]) return d;
+        if ([d isKindOfClass:[NSDictionary class]]) [merged addEntriesFromDictionary:d];
     }
-    return nil;
+    NSArray *liveKeys = @[
+        @"enabled", @"url", @"edgeGuard", @"captureHide", @"side", @"iconSize", @"iconGap",
+        @"fanSpan", @"fanScale", @"fanAutoHide", @"layer1", @"layer2", @"layer3",
+        @"snapMode", @"webMode", @"snapDelay", @"ballTitle", @"ballIconLeft", @"ballIconRight",
+        @"ballIcon", @"ballColor", kFUURLs, kFUEnabledApps
+    ];
+    for (NSString *k in liveKeys) {
+        CFTypeRef v = CFPreferencesCopyAppValue((__bridge CFStringRef)k, (__bridge CFStringRef)kFUSuite);
+        if (!v) continue;
+        CFTypeID t = CFGetTypeID(v);
+        if (t == CFStringGetTypeID() || t == CFNumberGetTypeID() || t == CFBooleanGetTypeID() ||
+            t == CFDataGetTypeID() || t == CFArrayGetTypeID() || t == CFDictionaryGetTypeID())
+            merged[k] = (__bridge_transfer id)v;
+        else
+            CFRelease(v);
+    }
+    return [merged copy];
 }
 - (void)reloadPrefs {
     NSDictionary *suite = [self fuSuiteDict];
@@ -912,8 +929,6 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     if (_layer1 < 0) _layer1 = 0; if (_layer1 > 8)  _layer1 = 8;
     if (_layer2 < 0) _layer2 = 0; if (_layer2 > 16) _layer2 = 16;
     if (_layer3 < 0) _layer3 = 0; if (_layer3 > 24) _layer3 = 24;
-    // 静默模式（v1.3.33：改读布尔，不再用旗标文件——沙盒写文件在 rootless 上不可靠）
-    _silent = hasFile ? fb(@"silent", NO) : NO;
     // 吸附模式 / 网页方式
     id smRef = suite[@"snapMode"]; if ([smRef isKindOfClass:[NSNumber class]]) _snapMode = [smRef integerValue];
     if (_snapMode != 1) _snapMode = 0;
@@ -1135,10 +1150,6 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
         // 刚亮屏那一轮会立刻补一次完整刷新，所以不会出现「解锁后黑名单/开关不生效」。
         if (!fuScreenIsOn()) { _screenWasOn = NO; return; }
         _screenWasOn = YES;
-        // v1.3.3：静默模式 → 桌面球彻底休眠，跳过前台检测与偏好重读（最省电）
-        if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"]) {
-            [self applyVisibility]; return;
-        }
         [self reloadPrefs];
         if (fuIsSpringBoard()) {
             // v1.3.3：用 SpringBoard 直读前台 App 作为权威来源（修复奥维地图等漏判）。
@@ -2131,13 +2142,6 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     if (!_didSetup) return;
     // 非桌面进程一律不建 UI（沙盒 App 读不到偏好），这里兜底防守。
     if (!fuIsSpringBoard()) return;
-    // v1.3.33：静默模式（布尔）→ 整窗彻底休眠（球/环/面板全藏），App 端也跳过心跳，最省电。
-    if (_silent) {
-        _overlay.hidden = YES; _ball.hidden = YES;
-        if (_fanOpen) [self closeFan];
-        [self setInteractive:NO];
-        return;
-    }
     // v1.3.31：截图 / 录屏进行中，球保持隐藏——否则 2 秒轮询 / 状态回调可能把球重新点亮，被拍进画面。
     if (_captureHiding) { _overlay.hidden = NO; _ball.hidden = YES; [self setInteractive:NO]; return; }
     // 防御：直接读之前也刷新一次进程内偏好缓存，确保拿到设置里最新改的值。

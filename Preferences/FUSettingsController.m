@@ -21,7 +21,6 @@ static NSString * const kFUFanScale    = @"fanScale";   // v1.3.2 整体距离 %
 static NSString * const kFULayer1Count = @"layer1";     // v1.3.3 第一层入口数（0=自动）
 static NSString * const kFULayer2Count = @"layer2";     // v1.3.3 第二层入口数（0=自动）
 static NSString * const kFULayer3Count = @"layer3";     // v1.3.3 第三层入口数（0=自动）
-static NSString * const kFUSilent      = @"silent";     // v1.3.3 静默模式
 static NSString * const kFUSnapMode    = @"snapMode";   // v1.3.5 0=自动吸附 1=全屏固定
 static NSString * const kFUBallX       = @"ballX";      // v1.3.5 球中心 X（归一化）
 static NSString * const kFUBallTitle   = @"ballTitle";  // v1.3.5 球的文字（默认 URL）
@@ -1108,25 +1107,27 @@ static NSArray *FUColorPalette(void) {
     R[0] = (bs/2.0f + isz/2.0f + _iconGap * k) * kscale;
     R[1] = R[0] + stepR * kscale;
     R[2] = R[1] + stepR * kscale;
-    // v1.3.14：预览严格按「设置里每层数量」渲染（有显式数量就按数量画，不再自动补满 48）。
-    // 这样拖动任意一层滑杆，预览里对应圈的点数都会立刻变化；只有三层都设为 0（自动）时才铺满 48。
-    NSInteger n = 48;
+    // v1.3.34：预览只画「实际添加的入口」——添加几个就是几个，自动按 8/16/24 分层，
+    // 与真机扇形同一套规则（先满第 1 层≤8、再第 2 层≤16、再第 3 层≤24），不再铺满 48 个占位。
+    NSInteger real = (NSInteger)_entries.count;
+    NSInteger n = real;
     NSInteger want[3] = { _layer1, _layer2, _layer3 };
     NSInteger caps[3] = { 0, 0, 0 };
+    NSInteger autoMax[3] = { 8, 16, 24 };   // v1.3.31：自动模式每层容量上限
     BOOL anyExplicit = (want[0] > 0) || (want[1] > 0) || (want[2] > 0);
     CGFloat spanMax = MAX(60.0f, MIN(180.0f, (_span > 0 ? _span : 180.0f)));
     CGFloat spanRad = spanMax * (CGFloat)M_PI / 180.0f;
     NSInteger placed = 0;
     if (!anyExplicit) {
-        // 全部自动：按弧长把 48 个铺满三层（与 tweak 内 openFan 同套）
+        // 全部自动：按「先满第 1 层、再第 2、第 3 层」分层，每层同时受弧长容量约束
         NSInteger li = 0;
         while (placed < n) {
             NSInteger target = -1;
             for (int i = li; i < 3; i++) { if (want[i] == 0) { target = i; break; } }
             if (target < 0) target = 2;
             CGFloat arc = R[target] * spanRad;
-            NSInteger autoCap = MAX(1, (NSInteger)floor(arc / (isz + gap)));
-            if (autoCap > 24) autoCap = 24;
+            NSInteger arcCap = MAX(1, (NSInteger)floor(arc / (isz + gap)));
+            NSInteger autoCap = MIN(arcCap, autoMax[target]);
             NSInteger space = n - placed;
             NSInteger add = MIN(autoCap, space);
             caps[target] += add; placed += add;
@@ -1134,7 +1135,7 @@ static NSArray *FUColorPalette(void) {
             if (li >= 3 && placed < n) { caps[2] += (n - placed); placed = n; }
         }
     } else {
-        // 有显式数量：每层最多画用户指定的个数（受该层弧长容量与 48 上限约束），不自动补满
+        // 有显式数量：每层最多画用户指定的个数（受该层弧长容量与实际条目数约束），不自动补满
         for (int i = 0; i < 3; i++) {
             if (want[i] > 0) {
                 CGFloat arc = R[i] * spanRad;
@@ -1167,13 +1168,12 @@ static NSArray *FUColorPalette(void) {
     [self fuCircleAt:c size:bs img:nil ch:@"URL" fs:bs*0.24f glass:YES];
     // 快捷图标：有几个排几个，第 1 层排满溢到第 2、3 层
     placed = 0;   // 复用上方的 placed（cap 分配已完成，这里重置为绘制起点）
-    NSInteger real = (NSInteger)_entries.count;
     for (NSInteger layer = 0; layer < 3; layer++) {
         NSInteger cnt = caps[layer]; if (cnt <= 0) continue;
         CGFloat a0 = centerA - span/2.0f, sp2 = (cnt > 1) ? span/(CGFloat)(cnt-1) : 0.0f;
         for (NSInteger i2 = 0; i2 < cnt; i2++) {
             if (placed >= n) break;
-            NSDictionary *e = (placed < real) ? _entries[placed] : nil;   // 超出真实条目的用序号占位
+            NSDictionary *e = _entries[placed];   // n == real，只画真实入口，无占位
             NSInteger slot = placed; placed++;
             CGFloat a = (cnt > 1) ? (a0 + sp2*(CGFloat)i2) : centerA;
             CGFloat rad = a * M_PI / 180.0;
@@ -1187,8 +1187,9 @@ static NSArray *FUColorPalette(void) {
             [self fuCircleAt:p size:isz img:img ch:ch fs:fs glass:NO];
         }
     }
-    // 底部小字：说明当前实际条目数（预览固定按 48 个满配画）
-    NSString *cap = [NSString stringWithFormat:@"实际 %ld 个入口 · 预览按设置排 %ld 个", (long)real, (long)(caps[0]+caps[1]+caps[2])];
+    // 底部小字：说明当前实际条目数与分层分布
+    NSString *cap = [NSString stringWithFormat:@"实际 %ld 个入口 · 自动/设定分层 %ld / %ld / %ld",
+                     (long)real, (long)caps[0], (long)caps[1], (long)caps[2]];
     [cap drawInRect:CGRectMake(8, s.size.height - 18.0f, s.size.width - 16.0f, 14.0f) withAttributes:@{
         NSFontAttributeName: [UIFont systemFontOfSize:9],
         NSForegroundColorAttributeName: [UIColor colorWithWhite:1.0 alpha:0.45]}];
@@ -1302,10 +1303,10 @@ static NSArray *FUColorPalette(void) {
     _preview = [[FUPreviewView alloc] initWithFrame:CGRectMake(16, y, pw, ph)];
     _preview.layer.cornerRadius = 14; _preview.clipsToBounds = YES;
     _preview.side     = (NSInteger)[self prefFloat:kFUSide dft:0];
-    _preview.iconSize = [self prefFloat:kFUIconSize dft:40];
-    _preview.iconGap  = [self prefFloat:kFUIconGap dft:56];
+    _preview.iconSize = [self prefFloat:kFUIconSize dft:24];   // v1.3.34 默认图标 24
+    _preview.iconGap  = [self prefFloat:kFUIconGap dft:12];    // v1.3.34 默认间隔 12
     _preview.span     = [self prefFloat:kFUFanSpan dft:180];
-    _preview.scale    = [self prefFloat:kFUFanScale dft:100];
+    _preview.scale    = [self prefFloat:kFUFanScale dft:160];  // v1.3.34 默认整体距离 160%
     _preview.layer1   = [self prefInt:kFULayer1Count dft:0];
     _preview.layer2   = [self prefInt:kFULayer2Count dft:0];
     _preview.layer3   = [self prefInt:kFULayer3Count dft:0];
@@ -1345,8 +1346,8 @@ static NSArray *FUColorPalette(void) {
     // ---- v1.3.8 修 06：滑杆改「两列紧凑布局」，一行放两根（以前一根占 52pt，8 根就是一屏多）----
     CGFloat colGap = 12.0f, colW = (w - 32 - colGap) / 2.0f;
     CGFloat x0 = 16, x1 = 16 + colW + colGap;
-    CGFloat pis = [self prefFloat:kFUIconSize dft:40], pig = [self prefFloat:kFUIconGap dft:56];
-    CGFloat psp = [self prefFloat:kFUFanSpan dft:180], psc = [self prefFloat:kFUFanScale dft:100];
+    CGFloat pis = [self prefFloat:kFUIconSize dft:24], pig = [self prefFloat:kFUIconGap dft:12];
+    CGFloat psp = [self prefFloat:kFUFanSpan dft:180], psc = [self prefFloat:kFUFanScale dft:160];
     _ss   = [self mkSliderAt:x0 width:colW y:y min:24 max:64  val:pis label:@"图标大小"  lout:&_ls];
     _sg   = [self mkSliderAt:x1 width:colW y:y min:12 max:120 val:pig label:@"图标间隔"  lout:&_lg];
     _ss.tag = 2; _sg.tag = 3; y += 46;
@@ -1471,19 +1472,19 @@ static NSArray *FUColorPalette(void) {
 }
 - (void)reset {
     _sideSeg.selectedSegmentIndex = 0; _modeSeg.selectedSegmentIndex = 0; [self refreshModeLabel];
-    _ss.value = 40; _sg.value = 56; _span.value = 180; _sc.value = 100;
+    _ss.value = 24; _sg.value = 12; _span.value = 180; _sc.value = 160;   // v1.3.34 默认 24 / 12 / 180 / 160
     _l1s.value = 0; _l2s.value = 0; _l3s.value = 0;   // v1.3.31：恢复默认 = 自动分层（按实际 URL 数量排）
-    _ls.text = @"图标大小 40"; _lg.text = @"图标间隔 56";
-    _lspan.text = @"扇形角度° 180"; _lsc.text = @"整体距离% 100";
+    _ls.text = @"图标大小 24"; _lg.text = @"图标间隔 12";
+    _lspan.text = @"扇形角度° 180"; _lsc.text = @"整体距离% 160";
     _ll1.text = @"第一层 自动"; _ll2.text = @"第二层 自动"; _ll3.text = @"第三层 自动";
     _delayS.value = 3; _ldelay.text = @"吸附延时（松手后完整图标停留） 3 秒";    // v1.3.25
     _fanHideS.value = 5; _lfanHide.text = @"扇形闲置自动收回 5 秒";
-    _preview.side = 0; _preview.iconSize = 40; _preview.iconGap = 56;
-    _preview.span = 180; _preview.scale = 100;
+    _preview.side = 0; _preview.iconSize = 24; _preview.iconGap = 12;
+    _preview.span = 180; _preview.scale = 160;
     _preview.layer1 = 0; _preview.layer2 = 0; _preview.layer3 = 0;
     [self writeInt:kFUSnapMode value:0];
-    [self writeFloat:kFUIconSize value:40]; [self writeFloat:kFUIconGap value:56];
-    [self writeFloat:kFUFanSpan value:180]; [self writeFloat:kFUFanScale value:100];
+    [self writeFloat:kFUIconSize value:24]; [self writeFloat:kFUIconGap value:12];
+    [self writeFloat:kFUFanSpan value:180]; [self writeFloat:kFUFanScale value:160];
     [self writeInt:kFULayer1Count value:0]; [self writeInt:kFULayer2Count value:0]; [self writeInt:kFULayer3Count value:0];
     [self writeFloat:kFUSnapDelay value:3];   // v1.3.13：吸附延时恢复默认 3 秒
     [self writeFloat:kFUFanAutoHide value:5]; // v1.3.25：扇形闲置收回恢复默认 5 秒
@@ -1501,24 +1502,6 @@ static NSArray *FUColorPalette(void) {
 }
 - (void)viewDidLoad {
     [super viewDidLoad];
-    // v1.3.3：让“静默模式”开关显示与实际旗标文件一致（旗标文件才是运行时权威来源）
-    BOOL on = [[NSFileManager defaultManager] fileExistsAtPath:@"/var/mobile/Media/FloatingURL_silent"];
-    CFPreferencesSetAppValue((__bridge CFStringRef)kFUSilent, (__bridge CFPropertyListRef)@(on), (__bridge CFStringRef)kFUSuite);
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
-}
-// v1.3.33：静默模式开关回调。改用布尔（与启用开关一致）——直接翻转 suite 里的 silent 位。
-// 不再写旗标文件：沙盒 Preferences 进程在 rootless 上未必能写 /var/mobile/Media，导致静默时灵时不灵。
-// v1.3.33：PSSwitchCell 在调用 action 前已把新值写入 plist。这里只「同步 + 通知」，
-// 绝不能再翻转（否则写回旧值，开关不生效）。若框架未自动保存，则读开关当前态手动写入。
-- (void)setSilent:(id)sender {
-    BOOL on;
-    if ([sender respondsToSelector:@selector(isOn)]) on = [(UISwitch *)sender isOn];   // sender 是 UISwitch
-    else if ([sender isKindOfClass:[NSObject class]] && [sender respondsToSelector:@selector(control)] && [[(id)sender control] isKindOfClass:[UISwitch class]])
-        on = [(UISwitch *)[(id)sender control] isOn];                                    // sender 是 PSSwitchCell
-    else { Boolean cur = false; on = !CFPreferencesGetAppBooleanValue((__bridge CFStringRef)kFUSilent, (__bridge CFStringRef)kFUSuite, &cur); }
-    CFPreferencesSetAppValue((__bridge CFStringRef)kFUSilent, (__bridge CFPropertyListRef)@(on), (__bridge CFStringRef)kFUSuite);
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
-    notify_post("com.yzdmm.floatingurl/settingsChanged");
 }
 - (void)viewDidDisappear:(BOOL)animated { [super viewDidDisappear:animated];
     notify_post("com.yzdmm.floatingurl/settingsChanged"); }
