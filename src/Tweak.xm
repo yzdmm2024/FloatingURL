@@ -931,7 +931,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     id fscRef = suite[@"fanScale"]; if ([fscRef isKindOfClass:[NSNumber class]]) gScale = [fscRef floatValue];
     if (gSpan  < 60.0f) gSpan  = 60.0f; if (gSpan  > 180.0f) gSpan  = 180.0f;
     if (gScale < 60.0f) gScale = 60.0f; if (gScale > 160.0f) gScale = 160.0f;
-    #define FU_RD(k,df,lo,hi) ({ id _r=(suite)[(k)]; CGFloat _v=([_r isKindOfClass:[NSNumber class]]?[(__bridge NSNumber *)_r floatValue]:(df)); if(_v<(lo))_v=(lo); if(_v>(hi))_v=(hi); _v; })
+    #define FU_RD(k,df,lo,hi) ({ id _r=(suite)[(k)]; CGFloat _v=([_r isKindOfClass:[NSNumber class]]?[(NSNumber *)_r floatValue]:(df)); if(_v<(lo))_v=(lo); if(_v>(hi))_v=(hi); _v; })
     _fanSpanL1  = FU_RD(@"fanSpanL1",  gSpan,  60.0f, 180.0f);
     _fanSpanL2  = FU_RD(@"fanSpanL2",  gSpan,  60.0f, 180.0f);
     _fanSpanL3  = FU_RD(@"fanSpanL3",  gSpan,  60.0f, 180.0f);
