@@ -37,6 +37,42 @@ static const NSInteger kFUMaxEntries   = 48;   // v1.3.6：上限 48（三层默
 // v1.3.8：删掉 1.3.2 / 1.3.3 遗留的 kFULayer1Max / kFULayer2Max（早已不再使用，
 //           各层上限统一由「布局调节」页的 8 / 16 / 24 控制）。
 
+// ===== v1.3.36：磁盘镜像写入（修「总开关关了球还在 / 布局调了不生效」的真正根因）=====
+// 本设置页（Preferences 进程）写入的是 cfprefsd 的内存缓存，cfprefsd 刷盘是异步的：
+// SpringBoard 里的 tweak 直接读磁盘 plist 时，刚改的值可能还没落盘 → 读到旧值
+// → 「关了总开关球还在、调了布局扇形不变」，等 cfprefsd 哪天刷完盘才生效（时灵时不灵）。
+// 对策：每次写完 CFPreferences 后，立刻把该键的值镜像写进磁盘 plist（原子写，绕过 cfprefsd）。
+// 两路存的值完全一致，cfprefsd 之后刷盘覆盖也是同样的值，不会打架；
+// tweak 端则改为只读磁盘（见 Tweak.xm v1.3.36 注释），从此只有一个权威数据源。
+static void FU_MirrorKeyToDisk(NSString *key) {
+    if (![key isKindOfClass:[NSString class]] || !key.length) return;
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
+    CFPropertyListRef v = CFPreferencesCopyAppValue((__bridge CFStringRef)key,
+                                                    (__bridge CFStringRef)kFUSuite);
+    static NSString *const paths[] = {
+        @"/var/mobile/Library/Preferences/com.yzdmm.floatingurl.plist",
+        @"/var/jb/var/mobile/Library/Preferences/com.yzdmm.floatingurl.plist",
+        nil
+    };
+    NSString *target = paths[0];
+    NSMutableDictionary *d = nil;
+    for (NSInteger i = 0; paths[i]; i++) {
+        NSDictionary *f = [NSDictionary dictionaryWithContentsOfFile:paths[i]];
+        if ([f isKindOfClass:[NSDictionary class]]) { d = [f mutableCopy]; target = paths[i]; break; }
+    }
+    if (!d) d = [NSMutableDictionary dictionary];
+    if (v) {
+        id obj = CFBridgingRelease(v);
+        if ([obj isKindOfClass:[NSNumber class]] || [obj isKindOfClass:[NSString class]] ||
+            [obj isKindOfClass:[NSArray class]] || [obj isKindOfClass:[NSDictionary class]] ||
+            [obj isKindOfClass:[NSData class]])
+            d[key] = obj;
+    } else {
+        [d removeObjectForKey:key];   // 键已被删除 → 磁盘同步删除
+    }
+    [d writeToFile:target atomically:YES];
+}
+
 // ===== v1.3.7 统一调色板：48 色（够 48 个入口各用一色），末尾空串 = 默认（入口=默认蓝 / 球=玻璃） =====
 static NSArray *FUColorPalette(void) {
     return @[
@@ -410,6 +446,7 @@ static NSArray *FUColorPalette(void) {
     else { if (arr.count >= kFUMaxEntries) { [self cancel]; return; } [arr addObject:e]; }
     CFPreferencesSetAppValue((__bridge CFStringRef)kFUURLs, (__bridge CFPropertyListRef)arr, (__bridge CFStringRef)kFUSuite);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
+    FU_MirrorKeyToDisk(kFUURLs);   // v1.3.36
     notify_post("com.yzdmm.floatingurl/settingsChanged");
     [self.navigationController popViewControllerAnimated:YES];
 }
@@ -664,6 +701,11 @@ static NSArray *FUColorPalette(void) {
     CFPreferencesSetAppValue((__bridge CFStringRef)kFUBallColor,
         (__bridge CFPropertyListRef)(_colorHex.length ? _colorHex : @""), (__bridge CFStringRef)kFUSuite);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
+    // v1.3.36：球外观四个键全部落盘镜像
+    FU_MirrorKeyToDisk(kFUBallTitle);
+    FU_MirrorKeyToDisk(kFUBallIconL);
+    FU_MirrorKeyToDisk(kFUBallIconR);
+    FU_MirrorKeyToDisk(kFUBallColor);
     notify_post("com.yzdmm.floatingurl/settingsChanged");
     [self.navigationController popViewControllerAnimated:YES];
 }
@@ -689,6 +731,7 @@ static NSArray *FUColorPalette(void) {
 - (void)saveEntries {
     CFPreferencesSetAppValue((__bridge CFStringRef)kFUURLs, (__bridge CFPropertyListRef)_entries, (__bridge CFStringRef)kFUSuite);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
+    FU_MirrorKeyToDisk(kFUURLs);   // v1.3.36
     notify_post("com.yzdmm.floatingurl/settingsChanged");
 }
 - (void)refreshCount {
@@ -1018,6 +1061,7 @@ static NSArray *FUColorPalette(void) {
     CFPreferencesSetAppValue((__bridge CFStringRef)kFUEnabledApps, (__bridge CFPropertyListRef)[_selected copy],
         (__bridge CFStringRef)kFUSuite);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
+    FU_MirrorKeyToDisk(kFUEnabledApps);   // v1.3.36
     // ★ 关键：黑名单保存后必须发 Darwin 通知，让正在运行的 App（如 QQ）立刻重新读取并隐藏球；
     //   否则只能等 App 再次进入前台才生效，用户体感就是「加了黑名单球还在」。
     notify_post("com.yzdmm.floatingurl/settingsChanged");
@@ -1259,12 +1303,14 @@ static NSArray *FUColorPalette(void) {
     CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)[NSNumber numberWithFloat:v],
         (__bridge CFStringRef)kFUSuite);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
+    FU_MirrorKeyToDisk(key);   // v1.3.36：立刻落盘镜像，SpringBoard 端秒级生效
     notify_post("com.yzdmm.floatingurl/settingsChanged");
 }
 - (void)writeSide:(NSInteger)v {
     CFPreferencesSetAppValue((__bridge CFStringRef)kFUSide, (__bridge CFPropertyListRef)[NSNumber numberWithInteger:v],
         (__bridge CFStringRef)kFUSuite);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
+    FU_MirrorKeyToDisk(kFUSide);   // v1.3.36
     notify_post("com.yzdmm.floatingurl/settingsChanged");
 }
 - (NSInteger)prefInt:(NSString *)key dft:(NSInteger)d {
@@ -1278,6 +1324,7 @@ static NSArray *FUColorPalette(void) {
     CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)[NSNumber numberWithInteger:v],
         (__bridge CFStringRef)kFUSuite);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
+    FU_MirrorKeyToDisk(key);   // v1.3.36：立刻落盘镜像，SpringBoard 端秒级生效
     notify_post("com.yzdmm.floatingurl/settingsChanged");
 }
 - (void)loadEntriesForPreview {
@@ -1503,7 +1550,23 @@ static NSArray *FUColorPalette(void) {
 - (void)viewDidLoad {
     [super viewDidLoad];
 }
+// v1.3.36：Root.plist 的 PSSwitchCell（总开关 enabled / captureHide / edgeGuard）由
+// Preferences 框架直接写 cfprefsd，不会经过下面的镜像逻辑 → 「关了总开关球还在」。
+// 在这里拦下：框架写完立刻把该键镜像进磁盘 plist，SpringBoard 端秒级生效。
+- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
+    [super setPreferenceValue:value specifier:specifier];
+    @try {
+        NSString *key = [specifier.properties objectForKey:@"key"];
+        FU_MirrorKeyToDisk(key);
+        notify_post("com.yzdmm.floatingurl/settingsChanged");
+    } @catch (NSException *e) { }
+}
 - (void)viewDidDisappear:(BOOL)animated { [super viewDidDisappear:animated];
+    // v1.3.36 兜底：个别系统版本开关不走 setPreferenceValue:specifier: 时，
+    // 离开本页前把三个框架托管的开关强制镜像落盘，保证 tweak 端拿到最新值。
+    FU_MirrorKeyToDisk(@"enabled");
+    FU_MirrorKeyToDisk(@"captureHide");
+    FU_MirrorKeyToDisk(@"edgeGuard");
     notify_post("com.yzdmm.floatingurl/settingsChanged"); }
 - (void)manageUrls { FUUrlListController *list = [[FUUrlListController alloc] init];
     [self.navigationController pushViewController:list animated:YES]; }

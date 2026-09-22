@@ -853,18 +853,28 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     [mgr showRespringPrompt];
 }
 
-#pragma mark - 偏好读取（磁盘 + cfprefsd 实时双源）
-// v1.3.34：双源合并，彻底解决「时灵时不灵」。
-//   · 磁盘 plist = 权威落盘值（兜底）；
-//   · cfprefsd 实时缓存（CFPreferences）覆盖磁盘 —— 设置页（Preferences 进程）刚写进
-//     cfprefsd 的值，守护进程经同一 cfprefsd 立刻读到，不受「cfprefsd 异步刷盘」的延时影响。
-//     这正是 1.3.33 只读磁盘时「总开关 / 布局改了时灵时不灵」的根因（磁盘未必已落盘）。
-//   · CFPreferences 永远不比磁盘旧（磁盘本来就是 cfprefsd 写的），叠加只安全不上抛旧值。
+#pragma mark - 偏好读取（v1.3.36：只读磁盘，单一权威源）
+// 「时灵时不灵」的完整病历：
+//   1.3.33 只读磁盘：设置页只写 cfprefsd、刷盘异步 → 磁盘滞后 → 改了时灵时不灵。
+//   1.3.34 双源合并（live 覆盖磁盘）：cfprefsd 跨进程偶发回旧值 → 旧值盖新值，复发。
+//   1.3.35 翻转（磁盘覆盖 live）：设置页写的是 cfprefsd 内存，刚改完的瞬间磁盘还是旧值
+//          → 旧磁盘值盖掉新 live 值 → 关总开关球还在、调布局扇形不变，复发。
+//   1.3.36 根治：设置页每次写入后立刻把该键原子写进磁盘 plist（FU_MirrorKeyToDisk），
+//          磁盘永远是最新值 → 这边只读磁盘，不再存在「两份数据打架」的任何可能。
+//          磁盘完全没有 plist 时（首次安装还没动过设置）才兜底读 cfprefsd 实时值。
 - (NSDictionary *)fuSuiteDict {
-    NSMutableDictionary *merged = [NSMutableDictionary dictionary];
-    // 1) 先取 cfprefsd 实时值：写入进程（设置 App）刚 CFPreferencesAppSynchronize 的那一瞬，
-    //    可能比磁盘落盘还新，用来覆盖「磁盘尚未落盘」的极短空窗（仅作兜底填充）。
+    static NSString *const cands[] = {
+        @"/var/mobile/Library/Preferences/com.yzdmm.floatingurl.plist",
+        @"/var/jb/var/mobile/Library/Preferences/com.yzdmm.floatingurl.plist",
+        nil
+    };
+    for (NSInteger i = 0; cands[i]; i++) {
+        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:cands[i]];
+        if ([d isKindOfClass:[NSDictionary class]]) return d;   // 只取第一个存在的文件，绝不跨文件合并
+    }
+    // 兜底：还没有磁盘文件（首次安装）→ 读 cfprefsd 实时值
     CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
+    NSMutableDictionary *merged = [NSMutableDictionary dictionary];
     NSArray *liveKeys = @[
         @"enabled", @"url", @"edgeGuard", @"captureHide", @"side", @"iconSize", @"iconGap",
         @"fanSpan", @"fanScale", @"fanAutoHide", @"layer1", @"layer2", @"layer3",
@@ -880,23 +890,6 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
             merged[k] = (__bridge_transfer id)v;
         else
             CFRelease(v);
-    }
-    // 2) 再用磁盘 plist 覆盖（权威）：磁盘是「设置 App」真正落盘的值，跨进程最可靠。
-    //    cfprefsd 跨进程缓存可能滞后/陈旧 —— 典型症状：关了「启用悬浮窗」却仍读到旧的 true → 球一直在；
-    //    或调了布局却读到旧值 → 扇形一点没变。绝不能让陈旧的 live 值盖掉正确落盘值，因此磁盘优先，
-    //    live 仅用于「磁盘尚无该键」时兜底（例如该键等于默认值被系统从 plist 移除的情况）。
-    static NSString *const cands[] = {
-        @"/var/mobile/Library/Preferences/com.yzdmm.floatingurl.plist",
-        @"/var/jb/var/mobile/Library/Preferences/com.yzdmm.floatingurl.plist",
-        nil
-    };
-    for (NSInteger i = 0; cands[i]; i++) {
-        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:cands[i]];
-        if (![d isKindOfClass:[NSDictionary class]]) continue;
-        for (NSString *k in d) {
-            // 磁盘有该键 → 以磁盘为准（权威落盘）；磁盘没有 → 才保留上面的 live 兜底值。
-            merged[k] = d[k];
-        }
     }
     return [merged copy];
 }
