@@ -792,6 +792,7 @@ static NSArray<NSString *> *fuPrefsCandidates(NSString *abs) {
     NSInteger             _layer2;           // v1.3.3 第二层入口数（0=自动）
     NSInteger             _layer3;           // v1.3.3 第三层入口数（0=自动）
     NSInteger             _snapMode;         // v1.3.5 0=自动吸附 1=全屏固定
+    CGFloat              _snapReveal;       // v1.4.3 吸附露出比例（0~1，默认 0.5）
     NSInteger             _menuStyle;        // v1.4.0 0=扇形 1=Dock横排 2=九宫格 3=圆环
     NSString             *_ballTitle;        // v1.3.5 球上的文字
     NSData               *_ballIcon;         // v1.3.5 球的图标（v1.3.28 起仅作旧数据兜底）
@@ -802,6 +803,7 @@ static NSArray<NSString *> *fuPrefsCandidates(NSString *abs) {
     UIImageView          *_ballImageView;    // v1.3.5 球图标显示
     BOOL                  _draggingBall;     // v1.3.5 拖动中（避免 1s 轮询把 alpha 抢回去）
     BOOL                  _draggingFanGroup; // v1.4.2 拖动展开的图标在移动整组（拦截紧随的 TouchUpInside 误触）
+    BOOL                  _reopenFanAfterEdit; // v1.4.3 展开态长按编辑保存后自动重新展开
     NSString             *_frontBid;         // v1.3.2 当前前台 App 的 bundle id（来自 Darwin 心跳）
     CFAbsoluteTime        _frontBidTs;       // 心跳时间戳（>3s 视为过期）
     NSMutableSet         *_frontWatched;     // 已注册通知监听的黑名单 bundle id
@@ -829,7 +831,7 @@ static NSArray<NSString *> *fuPrefsCandidates(NSString *abs) {
         _fanSpanL1 = _fanSpanL2 = _fanSpanL3 = 180.0f;     // v1.3.41 逐层扇形角度默认 180°
         _fanScaleL1 = _fanScaleL2 = _fanScaleL3 = 160.0f;   // v1.3.41 逐层距离默认 160%
         _fanAutoHide = 5.0f;                              // v1.3.21：默认闲置 5 秒自动收回扇形
-        _snapMode = 0; _webMode = 0; _ballTitle = @"URL";  // v1.3.5 默认：自动吸附 + 系统浏览器
+        _snapMode = 0; _webMode = 0; _ballTitle = @"URL"; _snapReveal = 0.5f;  // v1.3.5 默认：自动吸附 + 系统浏览器
         _menuStyle = 0;                                    // v1.4.0 默认：扇形
         _snapDelay = 3.0;                                  // v1.3.13：默认吸附延时 3 秒（松手后先给完整图标）
         _layer1 = 0; _layer2 = 0; _layer3 = 0;           // v1.3.31：默认「自动分层」= 按实际 URL 数量排（先满第1层≤8、再第2层≤16、再第3层≤24）；0 即自动，每层数量滑杆拖到 0 同义
@@ -964,6 +966,11 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     // 吸附模式 / 网页方式
     id smRef = suite[@"snapMode"]; if ([smRef isKindOfClass:[NSNumber class]]) _snapMode = [smRef integerValue];
     if (_snapMode != 1) _snapMode = 0;
+    // v1.4.3：吸附露出比例（0~1，默认 0.5 = 露一半）。读不到/越界回落默认。
+    id rvRef = suite[@"snapReveal"];
+    if ([rvRef isKindOfClass:[NSNumber class]]) _snapReveal = [rvRef floatValue];
+    else _snapReveal = 0.5f;
+    if (_snapReveal < 0.1f || _snapReveal > 1.0f) _snapReveal = 0.5f;
     // v1.4.0：展开风格（0=扇形 1=Dock横排 2=九宫格 3=圆环），非法值回落扇形
     id msRef = suite[@"menuStyle"]; if ([msRef isKindOfClass:[NSNumber class]]) _menuStyle = [msRef integerValue];
     if (_menuStyle < 0 || _menuStyle > 3) _menuStyle = 0;
@@ -1466,18 +1473,22 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
         [ss doSnapToEdgeWithGen:myGen];
     });
 }
-// 自动吸附：以「屏幕中心线（听筒→充电口）」为界 —— 球心在左半屏吸左边、右半屏吸右边，只露一半。
+// 自动吸附：以「屏幕中心线（听筒→充电口）」为界 —— 球心在左半屏吸左边、右半屏吸右边。
+// v1.4.3：露出比例由 snapReveal 控制（默认 0.5 = 露一半），可滑杆调 10%~100%，
+//   解决「iPhone 12 Pro 下方圆角大、固定露一半被圆角挡住不好点」的问题。
 - (void)doSnapToEdgeWithGen:(NSInteger)gen {
     if (!_ball || !_overlay) return;
     if (gen != _snapGen) return;
     if (_snapMode == 1 || _fanOpen) return;
     CGRect b = _ball.frame; CGRect s = _overlay.bounds;
-    CGFloat half = b.size.width / 2.0f;
+    CGFloat size = b.size.width;
     // 竖向永远停在松手位置（不吸上/下边，避免球跑到状态栏或 Dock 上）
     CGFloat ty = MAX([self fuTopInset], MIN(s.size.height - b.size.height - 2.0f, b.origin.y));   // v1.4.0：顶部安全区
     CGRect f = b; f.origin.y = ty;
     NSInteger side = (CGRectGetMidX(b) < s.size.width / 2.0f) ? 1 : 0;   // 1=左 0=右
-    f.origin.x = (side == 1) ? -half : (s.size.width - half);
+    CGFloat reveal = (_snapReveal > 0.05f) ? _snapReveal : 0.5f;          // 露出比例（0~1）
+    CGFloat hidden = size * (1.0f - reveal);                              // 隐藏部分宽度
+    f.origin.x = (side == 1) ? -hidden : (s.size.width - size + hidden);
     __weak FUFloatingManager *ws = self;
     [UIView animateWithDuration:0.3 delay:0.0 usingSpringWithDamping:0.65 initialSpringVelocity:0.5
                         options:UIViewAnimationOptionCurveEaseOut
@@ -1871,11 +1882,15 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
                 moved = YES;
             }
         }
-        // ③ 收界：推出去的图标 clamp 回屏内（含刘海安全区）
+        // ③ 收界：推出去的图标 clamp 回屏内（含刘海安全区）。
+        //    v1.4.3 修正：边界按「图标半径 + margin」算，保证整个图标（不只是中心点）留在屏内——
+        //    之前只夹中心点导致九宫格/扇形在角落时图标半截露在屏幕外。
+        CGFloat bx = half + m;
+        CGFloat topB = top + half;
         for (NSInteger i = 0; i < (NSInteger)out.count; i++) {
             CGPoint p = [out[i] CGPointValue];
-            CGFloat x = MAX(m, MIN(sc.size.width  - m, p.x));
-            CGFloat y = MAX(top, MIN(sc.size.height - m, p.y));
+            CGFloat x = MAX(bx, MIN(sc.size.width  - bx, p.x));
+            CGFloat y = MAX(topB, MIN(sc.size.height - bx, p.y));
             if (fabs(x - p.x) > 0.01f || fabs(y - p.y) > 0.01f) {
                 out[i] = [NSValue valueWithCGPoint:CGPointMake(x, y)];
                 moved = YES;
@@ -2184,8 +2199,14 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
     [self closeFan];
     [self setInteractive:YES];   // 编辑器需要接收触摸
     FUEntryEditorViewController *ed = [[FUEntryEditorViewController alloc] init];
-    ed.index = idx; ed.onSaved = ^{ [self reloadPrefs]; };
-    ed.onDismiss = ^{ [self setInteractive:NO]; };
+    ed.index = idx;
+    // v1.4.3：之前是在展开态长按进的编辑器 —— 保存后自动重新展开，立即看到新图标，
+    //   不再像以前那样「改完回到球、要点球才刷新」（用户反馈要去管理页改才有更新）。
+    ed.onSaved = ^{ [self reloadPrefs]; self->_reopenFanAfterEdit = YES; };
+    ed.onDismiss = ^{
+        [self setInteractive:NO];
+        if (self->_reopenFanAfterEdit) { self->_reopenFanAfterEdit = NO; [self reloadPrefs]; [self openFan]; }
+    };
     UINavigationController *nc = [[UINavigationController alloc] initWithRootViewController:ed];
     [_overlayRoot presentViewController:nc animated:YES completion:nil];
 }

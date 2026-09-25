@@ -1442,6 +1442,8 @@ static NSArray *FUColorPalette(void) {
 @property (nonatomic, strong) UILabel *ldelay;
 @property (nonatomic, strong) UISlider *fanHideS;              // v1.3.25 扇形闲置收回秒（整秒步进，最右=常驻）
 @property (nonatomic, strong) UILabel *lfanHide;
+@property (nonatomic, strong) UISlider *revealS;               // v1.4.3 吸附露出比例
+@property (nonatomic, strong) UILabel *lreveal;
 @end
 @implementation FULayoutController
 - (CGFloat)prefFloat:(NSString *)key dft:(CGFloat)d {
@@ -1551,6 +1553,17 @@ static NSArray *FUColorPalette(void) {
     _lmode.numberOfLines = 0;
     _lmode.font = [UIFont systemFontOfSize:11]; _lmode.textColor = [UIColor tertiaryLabelColor];
     [_scroll addSubview:_lmode]; y += 30; [self refreshModeLabel];
+    // v1.4.3：吸附露出比例（0.1~1.0，步进 0.1）—— 解决「手机下方圆角大、固定露一半被圆角挡住不好点」
+    CGFloat rv = [self prefFloat:@"snapReveal" dft:0.5f]; if (rv < 0.1f || rv > 1.0f) rv = 0.5f;
+    _lreveal = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 15)];
+    _lreveal.font = [UIFont systemFontOfSize:11]; _lreveal.textColor = [UIColor secondaryLabelColor];
+    _lreveal.text = [NSString stringWithFormat:@"吸附露出比例 %.0f%%", rv*100];
+    [_scroll addSubview:_lreveal]; y += 15;
+    _revealS = [[UISlider alloc] initWithFrame:CGRectMake(16, y, w-32, 28)];
+    _revealS.minimumValue = 0.1f; _revealS.maximumValue = 1.0f; _revealS.value = rv;
+    _revealS.continuous = NO; _revealS.tag = 15;
+    [_revealS addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+    [_scroll addSubview:_revealS]; y += 34;
     // ---- 预览方位（真机按球的实际位置自动识别左右，这里只决定预览画哪一侧）----
     UILabel *sideLab = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 16)];
     sideLab.font = [UIFont systemFontOfSize:12]; sideLab.textColor = [UIColor secondaryLabelColor];
@@ -1699,6 +1712,12 @@ static NSArray *FUColorPalette(void) {
             _lfanHide.text = [self fuSecText:@"扇形闲置自动收回" slot:slot keepTitle:@"常驻（不自动收回）"];
             return;
         }
+        case 15: {   // v1.4.3：吸附露出比例（0.1~1.0）
+            CGFloat rv = sl.value;
+            [self writeFloat:@"snapReveal" value:rv];
+            _lreveal.text = [NSString stringWithFormat:@"吸附露出比例 %.0f%%", rv*100.0f];
+            return;
+        }
     }
     if (!key) return;
     // v1.3.31：分层数量滑杆 0 = 自动，标签显示「自动」而非「0」
@@ -1725,6 +1744,7 @@ static NSArray *FUColorPalette(void) {
     _ll1.text = @"第一层数量 自动"; _ll2.text = @"第二层数量 自动"; _ll3.text = @"第三层数量 自动";
     _delayS.value = 3; _ldelay.text = @"吸附延时（松手后完整图标停留） 3 秒";    // v1.3.25
     _fanHideS.value = 5; _lfanHide.text = @"扇形闲置自动收回 5 秒";
+    _revealS.value = 0.5f; _lreveal.text = @"吸附露出比例 50%";   // v1.4.3：露出比例恢复默认 50%
     _preview.side = 0; _preview.iconSize = 24; _preview.iconGap = 12;
     _preview.spanL1 = 180; _preview.spanL2 = 180; _preview.spanL3 = 180;
     _preview.scaleL1 = 160; _preview.scaleL2 = 160; _preview.scaleL3 = 160;
@@ -1736,6 +1756,7 @@ static NSArray *FUColorPalette(void) {
     [self writeInt:kFULayer1Count value:0]; [self writeInt:kFULayer2Count value:0]; [self writeInt:kFULayer3Count value:0];
     [self writeFloat:kFUSnapDelay value:3];   // v1.3.13：吸附延时恢复默认 3 秒
     [self writeFloat:kFUFanAutoHide value:5]; // v1.3.25：扇形闲置收回恢复默认 5 秒
+    [self writeFloat:@"snapReveal" value:0.5f]; // v1.4.3：吸附露出比例恢复默认 50%
     [_preview refresh];
 }
 @end
