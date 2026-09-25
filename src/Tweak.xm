@@ -78,6 +78,7 @@ static NSString * const kFULayer2Count = @"layer2";     // v1.3.3：第二层入
 static NSString * const kFULayer3Count = @"layer3";     // v1.3.3：第三层入口数（0=自动）
 
 static NSString * const kFUSnapMode    = @"snapMode";   // v1.3.5：0=自动吸附 1=全屏固定
+static NSString * const kFUMenuStyle   = @"menuStyle";  // v1.4.0：展开风格 0=扇形 1=Dock横排 2=九宫格 3=圆环
 static NSString * const kFUBallX       = @"ballX";      // v1.3.5：球中心 X（归一化 0~1）
 static NSString * const kFUBallY       = @"ballY";      // v1.3.5：球中心 Y（归一化 0~1）
 static NSString * const kFUBallTitle   = @"ballTitle";  // v1.3.5：球的文字（默认 URL）
@@ -593,6 +594,11 @@ static void fuStartAppHeartbeat(NSString *bid) {
 - (void)fuApplyCaptureExclusion;                       // v1.3.28：把悬浮窗从截图/录屏里彻底排除（私有 API）
 - (void)fuApplySecureCaptureGuard;                     // v1.3.30：secureTextEntry 渲染层保护（截图/录屏必排除，不依赖截图入口）
 - (NSArray *)fuFanPointArray;                           // v1.3.13：扇形点位（openFan 与拖动重排共用同一套算法）
+- (NSArray *)fuDockPointArray;                          // v1.4.0：Dock横排点位
+- (NSArray *)fuGridPointArray;                          // v1.4.0：九宫格点位
+- (NSArray *)fuRingPointArray;                          // v1.4.0：圆环点位
+- (NSArray *)fuFitPoints:(NSArray *)pts around:(CGPoint)c icon:(CGFloat)isz margin:(CGFloat)m;   // v1.4.0：统一收界
+- (CGFloat)fuTopInset;                                  // v1.4.0：顶部安全区（刘海/灵动岛）
 - (void)fuScheduleFanAutoHide;                          // v1.3.21：重排「闲置自动收回」倒计时
 - (void)fuCancelFanAutoHide;                            // v1.3.21：取消空闲收回倒计时
 - (void)fuRelayoutFanInstant;                           // v1.3.13：拖动球时围绕球实时重排扇形
@@ -786,6 +792,7 @@ static NSArray<NSString *> *fuPrefsCandidates(NSString *abs) {
     NSInteger             _layer2;           // v1.3.3 第二层入口数（0=自动）
     NSInteger             _layer3;           // v1.3.3 第三层入口数（0=自动）
     NSInteger             _snapMode;         // v1.3.5 0=自动吸附 1=全屏固定
+    NSInteger             _menuStyle;        // v1.4.0 0=扇形 1=Dock横排 2=九宫格 3=圆环
     NSString             *_ballTitle;        // v1.3.5 球上的文字
     NSData               *_ballIcon;         // v1.3.5 球的图标（v1.3.28 起仅作旧数据兜底）
     NSData               *_ballIconL;        // v1.3.28 左半屏图标
@@ -822,6 +829,7 @@ static NSArray<NSString *> *fuPrefsCandidates(NSString *abs) {
         _fanScaleL1 = _fanScaleL2 = _fanScaleL3 = 160.0f;   // v1.3.41 逐层距离默认 160%
         _fanAutoHide = 5.0f;                              // v1.3.21：默认闲置 5 秒自动收回扇形
         _snapMode = 0; _webMode = 0; _ballTitle = @"URL";  // v1.3.5 默认：自动吸附 + 系统浏览器
+        _menuStyle = 0;                                    // v1.4.0 默认：扇形
         _snapDelay = 3.0;                                  // v1.3.13：默认吸附延时 3 秒（松手后先给完整图标）
         _layer1 = 0; _layer2 = 0; _layer3 = 0;           // v1.3.31：默认「自动分层」= 按实际 URL 数量排（先满第1层≤8、再第2层≤16、再第3层≤24）；0 即自动，每层数量滑杆拖到 0 同义
         _edgeGuard = YES; _screenWasOn = YES;              // v1.3.24：默认压住冲突边 + 起始按亮屏算
@@ -955,6 +963,9 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     // 吸附模式 / 网页方式
     id smRef = suite[@"snapMode"]; if ([smRef isKindOfClass:[NSNumber class]]) _snapMode = [smRef integerValue];
     if (_snapMode != 1) _snapMode = 0;
+    // v1.4.0：展开风格（0=扇形 1=Dock横排 2=九宫格 3=圆环），非法值回落扇形
+    id msRef = suite[@"menuStyle"]; if ([msRef isKindOfClass:[NSNumber class]]) _menuStyle = [msRef integerValue];
+    if (_menuStyle < 0 || _menuStyle > 3) _menuStyle = 0;
     _webMode = fb(@"webMode", NO) ? 1 : 0;
     // 吸附延时（秒）
     id sdlyRef = suite[@"snapDelay"];
@@ -1246,12 +1257,22 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     [self placeBallInWindow:_overlay];
 
 }
+// v1.4.0：顶部安全区高度（刘海 / 灵动岛 / 状态栏）——球和扇形都不许越进去。
+// 之前 y 钳制从 2pt 起算，球拖到顶上会钻进刘海里显示不全。悬浮窗覆盖全屏，
+// safeAreaInsets.top 就是系统给的安全区（iPhone 13 约 47~50pt）；取不到按 24pt 兜底。
+- (CGFloat)fuTopInset {
+    CGFloat t = 0.0f;
+    if (_overlay) {
+        if (@available(iOS 11.0, *)) t = _overlay.safeAreaInsets.top;
+    }
+    if (t < 24.0f) t = 24.0f;
+    return t;
+}
 - (void)placeBallInWindow:(UIWindow *)w {
     if (!_ball || !w) return;
     // v1.3.5：球位置改成「归一化坐标」持久化（ballX/ballY）——自动吸附模式记吸附边，
     // 全屏固定模式记用户拖到哪就停哪，重启后原位恢复。
-    CGRect s = w.bounds;
-    CFPropertyListRef bx = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallX, (__bridge CFStringRef)kFUSuite);
+    CGRect s = w.bounds;    CFPropertyListRef bx = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallX, (__bridge CFStringRef)kFUSuite);
     CFPropertyListRef by = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUBallY, (__bridge CFStringRef)kFUSuite);
     BOOL hasPos = (bx || by);
     CGFloat nx = 0.92f, ny = 0.45f;
@@ -1263,7 +1284,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     if (ny < 0) ny = 0; if (ny > 1) ny = 1;
     CGFloat cx = nx * s.size.width, cy = ny * s.size.height;
     CGFloat x = MAX(-kFUButtonSize/2.0f, MIN(s.size.width  - kFUButtonSize/2.0f, cx - kFUButtonSize/2.0f));
-    CGFloat y = MAX(2.0f,             MIN(s.size.height - kFUButtonSize - 2.0f, cy - kFUButtonSize/2.0f));
+    CGFloat y = MAX([self fuTopInset], MIN(s.size.height - kFUButtonSize - 2.0f, cy - kFUButtonSize/2.0f));
     _ball.frame = CGRectMake(x, y, kFUButtonSize, kFUButtonSize);
     _ball.alpha = 0.4f;   // 初始即半透明待机（拖动/点击会临时变实心）
     [self fuRefreshDeferredEdges];   // v1.3.24：按恢复出来的位置压住对应边
@@ -1389,8 +1410,9 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     else if (g.state == UIGestureRecognizerStateChanged) {
         CGPoint t = [g translationInView:_overlay];
         CGRect f = _ball.frame;
+        CGFloat topInset = [self fuTopInset];   // v1.4.0：拖不进刘海/状态栏
         f.origin.x = MAX(0, MIN(_overlay.bounds.size.width  - f.size.width,  _ballDragOrigin.x + t.x));
-        f.origin.y = MAX(0, MIN(_overlay.bounds.size.height - f.size.height, _ballDragOrigin.y + t.y));
+        f.origin.y = MAX(topInset, MIN(_overlay.bounds.size.height - f.size.height, _ballDragOrigin.y + t.y));
         _ball.frame = f;
         // v1.3.13 修「拖动球时扇形被推着走」：以前只把图标按偏移平移（会被一路推出屏幕、越推越歪），
         // 现在改成用**同一套算法围绕球重新排布**（朝向/圈层/贴边平移全部重算），
@@ -1417,7 +1439,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     if (!_ball || !_overlay) return;
     CGRect s = _overlay.bounds, f = _ball.frame;
     CGFloat x = MAX(0.0f, MIN(s.size.width - f.size.width, f.origin.x));
-    CGFloat y = MAX(2.0f, MIN(s.size.height - f.size.height - 2.0f, f.origin.y));
+    CGFloat y = MAX([self fuTopInset], MIN(s.size.height - f.size.height - 2.0f, f.origin.y));   // v1.4.0：顶部安全区
     if (fabs(x - f.origin.x) > 0.5f || fabs(y - f.origin.y) > 0.5f)
         _ball.frame = CGRectMake(x, y, f.size.width, f.size.height);
 }
@@ -1451,7 +1473,7 @@ static void fuNeedsRespringCb(CFNotificationCenterRef center, void *observer,
     CGRect b = _ball.frame; CGRect s = _overlay.bounds;
     CGFloat half = b.size.width / 2.0f;
     // 竖向永远停在松手位置（不吸上/下边，避免球跑到状态栏或 Dock 上）
-    CGFloat ty = MAX(2.0f, MIN(s.size.height - b.size.height - 2.0f, b.origin.y));
+    CGFloat ty = MAX([self fuTopInset], MIN(s.size.height - b.size.height - 2.0f, b.origin.y));   // v1.4.0：顶部安全区
     CGRect f = b; f.origin.y = ty;
     NSInteger side = (CGRectGetMidX(b) < s.size.width / 2.0f) ? 1 : 0;   // 1=左 0=右
     f.origin.x = (side == 1) ? -half : (s.size.width - half);
@@ -1600,8 +1622,9 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
 - (void)restoreBallFromSnap {
     if (!_ball) return;
     CGRect s = _overlay.bounds; CGRect f = _ball.frame;
+    CGFloat topInset = [self fuTopInset];   // v1.4.0：顶部安全区
     CGRect clamped = CGRectMake(MAX(0, MIN(s.size.width  - f.size.width,  f.origin.x)),
-                                MAX(0, MIN(s.size.height - f.size.height, f.origin.y)),
+                                MAX(topInset, MIN(s.size.height - f.size.height, f.origin.y)),
                                 f.size.width, f.size.height);
     if (!CGRectEqualToRect(f, clamped))
         [UIView animateWithDuration:0.2 animations:^{ _ball.frame = clamped; }];
@@ -1667,6 +1690,11 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
 - (NSArray *)fuFanPointArray {
     NSMutableArray *pts = [NSMutableArray array];
     if (!_ball || !_overlay || _entries.count < 1) return pts;
+    // v1.4.0：展开风格分发 —— 扇形(0) / Dock横排(1) / 九宫格(2) / 圆环(3)。
+    // 所有风格最后都走 fuFitPoints:around: 统一收进屏幕（含刘海安全区），四角落自动贴合。
+    if (_menuStyle == 1) return [self fuDockPointArray];
+    if (_menuStyle == 2) return [self fuGridPointArray];
+    if (_menuStyle == 3) return [self fuRingPointArray];
     CGRect sc = _overlay.bounds;
     CGPoint c = CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame));
     CGFloat isz   = _iconSize;
@@ -1747,29 +1775,129 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
             placed2 += add;
         }
     }
-    // 4) v1.3.3 贴边自适应：若整体超出屏幕，则整体平移（保持间距，绝不重叠），直到刚好在屏内。
-    if (pts.count) {
+    // 4) v1.4.0 贴边自适应（重做）：不再「整体平移」——那正是「球在角落时扇形展开离球好远」的根因
+    //    （图标出了屏就把整组往下/往里推，推得越远离球越远）。改成先围绕球心**等比缩小**，
+    //    扇形始终贴着球；缩到 45% 仍放不下才整体平移兜底。刘海安全区同样算界内。
+    return [self fuFitPoints:pts around:c icon:isz margin:6.0f];
+}
+// v1.4.0：把点位整体收进屏幕 —— 先围绕球心等比缩小（100% → 45%，每档 5%），
+// 任一档所有图标都进界（含顶部安全区）就用该档；都不行再按 45% + 整体平移兜底。
+- (NSArray *)fuFitPoints:(NSArray *)inPts around:(CGPoint)c icon:(CGFloat)isz margin:(CGFloat)m {
+    if (!_overlay || inPts.count == 0) return inPts;
+    CGRect sc = _overlay.bounds;
+    CGFloat top = [self fuTopInset];
+    CGFloat half = isz / 2.0f;
+    for (CGFloat s2 = 1.0f; s2 >= 0.449f; s2 -= 0.05f) {
         CGFloat minX = CGFLOAT_MAX, minY = CGFLOAT_MAX, maxX = -CGFLOAT_MAX, maxY = -CGFLOAT_MAX;
-        for (NSValue *v in pts) {
+        for (NSValue *v in inPts) {
             CGPoint p = v.CGPointValue;
-            minX = MIN(minX, p.x - isz/2.0f); maxX = MAX(maxX, p.x + isz/2.0f);
-            minY = MIN(minY, p.y - isz/2.0f); maxY = MAX(maxY, p.y + isz/2.0f);
+            CGFloat x = c.x + (p.x - c.x) * s2, y = c.y + (p.y - c.y) * s2;
+            minX = MIN(minX, x - half); maxX = MAX(maxX, x + half);
+            minY = MIN(minY, y - half); maxY = MAX(maxY, y + half);
         }
-        CGFloat m = 6.0f; CGFloat dx = 0, dy = 0;
-        if (minX < m) dx = m - minX;
-        if (minY < m) dy = m - minY;
-        if (maxX > sc.size.width  - m) dx = (sc.size.width  - m) - maxX;
-        if (maxY > sc.size.height - m) dy = (sc.size.height - m) - maxY;
-        if (dx != 0 || dy != 0) {
-            NSMutableArray *shifted = [NSMutableArray array];
-            for (NSValue *v in pts) {
+        if (minX >= m && minY >= top && maxX <= sc.size.width - m && maxY <= sc.size.height - m) {
+            NSMutableArray *out = [NSMutableArray array];
+            for (NSValue *v in inPts) {
                 CGPoint p = v.CGPointValue;
-                [shifted addObject:[NSValue valueWithCGPoint:CGPointMake(p.x + dx, p.y + dy)]];
+                [out addObject:[NSValue valueWithCGPoint:
+                    CGPointMake(c.x + (p.x - c.x) * s2, c.y + (p.y - c.y) * s2)]];
             }
-            pts = shifted;
+            return out;
         }
     }
-    return pts;
+    // 兜底：45% 缩放后仍放不下 → 整体平移（保持间距不重叠），顶边按安全区算
+    CGFloat s2 = 0.45f;
+    CGFloat minX = CGFLOAT_MAX, minY = CGFLOAT_MAX, maxX = -CGFLOAT_MAX, maxY = -CGFLOAT_MAX;
+    for (NSValue *v in inPts) {
+        CGPoint p = v.CGPointValue;
+        CGFloat x = c.x + (p.x - c.x) * s2, y = c.y + (p.y - c.y) * s2;
+        minX = MIN(minX, x - half); maxX = MAX(maxX, x + half);
+        minY = MIN(minY, y - half); maxY = MAX(maxY, y + half);
+    }
+    CGFloat dx = 0, dy = 0;
+    if (minX < m) dx = m - minX;
+    if (minY < top) dy = top - minY;
+    if (maxX > sc.size.width  - m) dx = (sc.size.width  - m) - maxX;
+    if (maxY > sc.size.height - m) dy = (sc.size.height - m) - maxY;
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSValue *v in inPts) {
+        CGPoint p = v.CGPointValue;
+        [out addObject:[NSValue valueWithCGPoint:
+            CGPointMake(c.x + (p.x - c.x) * s2 + dx, c.y + (p.y - c.y) * s2 + dy)]];
+    }
+    return out;
+}
+// v1.4.0 Dock 横排：一排展示（放不下自动折行），排面朝屏幕内侧延伸，行在竖直方向关于球对称。
+- (NSArray *)fuDockPointArray {
+    NSMutableArray *pts = [NSMutableArray array];
+    if (!_ball || !_overlay) return pts;
+    CGRect sc = _overlay.bounds;
+    CGPoint c = CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame));
+    CGFloat isz = _iconSize;
+    CGFloat step = isz + MAX(_iconGap, 8.0f);
+    CGFloat baseR = kFUButtonSize/2.0f + isz/2.0f + _iconGap;
+    CGFloat m = 6.0f;
+    NSInteger n = (NSInteger)_entries.count;
+    BOOL left = (c.x < sc.size.width / 2.0f);
+    CGFloat dirX = left ? 1.0f : -1.0f;
+    CGFloat startX = c.x + dirX * baseR;
+    // 行容量：从球旁边那格起，沿 dirX 逐格数到出屏为止
+    NSInteger perRow = 0;
+    for (NSInteger k = 0; k < n; k++) {
+        CGFloat x = startX + dirX * (CGFloat)k * step;
+        if (x - isz/2.0f < m || x + isz/2.0f > sc.size.width - m) break;
+        perRow++;
+    }
+    if (perRow < 1) perRow = 1;
+    NSInteger rows = (n + perRow - 1) / perRow;
+    for (NSInteger i = 0; i < n; i++) {
+        NSInteger r = i / perRow, k = i % perRow;
+        CGFloat x = startX + dirX * (CGFloat)k * step;
+        CGFloat y = c.y + ((CGFloat)r - (CGFloat)(rows - 1) / 2.0f) * step;
+        [pts addObject:[NSValue valueWithCGPoint:CGPointMake(x, y)]];
+    }
+    return [self fuFitPoints:pts around:c icon:isz margin:m];
+}
+// v1.4.0 九宫格：3 列网格，最近的一角对着球、朝屏幕内侧展开（角落自动斜向内）。
+- (NSArray *)fuGridPointArray {
+    NSMutableArray *pts = [NSMutableArray array];
+    if (!_ball || !_overlay) return pts;
+    CGRect sc = _overlay.bounds;
+    CGPoint c = CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame));
+    CGFloat isz = _iconSize;
+    CGFloat step = isz + MAX(_iconGap, 8.0f);
+    CGFloat baseR = kFUButtonSize/2.0f + isz/2.0f + _iconGap;
+    NSInteger n = (NSInteger)_entries.count;
+    NSInteger cols = 3;
+    CGFloat dirX = (c.x < sc.size.width  / 2.0f) ? 1.0f : -1.0f;
+    CGFloat dirY = (c.y < sc.size.height / 2.0f) ? 1.0f : -1.0f;
+    CGFloat x0 = c.x + dirX * (baseR + isz/2.0f);
+    CGFloat y0 = c.y + dirY * (baseR + isz/2.0f);
+    for (NSInteger i = 0; i < n; i++) {
+        NSInteger r = i / cols, k = i % cols;
+        CGFloat x = x0 + dirX * (CGFloat)k * step;
+        CGFloat y = y0 + dirY * (CGFloat)r * step;
+        [pts addObject:[NSValue valueWithCGPoint:CGPointMake(x, y)]];
+    }
+    return [self fuFitPoints:pts around:c icon:isz margin:6.0f];
+}
+// v1.4.0 圆环：所有图标围球一圈（360° 均布），起始角朝屏幕中心；半径跟随「第一层·距离」滑杆。
+- (NSArray *)fuRingPointArray {
+    NSMutableArray *pts = [NSMutableArray array];
+    if (!_ball || !_overlay) return pts;
+    CGRect sc = _overlay.bounds;
+    CGPoint c = CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame));
+    CGFloat isz = _iconSize;
+    CGFloat baseR = kFUButtonSize/2.0f + isz/2.0f + _iconGap;
+    CGFloat R = baseR * (_fanScaleL1 > 0 ? _fanScaleL1 / 100.0f : 1.6f);
+    NSInteger n = (NSInteger)_entries.count;
+    CGFloat a0 = atan2f(sc.size.height / 2.0f - c.y, sc.size.width / 2.0f - c.x);
+    for (NSInteger i = 0; i < n; i++) {
+        CGFloat a = a0 + (CGFloat)i * 2.0f * (CGFloat)M_PI / (CGFloat)MAX(1, n);
+        [pts addObject:[NSValue valueWithCGPoint:
+            CGPointMake(c.x + R * cosf(a), c.y + R * sinf(a))]];
+    }
+    return [self fuFitPoints:pts around:c icon:isz margin:6.0f];
 }
 // v1.3.13 修「拖动球时扇形被推着走」：拖动过程中就用上面的算法重新排布（不带动画，跟手）。
 // v1.3.22：小窗展开时球是隐藏的，但它的坐标还停在打开前的旧位置 ——
@@ -1813,6 +1941,7 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
     CGRect sc = _overlay.bounds;
     CGPoint c = CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame));
     CGFloat isz = _iconSize;
+    CGFloat topInset = [self fuTopInset];   // v1.4.0：图标也不进刘海
     // v1.3.13：点位由 fuFanPointArray 统一计算（拖动重排用的是同一套）
     NSArray *pts = [self fuFanPointArray];
     // 5) 正式摆放（带轻微 clamp 兜底 + 缩放动画）
@@ -1824,7 +1953,7 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
         UIButton *it = [self buildFanItem:_entries[idx] index:idx size:isz];
         CGRect target = CGRectMake(p.x - isz/2.0f, p.y - isz/2.0f, isz, isz);
         target.origin.x = MAX(2.0f, MIN(sc.size.width  - isz - 2.0f, target.origin.x));
-        target.origin.y = MAX(2.0f, MIN(sc.size.height - isz - 2.0f, target.origin.y));
+        target.origin.y = MAX(topInset, MIN(sc.size.height - isz - 2.0f, target.origin.y));
         // 先把最终 frame 定死，再只动画 transform(缩放) + alpha。
         // 严禁在同一动画块里既设 frame 又设 transform（UIKit 未定义行为会放大 10 倍）。
         it.frame = target;

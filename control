@@ -1,6 +1,6 @@
 Package: com.yzdmm.floatingurl
 Name: 悬浮URL
-Version: 1.3.44
+Version: 1.4.0
 Architecture: iphoneos-arm64
 Depends: firmware (>= 15.0), mobilesubstrate, preferenceloader
 Maintainer: yzdmm

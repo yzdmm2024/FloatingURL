@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>title</key>
-	<string>悬浮URL 1.3.36</string>
+	<string>悬浮URL 1.4.0</string>
 	<key>items</key>
 	<array>
 		<dict>
@@ -30,9 +30,9 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
-			<string>快捷URI（扇形 · 自动分层 · 最多 48 个）</string>
+			<string>快捷URI</string>
 			<key>footerText</key>
-			<string>点球展开扇形：添加几个排几个，默认自动分层（先满第 1 层、再第 2、第 3 层，每层数量可在「布局调节」改，拖到 0 = 自动）。长按图标可就地改名称/网址/颜色；删光后点球不再弹网页。</string>
+			<string>点球展开，长按图标可编辑，删光后点球不弹网页。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -46,23 +46,15 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
-			<string>URL 深链（插件触发器，必须全小写）</string>
+			<string>布局与风格</string>
 			<key>footerText</key>
-			<string>支持 Snapper 4 等插件的「URL 深链」（prefs:root=…），必须全小写，填进快捷入口即可一键触发。完整 10 条清单见「说明书 / 玩法」。本版已自动纠正大小写。</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>label</key>
-			<string>布局调节</string>
-			<key>footerText</key>
-			<string>实时预览。吸附可选自动（按屏幕中心线吸左/右）或全屏固定；秒数最低 1 秒，最右=常驻。图标大小/间隔、扇形角度、整体距离、每层数量都可单独调，改完即时生效。</string>
+			<string>扇形 / 横排 / 九宫格 / 圆环，吸附与角度距离均可调，实时预览。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
 			<string>PSButtonCell</string>
 			<key>label</key>
-			<string>布局调节</string>
+			<string>布局调节 / 风格选择</string>
 			<key>action</key>
 			<string>showLayout</string>
 		</dict>
@@ -70,9 +62,21 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
-			<string>截图 / 录屏</string>
-			<key>footerText</key>
-			<string>开启后截图/录屏一开始，扇形收拢、球临时隐藏（不会被拍进画面）；结束自动恢复并按「吸附延时」归位。靠系统通知驱动，不轮询、不耗电。</string>
+			<string>悬浮球外观</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSButtonCell</string>
+			<key>label</key>
+			<string>自定义悬浮球</string>
+			<key>action</key>
+			<string>showBallEdit</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>开关</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -87,30 +91,6 @@
 			<string>截图/录屏时隐藏悬浮球</string>
 			<key>PostNotification</key>
 			<string>com.yzdmm.floatingurl/settingsChanged</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>label</key>
-			<string>悬浮球外观</string>
-			<key>footerText</key>
-			<string>自定义名称（默认 URL）、左/右图标（从相册方形裁剪，任一侧没设自动镜像另一侧）、底色（48 色 + 任意色，不设则为玻璃质感）。</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSButtonCell</string>
-			<key>label</key>
-			<string>自定义悬浮球（名称 / 左图标 / 右图标 / 颜色）</string>
-			<key>action</key>
-			<string>showBallEdit</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>label</key>
-			<string>系统手势优先级（防冲突）</string>
-			<key>footerText</key>
-			<string>球贴到某条边时，把该边系统手势先让给球（再划一次仍出系统面板）。若觉得手势发钝可关闭。不做轮询，不额外耗电。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -130,17 +110,31 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
-			<string>更多</string>
+			<string>备份 / 恢复</string>
 			<key>footerText</key>
-			<string>说明书/玩法：各种 URL 与 scheme 示例，长按即可复制。黑名单：勾选某 App = 该 App 内隐藏球（桌面同样遵循）。</string>
+			<string>备份保存到「文件」App 的 Documents 目录，文件名 = 时间+URL插件；导入自动选最新一份。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
 			<string>PSButtonCell</string>
 			<key>label</key>
-			<string>说明书 / 玩法</string>
+			<string>一键备份（设置 + URI）</string>
 			<key>action</key>
-			<string>showGuide</string>
+			<string>doBackup</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSButtonCell</string>
+			<key>label</key>
+			<string>一键导入（自动选最新备份）</string>
+			<key>action</key>
+			<string>doRestore</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>更多</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -152,11 +146,15 @@
 		</dict>
 		<dict>
 			<key>cell</key>
-			<string>PSGroupCell</string>
+			<string>PSButtonCell</string>
 			<key>label</key>
-			<string>关于</string>
-			<key>footerText</key>
-			<string>系统级悬浮窗：可拖动小球常驻屏幕，点开扇形快捷环（自动分层），网页/scheme 一键直达（全部交给 Safari / 对应 App，更轻更省电）。全 App 及主屏幕可用；球位置会被记住，松手后有「吸附延时」。</string>
+			<string>使用说明（点击展开）</string>
+			<key>action</key>
+			<string>showGuide</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
 		</dict>
 	</array>
 </dict>

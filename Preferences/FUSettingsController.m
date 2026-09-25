@@ -931,44 +931,55 @@ static NSArray *FUColorPalette(void) {
         [src drawInRect:r]; }];
 }
 - (void)loadApps {
-    _allApps = [NSMutableArray array]; _selected = [NSMutableArray array];
+    _allApps = [NSMutableArray array]; _selected = [NSMutableArray array]; _filtered = [NSMutableArray array];
     CFPropertyListRef r = CFPreferencesCopyAppValue((__bridge CFStringRef)kFUEnabledApps, (__bridge CFStringRef)kFUSuite);
     if (r) { NSArray *a = (__bridge_transfer NSArray *)r; if ([a isKindOfClass:[NSArray class]]) [_selected addObjectsFromArray:a]; }
-    Class wsCls = NSClassFromString(@"LSApplicationWorkspace");
-    id ws = wsCls ? [wsCls performSelector:@selector(defaultWorkspace)] : nil;
-    // 取 app 图标的稳健方式：iOS16 上 LSApplicationProxy.icon 返回的是 LSApplicationIcon（不是 UIImage），
-    // 旧写法 isKindOfClass:[UIImage] 永远失败 → 列表只剩名字没图标。改用 UIImage 私有方法直接拿 UIImage。
-    Class uiImg = NSClassFromString(@"UIImage");
-    SEL iconSel = NSSelectorFromString(@"_applicationIconImageForBundleIdentifier:format:scale:");
-    if (ws) {
-        NSArray *apps = [ws performSelector:@selector(allApplications)];
-        for (id p in apps) {
-            NSString *bid = [p performSelector:@selector(bundleIdentifier)]; if (!bid.length) continue;
-            if ([bid isEqualToString:@"com.apple.Preferences"]) continue;
-            // ★ ARC 坑：getReturnValue: 直接把返回的对象指针拷进变量，ARC 不会为其插入 retain，
-            //   而该对象通常已在 autorelease 池里——必须用 __autoreleasing，否则作用域结束 ARC 多 release 一次 → 崩溃（闪退）。
-            UIImage *__autoreleasing icon = nil;
-            if (uiImg && [uiImg respondsToSelector:iconSel]) {
-                int fmt = 2; CGFloat scale = (UIScreen.mainScreen ? UIScreen.mainScreen.scale : 2.0f);
-                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:
-                    [uiImg methodSignatureForSelector:iconSel]];
-                [inv setTarget:uiImg]; [inv setSelector:iconSel];
-                [inv setArgument:&bid atIndex:2]; [inv setArgument:&fmt atIndex:3]; [inv setArgument:&scale atIndex:4];
-                [inv invoke]; [inv getReturnValue:&icon];
+    // v1.4.0 修「点进去卡一会才进去」：几百个 App 逐个取图标原来在主线程同步做，
+    // 进页面直接卡死主线程。整体搬到后台线程，主线程只收结果刷新表格。
+    _countLabel.text = @"正在加载 App 列表…";
+    __weak FUAppListController *ws = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSMutableArray *rows = [NSMutableArray array];
+        Class wsCls = NSClassFromString(@"LSApplicationWorkspace");
+        id ws2 = wsCls ? [wsCls performSelector:@selector(defaultWorkspace)] : nil;
+        // 取 app 图标的稳健方式：iOS16 上 LSApplicationProxy.icon 返回的是 LSApplicationIcon（不是 UIImage），
+        // 旧写法 isKindOfClass:[UIImage] 永远失败 → 列表只剩名字没图标。改用 UIImage 私有方法直接拿 UIImage。
+        Class uiImg = NSClassFromString(@"UIImage");
+        SEL iconSel = NSSelectorFromString(@"_applicationIconImageForBundleIdentifier:format:scale:");
+        if (ws2) {
+            NSArray *apps = [ws2 performSelector:@selector(allApplications)];
+            for (id p in apps) {
+                NSString *bid = [p performSelector:@selector(bundleIdentifier)]; if (!bid.length) continue;
+                if ([bid isEqualToString:@"com.apple.Preferences"]) continue;
+                // ★ ARC 坑：getReturnValue: 直接把返回的对象指针拷进变量，ARC 不会为其插入 retain，
+                //   而该对象通常已在 autorelease 池里——必须用 __autoreleasing，否则作用域结束 ARC 多 release 一次 → 崩溃（闪退）。
+                UIImage *__autoreleasing icon = nil;
+                if (uiImg && [uiImg respondsToSelector:iconSel]) {
+                    int fmt = 2; CGFloat scale = (UIScreen.mainScreen ? UIScreen.mainScreen.scale : 2.0f);
+                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:
+                        [uiImg methodSignatureForSelector:iconSel]];
+                    [inv setTarget:uiImg]; [inv setSelector:iconSel];
+                    [inv setArgument:&bid atIndex:2]; [inv setArgument:&fmt atIndex:3]; [inv setArgument:&scale atIndex:4];
+                    [inv invoke]; [inv getReturnValue:&icon];
+                }
+                if (!icon && [p respondsToSelector:@selector(iconDataForVariant:)]) {
+                    id d = [p performSelector:@selector(iconDataForVariant:) withObject:@(2)];
+                    if ([d isKindOfClass:[NSData class]]) icon = [UIImage imageWithData:d];
+                }
+                if (icon) icon = [ws scaledIcon:icon toSize:40];   // 统一缩到 40×40，避免大图标在列表里显得过大
+                NSString *name = [p performSelector:@selector(localizedName)];
+                [rows addObject:@{@"bid":bid, @"name":(name.length ? name : bid), @"icon":(icon ?: [NSNull null])}];
             }
-            if (!icon && [p respondsToSelector:@selector(iconDataForVariant:)]) {
-                id d = [p performSelector:@selector(iconDataForVariant:) withObject:@(2)];
-                if ([d isKindOfClass:[NSData class]]) icon = [UIImage imageWithData:d];
-            }
-            if (icon) icon = [self scaledIcon:icon toSize:40];   // 统一缩到 40×40，避免大图标在列表里显得过大
-            NSString *name = [p performSelector:@selector(localizedName)];
-            [_allApps addObject:@{@"bid":bid, @"name":(name.length ? name : bid), @"icon":(icon ?: [NSNull null])}];
         }
-    }
-    [_allApps sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b){
-        return [a[@"name"] localizedCaseInsensitiveCompare:b[@"name"]];
-    }];
-    [self applyFilter:@""];
+        [rows sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b){
+            return [a[@"name"] localizedCaseInsensitiveCompare:b[@"name"]];
+        }];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            FUAppListController *ss = ws; if (!ss) return;
+            ss->_allApps = rows;
+            [ss applyFilter:ss->_search.text ?: @""];
+        });
+    });
 }
 - (void)applyFilter:(NSString *)q {
     NSMutableArray *base = [_allApps mutableCopy];
@@ -991,18 +1002,21 @@ static NSArray *FUColorPalette(void) {
 }
 - (void)viewDidLoad {
     [super viewDidLoad]; self.title = @"隐藏悬浮窗的 App";
+    // v1.4.0 排版统一：页面底色/列表样式对齐系统设置（内嵌分组），搜索栏不再是突兀的灰块
+    self.view.backgroundColor = [UIColor systemGroupedBackground];
     // 顶部说明条
     _countLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     _countLabel.translatesAutoresizingMaskIntoConstraints = NO;
     _countLabel.font = [UIFont systemFontOfSize:12]; _countLabel.textColor = [UIColor secondaryLabelColor];
     _countLabel.textAlignment = NSTextAlignmentCenter;
     [self.view addSubview:_countLabel];
-    // 搜索 + 全选 一行（Auto Layout + 安全区，避免 viewDidLoad 时 bounds 未就绪导致溢出屏幕）
+    // 搜索 + 只看已隐藏 + 全选 一行（Auto Layout + 安全区，避免 viewDidLoad 时 bounds 未就绪导致溢出屏幕）
     UIView *bar = [[UIView alloc] initWithFrame:CGRectZero];
-    bar.translatesAutoresizingMaskIntoConstraints = NO; bar.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    bar.translatesAutoresizingMaskIntoConstraints = NO; bar.backgroundColor = [UIColor clearColor];
     [self.view addSubview:bar];
     _search = [[UISearchBar alloc] initWithFrame:CGRectZero];
     _search.translatesAutoresizingMaskIntoConstraints = NO; _search.placeholder = @"搜索 App"; _search.delegate = self;
+    _search.searchBarStyle = UISearchBarStyleDefault;
     [bar addSubview:_search];
     UIButton *all = [UIButton buttonWithType:UIButtonTypeSystem];
     all.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1035,8 +1049,9 @@ static NSArray *FUColorPalette(void) {
         [all.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
         [all.widthAnchor constraintEqualToConstant:56],
     ]];
-    _tv = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    _tv = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];   // v1.4.0：内嵌分组，和系统设置一致
     _tv.translatesAutoresizingMaskIntoConstraints = NO; _tv.delegate = self; _tv.dataSource = self;
+    _tv.backgroundColor = [UIColor clearColor];
     [self.view addSubview:_tv];
     [NSLayoutConstraint activateConstraints:@[
         [_tv.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
@@ -1096,9 +1111,10 @@ static NSArray *FUColorPalette(void) {
 }
 @end
 
-#pragma mark - 布局实时预览画布（与 tweak 内环形公式完全一致）
+#pragma mark - 布局实时预览画布（与 tweak 内布局公式完全一致）
 @interface FUPreviewView : UIView
 @property (nonatomic, assign) NSInteger side;        // 0=右 1=左
+@property (nonatomic, assign) NSInteger style;       // v1.4.0 0=扇形 1=Dock横排 2=九宫格 3=圆环
 @property (nonatomic, assign) CGFloat iconSize, iconGap;
 @property (nonatomic, assign) CGFloat spanL1, spanL2, spanL3;   // v1.3.41 逐层扇形角度
 @property (nonatomic, assign) CGFloat scaleL1, scaleL2, scaleL3; // v1.3.41 逐层距离%
@@ -1108,6 +1124,71 @@ static NSArray *FUColorPalette(void) {
 @end
 @implementation FUPreviewView
 - (void)refresh { [self setNeedsDisplay]; }
+// v1.4.0：非扇形风格的点位（预览坐标）——与 tweak 内 fuDock/fuGrid/fuRingPointArray 同一套算法。
+- (NSArray *)fuStylePoints:(NSInteger)style c:(CGPoint)c isz:(CGFloat)isz bs:(CGFloat)bs {
+    NSMutableArray *pts = [NSMutableArray array];
+    CGRect s = self.bounds;
+    NSInteger n = (NSInteger)_entries.count; if (n < 1) return pts;
+    CGFloat step  = isz + MAX(_iconGap, 8.0f) * (bs / 40.0f);
+    CGFloat baseR = bs/2.0f + isz/2.0f + _iconGap * (bs / 40.0f);
+    CGFloat m = 6.0f;
+    if (style == 1) {          // Dock横排
+        BOOL left = (c.x < s.size.width / 2.0f);
+        CGFloat dirX = left ? 1.0f : -1.0f;
+        CGFloat startX = c.x + dirX * baseR;
+        NSInteger perRow = 0;
+        for (NSInteger k = 0; k < n; k++) {
+            CGFloat x = startX + dirX * (CGFloat)k * step;
+            if (x - isz/2.0f < m || x + isz/2.0f > s.size.width - m) break;
+            perRow++;
+        }
+        if (perRow < 1) perRow = 1;
+        NSInteger rows = (n + perRow - 1) / perRow;
+        for (NSInteger i = 0; i < n; i++) {
+            CGFloat x = startX + dirX * (CGFloat)(i % perRow) * step;
+            CGFloat y = c.y + ((CGFloat)(i / perRow) - (CGFloat)(rows - 1) / 2.0f) * step;
+            [pts addObject:[NSValue valueWithCGPoint:CGPointMake(x, y)]];
+        }
+    } else if (style == 2) {   // 九宫格
+        CGFloat dirX = (c.x < s.size.width  / 2.0f) ? 1.0f : -1.0f;
+        CGFloat dirY = (c.y < s.size.height / 2.0f) ? 1.0f : -1.0f;
+        CGFloat x0 = c.x + dirX * (baseR + isz/2.0f);
+        CGFloat y0 = c.y + dirY * (baseR + isz/2.0f);
+        for (NSInteger i = 0; i < n; i++) {
+            CGFloat x = x0 + dirX * (CGFloat)(i % 3) * step;
+            CGFloat y = y0 + dirY * (CGFloat)(i / 3) * step;
+            [pts addObject:[NSValue valueWithCGPoint:CGPointMake(x, y)]];
+        }
+    } else {                   // 圆环
+        CGFloat R = baseR * MAX(0.6f, MIN(1.6f, (_scaleL1 > 0 ? _scaleL1 : 160.0f) / 100.0f));
+        CGFloat a0 = atan2f(s.size.height/2.0f - c.y, s.size.width/2.0f - c.x);
+        for (NSInteger i = 0; i < n; i++) {
+            CGFloat a = a0 + (CGFloat)i * 2.0f * (CGFloat)M_PI / (CGFloat)n;
+            [pts addObject:[NSValue valueWithCGPoint:CGPointMake(c.x + R * cosf(a), c.y + R * sinf(a))]];
+        }
+    }
+    // 统一收界：先围绕球心缩小，再平移（与 tweak fuFitPoints 同一套）
+    CGFloat half = isz / 2.0f;
+    for (CGFloat s2 = 1.0f; s2 >= 0.449f; s2 -= 0.05f) {
+        CGFloat minX = CGFLOAT_MAX, minY = CGFLOAT_MAX, maxX = -CGFLOAT_MAX, maxY = -CGFLOAT_MAX;
+        for (NSValue *v in pts) {
+            CGPoint p = v.CGPointValue;
+            CGFloat x = c.x + (p.x - c.x) * s2, y = c.y + (p.y - c.y) * s2;
+            minX = MIN(minX, x - half); maxX = MAX(maxX, x + half);
+            minY = MIN(minY, y - half); maxY = MAX(maxY, y + half);
+        }
+        if (minX >= m && minY >= m && maxX <= s.size.width - m && maxY <= s.size.height - m) {
+            NSMutableArray *out = [NSMutableArray array];
+            for (NSValue *v in pts) {
+                CGPoint p = v.CGPointValue;
+                [out addObject:[NSValue valueWithCGPoint:
+                    CGPointMake(c.x + (p.x - c.x) * s2, c.y + (p.y - c.y) * s2)]];
+            }
+            return out;
+        }
+    }
+    return pts;
+}
 // v1.3.8 修 02/06：预览与 tweak 内 openFan 用**同一套**公式（朝向按球位置、角度自适应收缩）。
 - (BOOL)fuSpanOKLayer:(int)layer sp:(CGFloat)sp center:(CGFloat)centerA radii:(const CGFloat *)R caps:(const NSInteger *)caps
             icon:(CGFloat)isz rect:(CGRect)sc ball:(CGPoint)c checkFit:(BOOL)checkFit {
@@ -1151,6 +1232,8 @@ static NSArray *FUColorPalette(void) {
                         MAX(0.6f,MIN(1.6f,(_scaleL3>0?_scaleL3:160.0f)/100.0f)) };
     CGFloat cx = (_side == 1) ? (bs/2.0f + 6.0f) : (s.size.width - bs/2.0f - 6.0f);
     CGPoint c = CGPointMake(cx, s.size.height * 0.5f);
+    // v1.4.0：非扇形风格 → 走各自点位公式绘制（与 tweak 同一套算法）
+    if (_style >= 1 && _style <= 3) { [self drawNonFanStyle:_style ctx:ctx s:s c:c bs:bs isz:isz]; return; }
     // ---- v1.3.41：三层半径（逐层距离）+ 数量驱动分层（与 tweak 内 fuFanPointArray 同一套公式）----
     CGFloat R[3];
     CGFloat baseR = bs/2.0f + isz/2.0f + _iconGap * k;
@@ -1253,6 +1336,44 @@ static NSArray *FUColorPalette(void) {
     CGContextSetFillColorWithColor(UIGraphicsGetCurrentContext(), col.CGColor);
     CGContextFillRect(UIGraphicsGetCurrentContext(), r);
 }
+// v1.4.0：Dock横排 / 九宫格 / 圆环 的预览绘制
+- (void)drawNonFanStyle:(NSInteger)style ctx:(CGContextRef)ctx s:(CGRect)s c:(CGPoint)c bs:(CGFloat)bs isz:(CGFloat)isz {
+    NSArray *pts = [self fuStylePoints:style c:c isz:isz bs:bs];
+    if (style == 1) {   // Dock：画出排面基线
+        CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:1.0 alpha:0.13].CGColor);
+        CGContextSetLineWidth(ctx, 1.0f);
+        for (NSValue *v in pts) {
+            CGPoint p = v.CGPointValue;
+            CGContextMoveToPoint(ctx, p.x - isz*0.62f, p.y + isz*0.72f);
+            CGContextAddLineToPoint(ctx, p.x + isz*0.62f, p.y + isz*0.72f);
+            CGContextStrokePath(ctx);
+        }
+    } else if (style == 2) {   // 九宫格：画出格线
+        CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:1.0 alpha:0.10].CGColor);
+        CGContextSetLineWidth(ctx, 1.0f);
+        for (NSValue *v in pts) {
+            CGPoint p = v.CGPointValue;
+            CGContextStrokeRect(ctx, CGRectMake(p.x - isz*0.62f, p.y - isz*0.62f, isz*1.24f, isz*1.24f));
+        }
+    }
+    [self fuCircleAt:c size:bs img:nil ch:@"URL" fs:bs*0.24f glass:YES];
+    for (NSUInteger i = 0; i < pts.count && i < (NSUInteger)_entries.count; i++) {
+        NSDictionary *e = _entries[i];
+        CGPoint p = [pts[i] CGPointValue];
+        NSData *ic = e[@"icon"];
+        UIImage *img = ([ic isKindOfClass:[NSData class]] && ic.length) ? [UIImage imageWithData:ic] : nil;
+        NSString *ch = e[@"char"] ?: @"";
+        if (!ch.length) ch = e[@"letter"] ?: @"";
+        if (!ch.length && !img) ch = [NSString stringWithFormat:@"%ld", (long)(i + 1)];
+        CGFloat fs = isz * 0.42f; if (ch.length >= 3) fs = isz * 0.26f; else if (ch.length == 2) fs = isz * 0.32f;
+        [self fuCircleAt:p size:isz img:img ch:ch fs:fs glass:NO];
+    }
+    NSArray *names = @[@"", @"Dock横排 · 一排展示，放不下自动折行", @"九宫格 · 3 列网格，朝屏幕内侧展开", @"圆环 · 围球一圈"];
+    NSString *cap = [NSString stringWithFormat:@"实际 %ld 个入口 · %@", (long)_entries.count, names[style]];
+    [cap drawInRect:CGRectMake(8, s.size.height - 18.0f, s.size.width - 16.0f, 14.0f) withAttributes:@{
+        NSFontAttributeName: [UIFont systemFontOfSize:9],
+        NSForegroundColorAttributeName: [UIColor colorWithWhite:1.0 alpha:0.45]}];
+}
 - (void)fuCircleAt:(CGPoint)ctr size:(CGFloat)d img:(UIImage *)img ch:(NSString *)ch fs:(CGFloat)fs glass:(BOOL)glass {
     CGContextRef ctx = UIGraphicsGetCurrentContext();
     CGRect r = CGRectMake(ctr.x - d/2.0f, ctr.y - d/2.0f, d, d);
@@ -1298,6 +1419,7 @@ static NSArray *FUColorPalette(void) {
 @property (nonatomic, strong) UILabel *ll1, *ll2, *ll3;
 @property (nonatomic, strong) UISegmentedControl *modeSeg;   // v1.3.8 吸附模式（0=自动吸附 1=全屏固定）
 @property (nonatomic, strong) UILabel *lmode;                  // 模式说明
+@property (nonatomic, strong) UISegmentedControl *styleSeg;    // v1.4.0 风格选择（0=扇形 1=横排 2=九宫格 3=圆环）
 @property (nonatomic, strong) UISlider *delayS;                // v1.3.13 吸附延时秒
 @property (nonatomic, strong) UILabel *ldelay;
 @property (nonatomic, strong) UISlider *fanHideS;              // v1.3.25 扇形闲置收回秒（整秒步进，最右=常驻）
@@ -1375,6 +1497,21 @@ static NSArray *FUColorPalette(void) {
     _preview.layer3   = [self prefInt:kFULayer3Count dft:0];
     [self loadEntriesForPreview];
     [_scroll addSubview:_preview]; y += ph + 12;
+    // ---- v1.4.0：风格选择（与吸附模式同款分段选择器）----
+    UILabel *stLab = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 16)];
+    stLab.font = [UIFont systemFontOfSize:12]; stLab.textColor = [UIColor secondaryLabelColor];
+    stLab.text = @"风格选择（四个角落 / 刘海位置自动适配）"; [_scroll addSubview:stLab]; y += 18;
+    _styleSeg = [[UISegmentedControl alloc] initWithItems:@[@"扇形", @"横排", @"九宫格", @"圆环"]];
+    _styleSeg.frame = CGRectMake(16, y, w - 32, 32);
+    _styleSeg.selectedSegmentIndex = [self prefInt:@"menuStyle" dft:0];
+    if (@available(iOS 13.0, *)) _styleSeg.selectedSegmentTintColor = [UIColor systemBlueColor];
+    [_styleSeg setTitleTextAttributes:@{NSForegroundColorAttributeName:[UIColor whiteColor]}
+                            forState:UIControlStateSelected];
+    [_styleSeg setTitleTextAttributes:@{NSForegroundColorAttributeName:[UIColor secondaryLabelColor]}
+                            forState:UIControlStateNormal];
+    [_styleSeg addTarget:self action:@selector(styleChanged:) forControlEvents:UIControlEventValueChanged];
+    [_scroll addSubview:_styleSeg]; y += 40;
+    _preview.style = _styleSeg.selectedSegmentIndex;
     // ---- v1.3.8 修 03：吸附模式改成真正的「分段选择器」：选中的一边蓝色、另一边灰色。
     //      以前是 0~1 的连续滑杆——手感怪，还能滑到 0.5 这种不左不右的中间值。----
     UILabel *mLab = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 16)];
@@ -1505,6 +1642,12 @@ static NSArray *FUColorPalette(void) {
     [self writeInt:kFUSnapMode value:(seg.selectedSegmentIndex == 1 ? 1 : 0)];
     [self refreshModeLabel];
 }
+// v1.4.0：风格选择回调
+- (void)styleChanged:(UISegmentedControl *)seg {
+    [self writeInt:@"menuStyle" value:seg.selectedSegmentIndex];
+    _preview.style = seg.selectedSegmentIndex;
+    [_preview refresh];
+}
 - (void)sliderChanged:(UISlider *)sl {
     CGFloat v = roundf(sl.value);
     NSString *key = nil; UILabel *l = nil; NSString *name = @"";
@@ -1550,6 +1693,8 @@ static NSArray *FUColorPalette(void) {
 }
 - (void)reset {
     _sideSeg.selectedSegmentIndex = 0; _modeSeg.selectedSegmentIndex = 0; [self refreshModeLabel];
+    _styleSeg.selectedSegmentIndex = 0; _preview.style = 0;   // v1.4.0：风格恢复扇形
+    [self writeInt:@"menuStyle" value:0];
     _ss.value = 24; _sg.value = 12;
     _scaleL1s.value = 160; _spanL1s.value = 180; _scaleL2s.value = 160; _spanL2s.value = 180; _scaleL3s.value = 160; _spanL3s.value = 180;
     _l1s.value = 0; _l2s.value = 0; _l3s.value = 0;   // v1.3.31：恢复默认 = 自动分层（按实际 URL 数量排）
@@ -1614,4 +1759,99 @@ static NSArray *FUColorPalette(void) {
     [self.navigationController pushViewController:g animated:YES]; }
 - (void)showAppList { FUAppListController *a = [[FUAppListController alloc] init];
     [self.navigationController pushViewController:a animated:YES]; }
+
+// ===== v1.4.0：一键备份 / 一键导入 =====
+// 备份 = 全部偏好键（urls / 黑名单 / 球外观 / 布局 / 球位置 / 各开关）打包成一个 plist，
+// 写到「文件」App 可见的 /var/mobile/Documents/，文件名：yyyyMMddHHmm-URL插件.plist。
+// 导入 = 自动挑 Documents 里最新一份备份，整包写回 cfprefsd + 磁盘镜像，发通知立即全局生效。
+static NSString *FUBackupDir(void) { return @"/var/mobile/Documents"; }
+- (void)fuAlert:(NSString *)t msg:(NSString *)m {
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:t message:m
+        preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+- (void)doBackup {
+    @try {
+        // 汇总：磁盘 plist 为底，cfprefsd 实时值覆盖（两者本就同源同步，这里取并集最稳）
+        NSMutableDictionary *dump = [NSMutableDictionary dictionary];
+        NSDictionary *disk = [NSDictionary dictionaryWithContentsOfFile:
+            @"/var/mobile/Library/Preferences/com.yzdmm.floatingurl.plist"];
+        if (![disk isKindOfClass:[NSDictionary class]])
+            disk = [NSDictionary dictionaryWithContentsOfFile:
+            @"/var/jb/var/mobile/Library/Preferences/com.yzdmm.floatingurl.plist"];
+        if ([disk isKindOfClass:[NSDictionary class]]) [dump addEntriesFromDictionary:disk];
+        NSArray *keys = @[@"enabled",@"url",@"urls",@"enabledApps",@"side",@"iconSize",@"iconGap",
+            @"fanSpan",@"fanScale",@"fanSpanL1",@"fanSpanL2",@"fanSpanL3",
+            @"fanScaleL1",@"fanScaleL2",@"fanScaleL3",@"fanAutoHide",
+            @"layer1",@"layer2",@"layer3",@"snapMode",@"menuStyle",@"webMode",@"snapDelay",
+            @"ballTitle",@"ballIcon",@"ballIconLeft",@"ballIconRight",@"ballColor",
+            @"ballX",@"ballY",@"edgeGuard",@"captureHide"];
+        for (NSString *k in keys) {
+            CFPropertyListRef v = CFPreferencesCopyAppValue((__bridge CFStringRef)k, (__bridge CFStringRef)kFUSuite);
+            if (v) { dump[k] = CFBridgingRelease(v); }
+        }
+        dump[@"fuBackupMarker"] = @"FloatingURL-1.4.0";
+        if (dump.count <= 1) { [self fuAlert:@"没有可备份的设置" msg:@"先去添加快捷 URI 再备份。"]; return; }
+        NSDateFormatter *f = [[NSDateFormatter alloc] init];
+        f.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+        f.dateFormat = @"yyyyMMddHHmm";
+        NSString *name = [NSString stringWithFormat:@"%@-URL插件.plist", [f stringFromDate:[NSDate date]]];
+        NSString *path = [FUBackupDir() stringByAppendingPathComponent:name];
+        NSError *err = nil;
+        if (![dump writeToFile:path atomically:YES error:&err]) {
+            [self fuAlert:@"备份失败" msg:[NSString stringWithFormat:@"无法写入 %@\n%@", path,
+                (err.localizedDescription ?: @"权限被拒")]];
+            return;
+        }
+        [self fuAlert:@"备份完成" msg:[NSString stringWithFormat:@"已保存到「文件」App 可见目录：\n%@\n\n重装后点「一键导入」即可原样恢复。", name]];
+    } @catch (NSException *e) { [self fuAlert:@"备份失败" msg:e.description]; }
+}
+- (void)doRestore {
+    @try {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSArray *files = [fm contentsOfDirectoryAtPath:FUBackupDir() error:NULL];
+        NSString *best = nil;
+        for (NSString *f in files) {
+            if (![f hasSuffix:@".plist"]) continue;
+            if (![f containsString:@"URL插件"]) continue;
+            // 文件名以时间戳开头 → 字典序即时间序，取最新一份
+            if (!best || [f compare:best options:NSNumericSearch] == NSOrderedDescending) best = f;
+        }
+        if (!best) {
+            [self fuAlert:@"没有找到备份" msg:[NSString stringWithFormat:
+                @"「文件」目录里没有 *URL插件.plist 备份文件。\n请先用「一键备份」生成。"]];
+            return;
+        }
+        NSString *path = [FUBackupDir() stringByAppendingPathComponent:best];
+        NSDictionary *dump = [NSDictionary dictionaryWithContentsOfFile:path];
+        if (![dump isKindOfClass:[NSDictionary class]] || dump.count < 2 ||
+            ![dump[@"fuBackupMarker"] isKindOfClass:[NSString class]]) {
+            [self fuAlert:@"备份文件无效" msg:best]; return;
+        }
+        // ① 写回 cfprefsd（Preferences 框架与本页读取都走它）
+        for (NSString *k in dump) {
+            if ([k isEqualToString:@"fuBackupMarker"]) continue;
+            CFPreferencesSetAppValue((__bridge CFStringRef)k,
+                (__bridge CFPropertyListRef)dump[k], (__bridge CFStringRef)kFUSuite);
+        }
+        CFPreferencesAppSynchronize((__bridge CFStringRef)kFUSuite);
+        // ② 写回磁盘镜像（tweak 端只读磁盘，整包替换保持同源）
+        static NSString *const paths[] = {
+            @"/var/mobile/Library/Preferences/com.yzdmm.floatingurl.plist",
+            @"/var/jb/var/mobile/Library/Preferences/com.yzdmm.floatingurl.plist", nil
+        };
+        NSString *target = paths[0];
+        for (NSInteger i = 0; paths[i]; i++) {
+            NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:paths[i]];
+            if ([d isKindOfClass:[NSDictionary class]]) { target = paths[i]; break; }
+        }
+        [dump writeToFile:target atomically:YES];
+        // ③ 通知 SpringBoard 立即重读（球 / 扇形 / 开关秒级生效，无需注销）
+        notify_post("com.yzdmm.floatingurl/settingsChanged");
+        [self fuAlert:@"导入完成" msg:[NSString stringWithFormat:
+            @"已恢复 %lu 项设置（快捷 URI / 布局 / 球外观 / 黑名单）。\n来源：%@",
+            (unsigned long)(dump.count - 1), best]];
+    } @catch (NSException *e) { [self fuAlert:@"导入失败" msg:e.description]; }
+}
 @end
