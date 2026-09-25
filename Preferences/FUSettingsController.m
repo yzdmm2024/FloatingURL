@@ -1003,7 +1003,13 @@ static NSArray *FUColorPalette(void) {
 - (void)viewDidLoad {
     [super viewDidLoad]; self.title = @"隐藏悬浮窗的 App";
     // v1.4.0 排版统一：页面底色/列表样式对齐系统设置（内嵌分组），搜索栏不再是突兀的灰块
-    self.view.backgroundColor = [UIColor systemGroupedBackground];
+    // （SDK 头里 systemGroupedBackground 不可见，用动态 provider 自己给一组明/暗色）
+    self.view.backgroundColor = [UIColor colorWithDynamicProvider:
+        ^UIColor *(UITraitCollection *t) {
+            return t.userInterfaceStyle == UIUserInterfaceStyleDark
+                ? [UIColor colorWithRed:0.07f green:0.07f blue:0.09f alpha:1.0f]
+                : [UIColor colorWithRed:0.949f green:0.949f blue:0.969f alpha:1.0f];
+        }];
     // 顶部说明条
     _countLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     _countLabel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1798,10 +1804,8 @@ static NSString *FUBackupDir(void) { return @"/var/mobile/Documents"; }
         f.dateFormat = @"yyyyMMddHHmm";
         NSString *name = [NSString stringWithFormat:@"%@-URL插件.plist", [f stringFromDate:[NSDate date]]];
         NSString *path = [FUBackupDir() stringByAppendingPathComponent:name];
-        NSError *err = nil;
-        if (![dump writeToFile:path atomically:YES error:&err]) {
-            [self fuAlert:@"备份失败" msg:[NSString stringWithFormat:@"无法写入 %@\n%@", path,
-                (err.localizedDescription ?: @"权限被拒")]];
+        if (![dump writeToFile:path atomically:YES]) {
+            [self fuAlert:@"备份失败" msg:[NSString stringWithFormat:@"无法写入 %@（权限被拒）", path]];
             return;
         }
         [self fuAlert:@"备份完成" msg:[NSString stringWithFormat:@"已保存到「文件」App 可见目录：\n%@\n\n重装后点「一键导入」即可原样恢复。", name]];
