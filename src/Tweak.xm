@@ -801,6 +801,7 @@ static NSArray<NSString *> *fuPrefsCandidates(NSString *abs) {
     NSInteger             _webMode;          // v1.3.5 0=系统浏览器 1=内置面板
     UIImageView          *_ballImageView;    // v1.3.5 球图标显示
     BOOL                  _draggingBall;     // v1.3.5 拖动中（避免 1s 轮询把 alpha 抢回去）
+    BOOL                  _draggingFanGroup; // v1.4.2 拖动展开的图标在移动整组（拦截紧随的 TouchUpInside 误触）
     NSString             *_frontBid;         // v1.3.2 当前前台 App 的 bundle id（来自 Darwin 心跳）
     CFAbsoluteTime        _frontBidTs;       // 心跳时间戳（>3s 视为过期）
     NSMutableSet         *_frontWatched;     // 已注册通知监听的黑名单 bundle id
@@ -1782,11 +1783,17 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
 }
 // v1.4.0：把点位整体收进屏幕 —— 先围绕球心等比缩小（100% → 45%，每档 5%），
 // 任一档所有图标都进界（含顶部安全区）就用该档；都不行再按 45% + 整体平移兜底。
+// v1.4.2 抛光（修两个真机反馈）：
+//   ① 「图标压住悬浮球」—— 收界平移兜底后，靠球那侧的图标可能被推到球身上
+//      （圆环/九宫格球贴边时最明显）。最后统一做「不压球」径向修正。
+//   ② 「角落里图标挤成一坨」—— 缩档 + 平移后相邻图标会叠。加迭代松弛，
+//      两两推开到最小间距，推完再收界，几轮收敛后既分得开又不出屏。
 - (NSArray *)fuFitPoints:(NSArray *)inPts around:(CGPoint)c icon:(CGFloat)isz margin:(CGFloat)m {
     if (!_overlay || inPts.count == 0) return inPts;
     CGRect sc = _overlay.bounds;
     CGFloat top = [self fuTopInset];
     CGFloat half = isz / 2.0f;
+    NSMutableArray *out = nil;
     for (CGFloat s2 = 1.0f; s2 >= 0.449f; s2 -= 0.05f) {
         CGFloat minX = CGFLOAT_MAX, minY = CGFLOAT_MAX, maxX = -CGFLOAT_MAX, maxY = -CGFLOAT_MAX;
         for (NSValue *v in inPts) {
@@ -1796,34 +1803,85 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
             minY = MIN(minY, y - half); maxY = MAX(maxY, y + half);
         }
         if (minX >= m && minY >= top && maxX <= sc.size.width - m && maxY <= sc.size.height - m) {
-            NSMutableArray *out = [NSMutableArray array];
+            out = [NSMutableArray array];
             for (NSValue *v in inPts) {
                 CGPoint p = v.CGPointValue;
                 [out addObject:[NSValue valueWithCGPoint:
                     CGPointMake(c.x + (p.x - c.x) * s2, c.y + (p.y - c.y) * s2)]];
             }
-            return out;
+            break;
         }
     }
-    // 兜底：45% 缩放后仍放不下 → 整体平移（保持间距不重叠），顶边按安全区算
-    CGFloat s2 = 0.45f;
-    CGFloat minX = CGFLOAT_MAX, minY = CGFLOAT_MAX, maxX = -CGFLOAT_MAX, maxY = -CGFLOAT_MAX;
-    for (NSValue *v in inPts) {
-        CGPoint p = v.CGPointValue;
-        CGFloat x = c.x + (p.x - c.x) * s2, y = c.y + (p.y - c.y) * s2;
-        minX = MIN(minX, x - half); maxX = MAX(maxX, x + half);
-        minY = MIN(minY, y - half); maxY = MAX(maxY, y + half);
+    if (!out) {
+        // 兜底：45% 缩放后仍放不下 → 整体平移（保持间距不重叠），顶边按安全区算
+        CGFloat s2 = 0.45f;
+        CGFloat minX = CGFLOAT_MAX, minY = CGFLOAT_MAX, maxX = -CGFLOAT_MAX, maxY = -CGFLOAT_MAX;
+        for (NSValue *v in inPts) {
+            CGPoint p = v.CGPointValue;
+            CGFloat x = c.x + (p.x - c.x) * s2, y = c.y + (p.y - c.y) * s2;
+            minX = MIN(minX, x - half); maxX = MAX(maxX, x + half);
+            minY = MIN(minY, y - half); maxY = MAX(maxY, y + half);
+        }
+        CGFloat dx = 0, dy = 0;
+        if (minX < m) dx = m - minX;
+        if (minY < top) dy = top - minY;
+        if (maxX > sc.size.width  - m) dx = (sc.size.width  - m) - maxX;
+        if (maxY > sc.size.height - m) dy = (sc.size.height - m) - maxY;
+        out = [NSMutableArray array];
+        for (NSValue *v in inPts) {
+            CGPoint p = v.CGPointValue;
+            [out addObject:[NSValue valueWithCGPoint:
+                CGPointMake(c.x + (p.x - c.x) * s2 + dx, c.y + (p.y - c.y) * s2 + dy)]];
+        }
     }
-    CGFloat dx = 0, dy = 0;
-    if (minX < m) dx = m - minX;
-    if (minY < top) dy = top - minY;
-    if (maxX > sc.size.width  - m) dx = (sc.size.width  - m) - maxX;
-    if (maxY > sc.size.height - m) dy = (sc.size.height - m) - maxY;
-    NSMutableArray *out = [NSMutableArray array];
-    for (NSValue *v in inPts) {
-        CGPoint p = v.CGPointValue;
-        [out addObject:[NSValue valueWithCGPoint:
-            CGPointMake(c.x + (p.x - c.x) * s2 + dx, c.y + (p.y - c.y) * s2 + dy)]];
+    // ---- v1.4.2 抛光：不压球 + 去重叠 + 收界，迭代到稳定 ----
+    CGFloat minBallDist = kFUButtonSize / 2.0f + isz / 2.0f + 4.0f;   // 图标中心到球心的最小距离
+    CGFloat minIconDist = isz + 4.0f;                                  // 图标中心两两最小距离
+    for (NSInteger iter = 0; iter < 6; iter++) {
+        BOOL moved = NO;
+        // ① 图标间去重叠：两两距离不足 → 沿连线各推开一半
+        for (NSInteger i = 0; i < (NSInteger)out.count; i++) {
+            for (NSInteger j = i + 1; j < (NSInteger)out.count; j++) {
+                CGPoint a = [out[i] CGPointValue], b = [out[j] CGPointValue];
+                CGFloat ddx = b.x - a.x, ddy = b.y - a.y;
+                CGFloat d = sqrtf(ddx * ddx + ddy * ddy);
+                if (d < minIconDist) {
+                    CGFloat push, ux, uy;
+                    if (d < 0.01f) { push = minIconDist / 2.0f; ux = 1.0f; uy = 0.0f; }  // 完全重叠 → 随机向右错开
+                    else { push = (minIconDist - d) / 2.0f; ux = ddx / d; uy = ddy / d; }
+                    a.x -= ux * push; a.y -= uy * push;
+                    b.x += ux * push; b.y += uy * push;
+                    out[i] = [NSValue valueWithCGPoint:a];
+                    out[j] = [NSValue valueWithCGPoint:b];
+                    moved = YES;
+                }
+            }
+        }
+        // ② 不压球：离球心太近的图标沿径向推出去
+        for (NSInteger i = 0; i < (NSInteger)out.count; i++) {
+            CGPoint p = [out[i] CGPointValue];
+            CGFloat ddx = p.x - c.x, ddy = p.y - c.y;
+            CGFloat d = sqrtf(ddx * ddx + ddy * ddy);
+            if (d < minBallDist) {
+                CGFloat ux = (d > 0.01f) ? ddx / d : 0.0f, uy = (d > 0.01f) ? ddy / d : -1.0f;
+                if (d < 0.01f) { ux = 0.0f; uy = -1.0f; }   // 正好压在球心 → 朝上推
+                p.x = c.x + ux * minBallDist;
+                p.y = c.y + uy * minBallDist;
+                out[i] = [NSValue valueWithCGPoint:p];
+                moved = YES;
+            }
+        }
+        // ③ 收界：推出去的图标 clamp 回屏内（含刘海安全区）
+        for (NSInteger i = 0; i < (NSInteger)out.count; i++) {
+            CGPoint p = [out[i] CGPointValue];
+            CGFloat x = MAX(m, MIN(sc.size.width  - m, p.x));
+            CGFloat y = MAX(top, MIN(sc.size.height - m, p.y));
+            if (fabs(x - p.x) > 0.01f || fabs(y - p.y) > 0.01f) {
+                out[i] = [NSValue valueWithCGPoint:CGPointMake(x, y)];
+                moved = YES;
+            }
+        }
+        if (!moved) break;
     }
     return out;
 }
@@ -1858,30 +1916,33 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
     }
     return [self fuFitPoints:pts around:c icon:isz margin:m];
 }
-// v1.4.0 九宫格：3 列网格，最近的一角对着球、朝屏幕内侧展开（角落自动斜向内）。
+// v1.4.2 九宫格重做：以球为中心的 3 列网格 —— 球占正中一格，图标围绕球对称展开
+// （正十字/四角都有图标，和扇形一样「从悬浮为中心点到」），不再单向铺开。
+// 放不下的格子溢出到更多行，球始终处于网格中央带；收界交给 fuFitPoints（含不压球抛光）。
 - (NSArray *)fuGridPointArray {
     NSMutableArray *pts = [NSMutableArray array];
     if (!_ball || !_overlay) return pts;
-    CGRect sc = _overlay.bounds;
     CGPoint c = CGPointMake(CGRectGetMidX(_ball.frame), CGRectGetMidY(_ball.frame));
     CGFloat isz = _iconSize;
     CGFloat step = isz + MAX(_iconGap, 8.0f);
-    CGFloat baseR = kFUButtonSize/2.0f + isz/2.0f + _iconGap;
     NSInteger n = (NSInteger)_entries.count;
     NSInteger cols = 3;
-    CGFloat dirX = (c.x < sc.size.width  / 2.0f) ? 1.0f : -1.0f;
-    CGFloat dirY = (c.y < sc.size.height / 2.0f) ? 1.0f : -1.0f;
-    CGFloat x0 = c.x + dirX * (baseR + isz/2.0f);
-    CGFloat y0 = c.y + dirY * (baseR + isz/2.0f);
-    for (NSInteger i = 0; i < n; i++) {
-        NSInteger r = i / cols, k = i % cols;
-        CGFloat x = x0 + dirX * (CGFloat)k * step;
-        CGFloat y = y0 + dirY * (CGFloat)r * step;
-        [pts addObject:[NSValue valueWithCGPoint:CGPointMake(x, y)]];
+    NSInteger rows = (NSInteger)ceilf((CGFloat)(n + 1) / (CGFloat)cols);   // +1 = 中心格留给球
+    NSInteger placed = 0;
+    for (NSInteger r = 0; r < rows && placed < n; r++) {
+        CGFloat y = c.y + ((CGFloat)r - (CGFloat)(rows - 1) / 2.0f) * step;
+        for (NSInteger k = 0; k < cols && placed < n; k++) {
+            // 中列正中那格 = 球的位子（奇数行网格）；偶数行网格没有正中格，全部放图标
+            if (k == 1 && rows % 2 == 1 && r == (rows - 1) / 2) continue;
+            CGFloat x = c.x + ((CGFloat)k - 1.0f) * step;
+            [pts addObject:[NSValue valueWithCGPoint:CGPointMake(x, y)]];
+            placed++;
+        }
     }
     return [self fuFitPoints:pts around:c icon:isz margin:6.0f];
 }
 // v1.4.0 圆环：所有图标围球一圈（360° 均布），起始角朝屏幕中心；半径跟随「第一层·距离」滑杆。
+// v1.4.2：半径加下限（图标不压球的几何下限），球贴边被收界平移时圆环整体挪到球旁边、不与球重叠。
 - (NSArray *)fuRingPointArray {
     NSMutableArray *pts = [NSMutableArray array];
     if (!_ball || !_overlay) return pts;
@@ -1890,6 +1951,7 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
     CGFloat isz = _iconSize;
     CGFloat baseR = kFUButtonSize/2.0f + isz/2.0f + _iconGap;
     CGFloat R = baseR * (_fanScaleL1 > 0 ? _fanScaleL1 / 100.0f : 1.6f);
+    R = MAX(R, kFUButtonSize / 2.0f + isz / 2.0f + 6.0f);   // v1.4.2 下限：绝不压球
     NSInteger n = (NSInteger)_entries.count;
     CGFloat a0 = atan2f(sc.size.height / 2.0f - c.y, sc.size.width / 2.0f - c.x);
     for (NSInteger i = 0; i < n; i++) {
@@ -2041,7 +2103,46 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
     UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
         initWithTarget:self action:@selector(fanItemLongPressed:)];
     [it addGestureRecognizer:lp];
+    // v1.4.2：拖动展开的图标 = 移动整个菜单组（球+图标一起跟手）。
+    // 场景：球在角落展开后图标全挤在屏边，球被图标群围住拖不动 —— 直接按住任意图标
+    // 往屏内拉，整组就出来了（用户点名要的「拖动展示出来的快捷URL拉出来」）。
+    // 不吞触摸（cancelsTouchesInView=NO），松手那次触摸可能触发按钮的 TouchUpInside ——
+    // 由 _draggingFanGroup 旗标在 fanItemTapped 里拦截。
+    UIPanGestureRecognizer *ip = [[UIPanGestureRecognizer alloc]
+        initWithTarget:self action:@selector(panFanItem:)];
+    ip.cancelsTouchesInView = NO;
+    [it addGestureRecognizer:ip];
     return it;
+}
+// v1.4.2：拖动已展开的快捷图标 → 整组（球 + 图标）跟手移动。任何位置都可用，
+// 主要价值在角落：图标群把球围死时，从图标把它拉出来。
+- (void)panFanItem:(UIPanGestureRecognizer *)g {
+    if (!_ball || !_overlay) return;
+    if (g.state == UIGestureRecognizerStateBegan) {
+        _draggingFanGroup = YES;
+        _ballDragOrigin = _ball.frame.origin;
+        _ball.alpha = 1.0f; _draggingBall = YES;   // 复用拖球态：轮询不抢 alpha、系统边让位
+        [self cancelPendingSnap];
+        [self fuRefreshDeferredEdges];
+    }
+    else if (g.state == UIGestureRecognizerStateChanged) {
+        CGPoint t = [g translationInView:_overlay];
+        CGRect f = _ball.frame;
+        CGFloat topInset = [self fuTopInset];
+        f.origin.x = MAX(0, MIN(_overlay.bounds.size.width  - f.size.width,  _ballDragOrigin.x + t.x));
+        f.origin.y = MAX(topInset, MIN(_overlay.bounds.size.height - f.size.height, _ballDragOrigin.y + t.y));
+        _ball.frame = f;
+        [self fuRelayoutFanInstant];   // 图标围绕球实时重排（同一套算法，跟手）
+    }
+    else if (g.state == UIGestureRecognizerStateEnded || g.state == UIGestureRecognizerStateCancelled) {
+        _draggingBall = NO;
+        // 异步清旗标：松手那次触摸的 TouchUpInside 在本 runloop 触发时旗标还在，拦得住
+        __weak typeof(self) wself = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ wself->_draggingFanGroup = NO; });
+        if (g.state == UIGestureRecognizerStateEnded) [self scheduleSnapAfterDrop];
+        [self fuRefreshDeferredEdges];
+        if (_fanOpen) [self fuScheduleFanAutoHide];
+    }
 }
 // v1.3.3：把 #RRGGBB / #RGB 解析成 UIColor（入口自定义图标底色用）。
 - (UIColor *)fuColorFromHex:(NSString *)hex {
@@ -2060,6 +2161,7 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
                               blue:(v & 0xFF)        / 255.0f alpha:1.0f];
 }
 - (void)fanItemTapped:(UIButton *)sender {
+    if (_draggingFanGroup) return;   // v1.4.2：拖动整组松手的那次触摸不是点击，别误开 URL
     NSInteger idx = sender.tag; if (idx < 0 || idx >= (NSInteger)_entries.count) { [self closeFan]; return; }
     NSDictionary *entry = _entries[idx]; [self closeFan];
     [self triggerEntry:entry];
