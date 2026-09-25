@@ -768,10 +768,13 @@ static NSArray *FUColorPalette(void) {
 }
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.edgesForExtendedLayout = UIRectEdgeNone;      // 让系统把内容排到导航栏下方
+    // v1.4.1 统一 UI：删掉 edgesForExtendedLayout=UIRectEdgeNone（它让导航栏后面露出
+    // Settings 窗口的灰底 → 本页顶上多一条灰带，和「布局调节/悬浮球外观」的白导航不一致）。
+    // 现在所有子页统一：白色页面背景 + 内容延伸到导航栏下 + 内嵌分组表格。
     [self loadEntries];
     self.view.backgroundColor = [UIColor systemBackgroundColor];
-    _tv = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStylePlain];
+    _tv = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleInsetGrouped];
+    _tv.backgroundColor = [UIColor clearColor];
     _tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     _tv.delegate = self; _tv.dataSource = self;
     _tv.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
@@ -877,7 +880,10 @@ static NSArray *FUColorPalette(void) {
         @{@"t":@"㉗ 直达本插件设置", @"c":@"prefs:root=FloatingURLPrefs", @"d":@"本插件设置页 ID 就是 FloatingURLPrefs，填这个可一键跳到「悬浮URL」设置页。同理 prefs:root=snapper4_Freeze 这类写法要生效，前提是设备上真装了那个插件、且它的设置面板名字与冒号后的 ID 完全一致。"},
         @{@"t":@"㉙ Snapper 4 深链", @"c":@"设置→Snapper 4→URL 深链 自查", @"d":@"把下面任意一条填进快捷入口，点一下直接触发（不会打开设置）。官方 id 全小写：\nprefs:root=snapper4_freeze 冻结截图\nprefs:root=snapper4_long 长截图\nprefs:root=screenshot-shell 仅截屏套壳\nprefs:root=screenshot-watermark 仅截图水印\nprefs:root=screenshot-both 截屏套壳＋水印\nprefs:root=screenshot-off 关闭截屏套壳/水印\nprefs:root=recording-shell 仅录屏套壳\nprefs:root=recording-watermark 仅录屏水印\nprefs:root=recording-both 录屏套壳＋水印\nprefs:root=recording-off 关闭录屏套壳/水印\n注意：写成 snapper4_Freeze 这类大写匹配不到；前提是设备真装了 Snapper 4 且它的设置面板 ID 与冒号后完全一致。"},
     ];
-    _tv = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleGrouped];
+    // v1.4.1 统一 UI：白色页面 + 内嵌分组表格，与其他子页一致
+    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    _tv = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleInsetGrouped];
+    _tv.backgroundColor = [UIColor clearColor];
     _tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     _tv.delegate = self; _tv.dataSource = self; [self.view addSubview:_tv];
     UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(longPress:)];
@@ -936,9 +942,20 @@ static NSArray *FUColorPalette(void) {
     if (r) { NSArray *a = (__bridge_transfer NSArray *)r; if ([a isKindOfClass:[NSArray class]]) [_selected addObjectsFromArray:a]; }
     // v1.4.0 修「点进去卡一会才进去」：几百个 App 逐个取图标原来在主线程同步做，
     // 进页面直接卡死主线程。整体搬到后台线程，主线程只收结果刷新表格。
+    // v1.4.1 再提速：进程内缓存一份 App 列表（图标+名字），第二次进页面直接秒出。
     _countLabel.text = @"正在加载 App 列表…";
     __weak FUAppListController *ws = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        static NSMutableArray *cachedRows = nil;   // 进程级缓存
+        if (cachedRows.count > 0) {
+            NSArray *hit = [cachedRows copy];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                FUAppListController *ss = ws; if (!ss) return;
+                ss->_allApps = [hit mutableCopy];
+                [ss applyFilter:ss->_search.text ?: @""];
+            });
+            return;
+        }
         NSMutableArray *rows = [NSMutableArray array];
         Class wsCls = NSClassFromString(@"LSApplicationWorkspace");
         id ws2 = wsCls ? [wsCls performSelector:@selector(defaultWorkspace)] : nil;
@@ -974,6 +991,7 @@ static NSArray *FUColorPalette(void) {
         [rows sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b){
             return [a[@"name"] localizedCaseInsensitiveCompare:b[@"name"]];
         }];
+        cachedRows = rows;   // v1.4.1：缓存，下次进页面秒出
         dispatch_async(dispatch_get_main_queue(), ^{
             FUAppListController *ss = ws; if (!ss) return;
             ss->_allApps = rows;
@@ -1002,14 +1020,8 @@ static NSArray *FUColorPalette(void) {
 }
 - (void)viewDidLoad {
     [super viewDidLoad]; self.title = @"隐藏悬浮窗的 App";
-    // v1.4.0 排版统一：页面底色/列表样式对齐系统设置（内嵌分组），搜索栏不再是突兀的灰块
-    // （SDK 头里 systemGroupedBackground 不可见，用动态 provider 自己给一组明/暗色）
-    self.view.backgroundColor = [UIColor colorWithDynamicProvider:
-        ^UIColor *(UITraitCollection *t) {
-            return t.userInterfaceStyle == UIUserInterfaceStyleDark
-                ? [UIColor colorWithRed:0.07f green:0.07f blue:0.09f alpha:1.0f]
-                : [UIColor colorWithRed:0.949f green:0.949f blue:0.969f alpha:1.0f];
-        }];
+    // v1.4.1 统一 UI：白底与「布局调节/悬浮球外观/快捷URI」一致（原来是灰底显突兀）
+    self.view.backgroundColor = [UIColor systemBackgroundColor];
     // 顶部说明条
     _countLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     _countLabel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1486,6 +1498,22 @@ static NSArray *FUColorPalette(void) {
     // ---- v1.3.8 修 06：预览改矮（按屏高自适应，最多占 1/3 屏），保证下面的调节滑杆也在一屏内。
     //      以前是 pw*1.5（约 540pt），把整页调节项全部顶到第二屏去了。----
     CGFloat y = 10, pw = w - 32;
+    // ---- v1.4.1：风格选择提到页面最顶上（第一眼就能看到，不用再往下找）----
+    UILabel *stLab = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 16)];
+    stLab.font = [UIFont systemFontOfSize:12]; stLab.textColor = [UIColor secondaryLabelColor];
+    stLab.text = @"风格选择（四个角落 / 刘海位置自动适配）"; [_scroll addSubview:stLab]; y += 18;
+    _styleSeg = [[UISegmentedControl alloc] initWithItems:@[@"扇形", @"横排", @"九宫格", @"圆环"]];
+    _styleSeg.frame = CGRectMake(16, y, w - 32, 32);
+    _styleSeg.selectedSegmentIndex = [self prefInt:@"menuStyle" dft:0];
+    if (@available(iOS 13.0, *)) _styleSeg.selectedSegmentTintColor = [UIColor systemBlueColor];
+    [_styleSeg setTitleTextAttributes:@{NSForegroundColorAttributeName:[UIColor whiteColor]}
+                            forState:UIControlStateSelected];
+    [_styleSeg setTitleTextAttributes:@{NSForegroundColorAttributeName:[UIColor secondaryLabelColor]}
+                            forState:UIControlStateNormal];
+    [_styleSeg addTarget:self action:@selector(styleChanged:) forControlEvents:UIControlEventValueChanged];
+    [_scroll addSubview:_styleSeg]; y += 40;
+    // ---- v1.3.8 修 06：预览改矮（按屏高自适应，最多占 1/3 屏），保证下面的调节滑杆也在一屏内。
+    //      以前是 pw*1.5（约 540pt），把整页调节项全部顶到第二屏去了。----
     CGFloat ph = MIN(pw * 1.06f, H * 0.33f);
     _preview = [[FUPreviewView alloc] initWithFrame:CGRectMake(16, y, pw, ph)];
     _preview.layer.cornerRadius = 14; _preview.clipsToBounds = YES;
@@ -1503,21 +1531,7 @@ static NSArray *FUColorPalette(void) {
     _preview.layer3   = [self prefInt:kFULayer3Count dft:0];
     [self loadEntriesForPreview];
     [_scroll addSubview:_preview]; y += ph + 12;
-    // ---- v1.4.0：风格选择（与吸附模式同款分段选择器）----
-    UILabel *stLab = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 16)];
-    stLab.font = [UIFont systemFontOfSize:12]; stLab.textColor = [UIColor secondaryLabelColor];
-    stLab.text = @"风格选择（四个角落 / 刘海位置自动适配）"; [_scroll addSubview:stLab]; y += 18;
-    _styleSeg = [[UISegmentedControl alloc] initWithItems:@[@"扇形", @"横排", @"九宫格", @"圆环"]];
-    _styleSeg.frame = CGRectMake(16, y, w - 32, 32);
-    _styleSeg.selectedSegmentIndex = [self prefInt:@"menuStyle" dft:0];
-    if (@available(iOS 13.0, *)) _styleSeg.selectedSegmentTintColor = [UIColor systemBlueColor];
-    [_styleSeg setTitleTextAttributes:@{NSForegroundColorAttributeName:[UIColor whiteColor]}
-                            forState:UIControlStateSelected];
-    [_styleSeg setTitleTextAttributes:@{NSForegroundColorAttributeName:[UIColor secondaryLabelColor]}
-                            forState:UIControlStateNormal];
-    [_styleSeg addTarget:self action:@selector(styleChanged:) forControlEvents:UIControlEventValueChanged];
-    [_scroll addSubview:_styleSeg]; y += 40;
-    _preview.style = _styleSeg.selectedSegmentIndex;
+    _preview.style = _styleSeg.selectedSegmentIndex;   // v1.4.1：预览跟随顶部风格选择
     // ---- v1.3.8 修 03：吸附模式改成真正的「分段选择器」：选中的一边蓝色、另一边灰色。
     //      以前是 0~1 的连续滑杆——手感怪，还能滑到 0.5 这种不左不右的中间值。----
     UILabel *mLab = [[UILabel alloc] initWithFrame:CGRectMake(16, y, w-32, 16)];
@@ -1727,7 +1741,7 @@ static NSArray *FUColorPalette(void) {
 @end
 
 #pragma mark - 主设置控制器
-@interface FUSettingsController : PSListController
+@interface FUSettingsController : PSListController <UIDocumentPickerDelegate>
 @end
 @implementation FUSettingsController
 - (id)specifiers {
@@ -1797,7 +1811,7 @@ static NSString *FUBackupDir(void) { return @"/var/mobile/Documents"; }
             CFPropertyListRef v = CFPreferencesCopyAppValue((__bridge CFStringRef)k, (__bridge CFStringRef)kFUSuite);
             if (v) { dump[k] = CFBridgingRelease(v); }
         }
-        dump[@"fuBackupMarker"] = @"FloatingURL-1.4.0";
+        dump[@"fuBackupMarker"] = @"FloatingURL-1.4.1";
         if (dump.count <= 1) { [self fuAlert:@"没有可备份的设置" msg:@"先去添加快捷 URI 再备份。"]; return; }
         NSDateFormatter *f = [[NSDateFormatter alloc] init];
         f.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
@@ -1808,9 +1822,19 @@ static NSString *FUBackupDir(void) { return @"/var/mobile/Documents"; }
             [self fuAlert:@"备份失败" msg:[NSString stringWithFormat:@"无法写入 %@（权限被拒）", path]];
             return;
         }
-        [self fuAlert:@"备份完成" msg:[NSString stringWithFormat:@"已保存到「文件」App 可见目录：\n%@\n\n重装后点「一键导入」即可原样恢复。", name]];
+        // v1.4.1：备份成功后直接弹系统分享面板 —— 可选「存储到文件 / iCloud 盘 / 发给自己」。
+        // 文件同时已在「文件」App 可见的 Documents 目录里，一键导入也能直接找到它。
+        UIActivityViewController *ac = [[UIActivityViewController alloc]
+            initWithActivityItems:@[[NSURL fileURLWithPath:path]] applicationActivities:nil];
+        if (ac.popoverPresentationController) {   // iPad 兜底
+            ac.popoverPresentationController.sourceView = self.view;
+            ac.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width/2.0f, 60, 1, 1);
+        }
+        [self presentViewController:ac animated:YES completion:nil];
     } @catch (NSException *e) { [self fuAlert:@"备份失败" msg:e.description]; }
 }
+// v1.4.1：把一份备份字典写回 cfprefsd + 磁盘镜像并即时生效（一键导入 与 文件选择器 共用）
+// 实现在文件末尾 fuApplyRestore:name:
 - (void)doRestore {
     @try {
         NSFileManager *fm = [NSFileManager defaultManager];
@@ -1823,8 +1847,9 @@ static NSString *FUBackupDir(void) { return @"/var/mobile/Documents"; }
             if (!best || [f compare:best options:NSNumericSearch] == NSOrderedDescending) best = f;
         }
         if (!best) {
-            [self fuAlert:@"没有找到备份" msg:[NSString stringWithFormat:
-                @"「文件」目录里没有 *URL插件.plist 备份文件。\n请先用「一键备份」生成。"]];
+            // v1.4.1：Documents 里没有备份 → 打开「文件」App 选择器，用户可手动挑任意位置的备份
+            // （iCloud 盘 / 其他目录都行），不再只干巴巴报错。
+            [self fuPickBackupFile];
             return;
         }
         NSString *path = [FUBackupDir() stringByAppendingPathComponent:best];
@@ -1833,6 +1858,32 @@ static NSString *FUBackupDir(void) { return @"/var/mobile/Documents"; }
             ![dump[@"fuBackupMarker"] isKindOfClass:[NSString class]]) {
             [self fuAlert:@"备份文件无效" msg:best]; return;
         }
+        [self fuApplyRestore:dump name:best];
+    } @catch (NSException *e) { [self fuAlert:@"导入失败" msg:e.description]; }
+}
+// v1.4.1：弹出「文件」选择器（导入用）
+- (void)fuPickBackupFile {
+    UIDocumentPickerViewController *dp = [[UIDocumentPickerViewController alloc]
+        initWithDocumentTypes:@[@"com.apple.property-list", @"public.data"]
+        inMode:UIDocumentPickerModeImport];
+    dp.delegate = self;
+    dp.allowsMultipleSelection = NO;
+    [self presentViewController:dp animated:YES completion:nil];
+}
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentAtURL:(NSURL *)url {
+    @try {
+        BOOL acc = [url startAccessingSecurityScopedResource];
+        NSDictionary *dump = [NSDictionary dictionaryWithContentsOfURL:url];
+        if (acc) [url stopAccessingSecurityScopedResource];
+        if (![dump isKindOfClass:[NSDictionary class]] || dump.count < 2 ||
+            ![dump[@"fuBackupMarker"] isKindOfClass:[NSString class]]) {
+            [self fuAlert:@"备份文件无效" msg:url.lastPathComponent]; return;
+        }
+        [self fuApplyRestore:dump name:url.lastPathComponent];
+    } @catch (NSException *e) { [self fuAlert:@"导入失败" msg:e.description]; }
+}
+- (void)fuApplyRestore:(NSDictionary *)dump name:(NSString *)best {
+    @try {
         // ① 写回 cfprefsd（Preferences 框架与本页读取都走它）
         for (NSString *k in dump) {
             if ([k isEqualToString:@"fuBackupMarker"]) continue;
