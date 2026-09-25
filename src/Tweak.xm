@@ -2138,7 +2138,9 @@ static void fuDarwinCaptureNotify(CFNotificationCenterRef center, void *observer
         _draggingBall = NO;
         // 异步清旗标：松手那次触摸的 TouchUpInside 在本 runloop 触发时旗标还在，拦得住
         __weak typeof(self) wself = self;
-        dispatch_async(dispatch_get_main_queue(), ^{ wself->_draggingFanGroup = NO; });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            FUFloatingManager *ss = wself; if (ss) ss->_draggingFanGroup = NO;
+        });
         if (g.state == UIGestureRecognizerStateEnded) [self scheduleSnapAfterDrop];
         [self fuRefreshDeferredEdges];
         if (_fanOpen) [self fuScheduleFanAutoHide];
